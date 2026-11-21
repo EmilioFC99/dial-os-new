@@ -160,8 +160,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("firmware_zip", nargs="?", default=None, help="Optional path to V2.57 firmware ZIP")
     build_parser.add_argument(
         "--ui-binary",
-        default=str(BUILD_DIRECTORY / "m0_mq_ui"),
-        help="Path to compiled MIPS32r2 NAN2008 mq_ui binary (default: build/m0_mq_ui)",
+        default=str(BUILD_DIRECTORY / "mq_ui"),
+        help="Path to compiled MIPS32r2 NAN2008 mq_ui binary (default: build/mq_ui)",
     )
 
     subparsers.add_parser("flash", help="Flash built V2.57 NAND image over USB Mask-ROM")
@@ -170,8 +170,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     sd_update_parser = subparsers.add_parser("sd-update", help="Atomically deploy mq_ui to <volume>/.dial-os/mq_ui")
     sd_update_parser.add_argument(
         "--binary",
-        default=str(BUILD_DIRECTORY / "m0_mq_ui"),
-        help="Path to compiled MIPS32r2 NAN2008 binary (default: build/m0_mq_ui)",
+        default=str(BUILD_DIRECTORY / "mq_ui"),
+        help="Path to compiled MIPS32r2 NAN2008 binary (default: build/mq_ui)",
     )
     sd_update_parser.add_argument("--volume", default=None, help="Explicit /Volumes/<SD> path")
     sd_update_parser.add_argument(
