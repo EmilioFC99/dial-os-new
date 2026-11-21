@@ -1,0 +1,6 @@
+# Local proprietary FiiO stock firmware & extracted binaries (never commit)
+vendor/stock_v257/
+*.squashfs
+
+# macOS
+.DS_Store

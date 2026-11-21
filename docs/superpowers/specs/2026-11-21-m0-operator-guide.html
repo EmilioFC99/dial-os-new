@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DialOS M0 — Operator Guide &amp; Hardware Verification Walkthrough</title>
+<style>
+  :root {
+    --bg: #0e1014;
+    --surface: #171a21;
+    --surface-2: #1f242e;
+    --border: #2c3342;
+    --text: #e6ebf5;
+    --muted: #9aa5b8;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+    padding: 32px 20px 80px;
+  }
+  .container { max-width: 1040px; margin: 0 auto; }
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 24px;
+    margin-bottom: 32px;
+  }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .badge {
+    font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
+  }
+  .badge.green { border-color: rgba(63,185,80,.4); color: var(--green); background: rgba(63,185,80,.1); }
+  .badge.blue { border-color: rgba(88,166,255,.4); color: var(--accent); background: rgba(88,166,255,.1); }
+  .badge.amber { border-color: rgba(210,153,34,.4); color: var(--amber); background: rgba(210,153,34,.1); }
+  h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: -0.02em; }
+  h2 { margin: 40px 0 16px; font-size: 21px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  h3 { margin: 0 0 8px; font-size: 16px; color: var(--text); }
+  p { margin: 0 0 12px; color: var(--muted); }
+  strong { color: var(--text); }
+  code {
+    font-family: var(--mono); font-size: 0.88em;
+    background: var(--surface-2); padding: 2px 6px; border-radius: 5px; color: #c9d8ff;
+  }
+  pre {
+    font-family: var(--mono); font-size: 13px; line-height: 1.5;
+    background: #0a0c10; border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; color: #d6e2ff; margin: 12px 0;
+  }
+  .callout {
+    border-radius: 12px; padding: 16px 20px; margin: 18px 0;
+    border: 1px solid var(--border); background: var(--surface);
+  }
+  .callout.safety {
+    border-color: rgba(63,185,80,.45);
+    background: linear-gradient(135deg, rgba(63,185,80,.08), rgba(23,26,33,1));
+  }
+  .callout.warn {
+    border-color: rgba(210,153,34,.45);
+    background: linear-gradient(135deg, rgba(210,153,34,.08), rgba(23,26,33,1));
+  }
+  .callout-title { font-weight: 700; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .safety .callout-title { color: var(--green); }
+  .warn .callout-title { color: var(--amber); }
+  ul, ol { margin: 8px 0 12px 20px; color: var(--muted); padding: 0; }
+  li { margin-bottom: 6px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 18px 20px;
+  }
+  .stage-card {
+    display: grid; grid-template-columns: 230px 1fr; gap: 24px; align-items: center;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 20px; margin: 18px 0;
+  }
+  @media (max-width: 720px) {
+    .stage-card { grid-template-columns: 1fr; justify-items: center; }
+  }
+  .disc-wrap { text-align: center; }
+  .disc-caption { font-size: 12px; color: var(--muted); margin-top: 8px; font-family: var(--mono); }
+  .pill {
+    display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; padding: 2px 8px; border-radius: 6px; margin-bottom: 8px;
+  }
+  .pill.pass { background: rgba(63,185,80,.15); color: var(--green); }
+  .pill.step { background: rgba(88,166,255,.15); color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th, td {
+    text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { color: var(--text); background: var(--surface-2); font-weight: 600; }
+  td { color: var(--muted); }
+  .checklist { list-style: none; margin-left: 0; }
+  .checklist li::before { content: "☐ "; color: var(--accent); font-weight: 700; margin-right: 6px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <div class="badge-row">
+    <span class="badge blue">Milestone M0</span>
+    <span class="badge green">Wired Headphones Only (No BT)</span>
+    <span class="badge green">SD-Card Safe</span>
+    <span class="badge amber">No Wi-Fi / No SSH / No diskOS</span>
+  </div>
+  <h1>DialOS M0 — Operator Transparency &amp; Hardware Verification Guide</h1>
+  <p>Exact walkthrough of every command you will run on your Mac, every file touched on your microSD card, and every screen you will see on your <strong>FiiO Snowsky Disc (V2.57)</strong> during M0.</p>
+</header>
+
+<!-- SAFETY GUARANTEES -->
+<div class="callout safety">
+  <div class="callout-title">SD-Card Non-Destruction &amp; Recovery Guarantees</div>
+  <ul>
+    <li><strong>No USB re-flash needed for M0:</strong> Your Disc already has the microSD hot-reload hook. Deploying M0 only copies one binary to <code>&lt;SDCARD&gt;/.dial-os/mq_ui</code>.</li>
+    <li><strong>Music files are strictly read-only:</strong> <code>./dialos-mac sd-update</code> writes atomically to <code>.dial-os/mq_ui</code> (temp file + <code>fsync</code> + rename) and never deletes, formats, or modifies any other file or folder.</li>
+    <li><strong>Stock <code>rm -rf %s</code> bug neutralized:</strong> Whenever <code>./dialos-mac build</code> repacks a V2.57 NAND image, it automatically patches <code>mq_player</code>'s dangerous <code>mount_sdcard()</code> <code>rm -rf %s</code> string to <code>rmdir  %s</code> and fails the build if the patch is not verified.</li>
+    <li><strong>On-device power-off safety:</strong> The M0 spike sends <code>0664=0</code> on boot so <code>mq_player</code> can never trigger an unsynced <code>poweroff -f</code> while logs are open, and calls <code>fsync()</code> after every stage.</li>
+    <li><strong>5-second instant escape back to stock FiiO UI:</strong> Run <code>./dialos-mac use-stock</code> (creates empty <code>&lt;SDCARD&gt;/.dial-os/use_stock</code>) and reboot. Your Disc boots stock <code>/usr/bin/mq_ui.stock</code> immediately.</li>
+  </ul>
+</div>
+
+<!-- PHASE 1: MAC PREP -->
+<h2>1. What You Do on Your Mac (Build &amp; Deploy — ~10 Seconds)</h2>
+
+<div class="grid-2">
+  <div class="card">
+    <span class="pill step">Step A — Verify &amp; Build</span>
+    <h3>Run Mac tests &amp; cross-compile M0 spike</h3>
+    <pre>make test-tools
+./dialos-mac doctor
+make m0-spike</pre>
+    <p><strong>What you will see:</strong></p>
+    <ul>
+      <li><code>test-tools</code> passes all Python unit tests (DGSB plan, OpenSSL decrypt, ELF <code>EF_MIPS_NAN2008</code> patch, <code>mq_player</code> <code>rmdir</code> safety check, atomic SD deploy).</li>
+      <li><code>doctor</code> confirms <code>zig</code>, all 5 vendor binaries, <code>vendor/stock_v257/rootfs.squashfs</code>, and your mounted microSD card.</li>
+      <li><code>make m0-spike</code> builds <code>build/m0_mq_ui</code> for MIPS32r2 FP64A NAN2008.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <span class="pill step">Step B — Stage 2 Test Tracks + Binary</span>
+    <h3>Copy binary to microSD (Zero music touched)</h3>
+    <pre>./dialos-mac sd-update --binary build/m0_mq_ui</pre>
+    <p><strong>Test audio tracks:</strong> Your real <code>24/48</code> FLAC tracks work great! Put 2 tracks in <code>&lt;SDCARD&gt;/.dial-os/m0_test/</code> (or skip this and the spike safely picks the first 2 audio files already on your card, read-only). We can also optionally generate a 20 s synthetic <code>24/192</code> FLAC tone on Mac if you want peak-load stress testing.</p>
+    <p><strong>Exact files created on SD:</strong></p>
+    <ul>
+      <li><code>&lt;SDCARD&gt;/.dial-os/mq_ui</code> (only file written by Mac)</li>
+    </ul>
+  </div>
+</div>
+
+<div class="callout warn">
+  <div class="callout-title">Physical Setup Before Powering On</div>
+  <ul class="checklist">
+    <li>Eject the microSD card safely from macOS and insert it into the Snowsky Disc.</li>
+    <li>Plug in your <strong>wired headphones</strong> (Bluetooth stays OFF for all of M0).</li>
+    <li>Power on the Disc. The hot-reload hook stages <code>.dial-os/mq_ui</code> and launches the M0 Runner.</li>
+  </ul>
+</div>
+
+<!-- CONTROLS -->
+<h2>2. Controls on the Snowsky Disc</h2>
+<table>
+  <thead>
+    <tr><th>Input</th><th>Who Handles It</th><th>What It Does</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Touch <code>RUN</code> (bottom-left)</strong></td>
+      <td>M0 Spike</td>
+      <td>Starts (or re-runs) the current benchmark stage.</td>
+    </tr>
+    <tr>
+      <td><strong>Touch <code>NEXT</code> (bottom-right)</strong></td>
+      <td>M0 Spike</td>
+      <td>Advances to the next stage (after Stage 5, flushes <code>sync()</code> and shows <code>DONE</code>).</td>
+    </tr>
+    <tr>
+      <td><strong>Play/Pause Short Press (<code>250</code>)</strong></td>
+      <td><code>mq_player</code> (native)</td>
+      <td>Toggles wired audio play/pause directly so you can confirm music is playing.</td>
+    </tr>
+    <tr>
+      <td><strong>Vol Up / Vol Down (<code>251</code> / <code>252</code>)</strong></td>
+      <td><code>mq_player</code> (native)</td>
+      <td>Adjusts wired headphone volume to a comfortable listening level.</td>
+    </tr>
+    <tr>
+      <td><strong>Play/Pause Long Press ≥ 1 s (<code>268</code>)</strong></td>
+      <td>M0 Spike (backup)</td>
+      <td>Triggers <code>RUN</code> (when idle) or <code>NEXT</code> (when stage finished) without needing touch.</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- THE 5 STAGES WITH ROUND DISC MOCKUPS -->
+<h2>3. Exact Screens You Will See on the Disc (5 Stages)</h2>
+<p>Each stage runs on the <code>360×360</code> round screen, automatically saves its numbers to <code>/tmp/sdcard/.dial-os/m0_report.txt</code> and raw IPC frames to <code>/tmp/sdcard/.dial-os/m0_ipc_trace.log</code>, and calls <code>fsync()</code> before turning green.</p>
+
+<!-- STAGE 1 -->
+<div class="stage-card">
+  <div class="disc-wrap">
+    <svg width="210" height="210" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg">
+      <defs><clipPath id="c1"><circle cx="180" cy="180" r="174"/></clipPath></defs>
+      <circle cx="180" cy="180" r="178" fill="#050608" stroke="#3b4458" stroke-width="4"/>
+      <g clip-path="url(#c1)">
+        <rect width="360" height="360" fill="#0d1117"/>
+        <!-- Rotating test disc -->
+        <circle cx="180" cy="180" r="102" fill="#1b263b" stroke="#58a6ff" stroke-width="3"/>
+        <path d="M180,180 L180,78 A102,102 0 0,1 282,180 Z" fill="#2b59c3" opacity="0.85"/>
+        <path d="M180,180 L180,282 A102,102 0 0,1 78,180 Z" fill="#3fb950" opacity="0.75"/>
+        <circle cx="180" cy="180" r="22" fill="#0d1117" stroke="#e6ebf5" stroke-width="2"/>
+        <!-- Moving vertical tear bar -->
+        <rect x="228" y="65" width="8" height="225" fill="#f85149" opacity="0.9"/>
+        <!-- Header -->
+        <rect x="0" y="0" width="360" height="62" fill="#161b22" opacity="0.92"/>
+        <text x="180" y="34" fill="#58a6ff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">M0 1/5: ROTATION</text>
+        <text x="180" y="54" fill="#3fb950" font-family="monospace" font-size="13" text-anchor="middle">PLAY 00:42 | 38.4 FPS</text>
+        <!-- Bottom Buttons -->
+        <rect x="52" y="286" width="118" height="46" rx="10" fill="#238636"/>
+        <text x="111" y="315" fill="#fff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">RUN</text>
+        <rect x="190" y="286" width="118" height="46" rx="10" fill="#1f6feb"/>
+        <text x="249" y="315" fill="#fff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">NEXT</text>
+      </g>
+    </svg>
+    <div class="disc-caption">Stage 1: 360x360 Disc + Tear Bar</div>
+  </div>
+  <div>
+    <span class="pill step">Stage 1 of 5</span>
+    <h3>360×360 Fixed-Point Rotation &amp; Tearing</h3>
+    <p><strong>What you do:</strong> Confirm your wired <code>24/192</code> FLAC track is playing in your headphones (tap Play if paused), then tap <code>RUN</code>. Watch the red vertical bar sweep across the spinning disc for 10 seconds (5 s single-page direct blit, then 5 s triple-buffer <code>FBIOPAN_DISPLAY</code>).</p>
+    <p><strong>What to watch/listen for:</strong> Does the red bar split horizontally (tearing) in either mode? Do you hear any crackle or audio drop in your headphones?</p>
+    <p><strong>Pass gate:</strong> <code>&gt;= 30 fps</code> with zero audio stutters. If <code>&lt; 30 fps</code>, M3b uses static cover art + rotating progress ring.</p>
+  </div>
+</div>
+
+<!-- STAGE 2 -->
+<div class="stage-card">
+  <div class="disc-wrap">
+    <svg width="210" height="210" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg">
+      <defs><clipPath id="c2"><circle cx="180" cy="180" r="174"/></clipPath></defs>
+      <circle cx="180" cy="180" r="178" fill="#050608" stroke="#3b4458" stroke-width="4"/>
+      <g clip-path="url(#c2)">
+        <rect width="360" height="360" fill="#0d1117"/>
+        <!-- Rim band guide -->
+        <circle cx="180" cy="180" r="162" fill="none" stroke="#d29922" stroke-width="20" stroke-dasharray="10 8" opacity="0.4"/>
+        <!-- Live touch trail -->
+        <path d="M292,72 A158,158 0 0,1 328,230" fill="none" stroke="#3fb950" stroke-width="8" stroke-linecap="round"/>
+        <circle cx="328" cy="230" r="12" fill="#3fb950"/>
+        <!-- Center readout -->
+        <text x="180" y="150" fill="#e6ebf5" font-family="monospace" font-size="22" font-weight="700" text-anchor="middle">TRACE RIM</text>
+        <text x="180" y="182" fill="#3fb950" font-family="monospace" font-size="24" font-weight="700" text-anchor="middle">78.2 Hz</text>
+        <text x="180" y="210" fill="#9aa5b8" font-family="monospace" font-size="14" text-anchor="middle">MAX GAP: 16 ms</text>
+        <text x="180" y="234" fill="#d29922" font-family="monospace" font-size="14" text-anchor="middle">TIME LEFT: 6 s</text>
+        <!-- Header -->
+        <rect x="0" y="0" width="360" height="62" fill="#161b22" opacity="0.92"/>
+        <text x="180" y="34" fill="#58a6ff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">M0 2/5: RIM TOUCH</text>
+        <text x="180" y="54" fill="#9aa5b8" font-family="monospace" font-size="13" text-anchor="middle">BUTTONS LOCKED (10s)</text>
+        <!-- Bottom notice instead of buttons during 10s capture -->
+        <text x="180" y="308" fill="#9aa5b8" font-family="monospace" font-size="13" text-anchor="middle">360° RIM FREE — NO ACCIDENTAL TAPS</text>
+      </g>
+    </svg>
+    <div class="disc-caption">Stage 2: Buttons Hidden While Tracing</div>
+  </div>
+  <div>
+    <span class="pill step">Stage 2 of 5</span>
+    <h3><code>cst816t</code> Rim Touch Sample Rate</h3>
+    <p><strong>What you do:</strong> Tap <code>RUN</code>, then trace your thumb continuously around the full dashed amber outer rim ring for 10 seconds. <strong>Both <code>RUN</code> and <code>NEXT</code> disappear and are completely ignored during the 10-second countdown</strong> so your finger can sweep all the way around the bottom rim without accidentally pressing anything. When the timer hits <code>0 s</code>, the Result Summary appears and the buttons return.</p>
+    <p><strong>On-screen numbers &amp; pass gate:</strong> <code>SAMPLES</code>, <code>HZ</code> (target <code>&gt;= 60 Hz</code>), <code>MAX GAP ms</code> (target <code>&lt;= 50 ms</code>), <code>DROPOUTS</code>, and <code>MIN/MAX (x, y)</code>.</p>
+  </div>
+</div>
+
+<!-- STAGE 3 -->
+<div class="stage-card">
+  <div class="disc-wrap">
+    <svg width="210" height="210" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg">
+      <defs><clipPath id="c3"><circle cx="180" cy="180" r="174"/></clipPath></defs>
+      <circle cx="180" cy="180" r="178" fill="#050608" stroke="#3b4458" stroke-width="4"/>
+      <g clip-path="url(#c3)">
+        <rect width="360" height="360" fill="#0d1117"/>
+        <rect x="0" y="0" width="360" height="62" fill="#161b22"/>
+        <text x="180" y="34" fill="#58a6ff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">M0 3/5: HANDOFF</text>
+        <text x="180" y="54" fill="#3fb950" font-family="monospace" font-size="13" text-anchor="middle">SLICE A -&gt; SLICE B</text>
+        <text x="48" y="115" fill="#e6ebf5" font-family="monospace" font-size="14">1. 0602 M3U A: OK (142 ms)</text>
+        <text x="48" y="145" fill="#e6ebf5" font-family="monospace" font-size="14">2. 0602 M3U B: OK (138 ms)</text>
+        <text x="48" y="175" fill="#d29922" font-family="monospace" font-size="14">3. Rapid &lt;2s : LOGGED</text>
+        <text x="48" y="205" fill="#3fb950" font-family="monospace" font-size="14">4. song.db leak: NONE</text>
+        <text x="180" y="250" fill="#3fb950" font-family="monospace" font-size="15" font-weight="700" text-anchor="middle">SAVED TO m0_report.txt</text>
+        <rect x="52" y="286" width="118" height="46" rx="10" fill="#238636"/>
+        <text x="111" y="315" fill="#fff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">RUN</text>
+        <rect x="190" y="286" width="118" height="46" rx="10" fill="#1f6feb"/>
+        <text x="249" y="315" fill="#fff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">NEXT</text>
+      </g>
+    </svg>
+    <div class="disc-caption">Stage 3: Automated Track Handoffs</div>
+  </div>
+  <div>
+    <span class="pill step">Stage 3 of 5</span>
+    <h3>Rolling-Slice Playback Handoff</h3>
+    <p><strong>What you do:</strong> Tap <code>RUN</code> and listen for ~15 seconds. The spike automatically switches between your two test tracks using alternating <code>0602</code> M3U files (<code>A</code>/<code>B</code>) and probes <code>CUSTOM_PLAYLIST</code> / folder handoff.</p>
+    <p><strong>What it logs:</strong> Switch latency from TX to first advancing <code>a103</code> position tick, any rate-limit drops, and whether <code>mq_player</code> ever falls back to stock <code>song.db</code>.</p>
+    <p><strong>Decision:</strong> Proves rolling-slice handoff or triggers <strong>Plan B</strong> (pass full active album/playlist/folder, slice <code>All songs</code> only above threshold).</p>
+  </div>
+</div>
+
+<!-- STAGE 4 -->
+<div class="stage-card">
+  <div class="disc-wrap">
+    <svg width="210" height="210" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg">
+      <defs><clipPath id="c4"><circle cx="180" cy="180" r="174"/></clipPath></defs>
+      <circle cx="180" cy="180" r="178" fill="#050608" stroke="#3b4458" stroke-width="4"/>
+      <g clip-path="url(#c4)">
+        <rect width="360" height="360" fill="#0d1117"/>
+        <rect x="0" y="0" width="360" height="62" fill="#161b22"/>
+        <text x="180" y="34" fill="#58a6ff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">M0 4/5: EQ PROBE</text>
+        <text x="180" y="54" fill="#9aa5b8" font-family="monospace" font-size="13" text-anchor="middle">V2.57 PRESET / GEQ / PEQ</text>
+        <text x="48" y="120" fill="#3fb950" font-family="monospace" font-size="14">0508 Preset  : ACK</text>
+        <text x="48" y="152" fill="#3fb950" font-family="monospace" font-size="14">filterType=0 : ACK</text>
+        <text x="48" y="184" fill="#d29922" font-family="monospace" font-size="14">PEQ write    : LOGGED</text>
+        <text x="48" y="216" fill="#9aa5b8" font-family="monospace" font-size="14">Restored EQ  : OFF</text>
+        <rect x="52" y="286" width="118" height="46" rx="10" fill="#238636"/>
+        <text x="111" y="315" fill="#fff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">RUN</text>
+        <rect x="190" y="286" width="118" height="46" rx="10" fill="#1f6feb"/>
+        <text x="249" y="315" fill="#fff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">NEXT</text>
+      </g>
+    </svg>
+    <div class="disc-caption">Stage 4: V2.57 EQ/PEQ Write Test</div>
+  </div>
+  <div>
+    <span class="pill step">Stage 4 of 5</span>
+    <h3>V2.57 EQ / PEQ Acceptance Probe</h3>
+    <p><strong>What you do:</strong> Tap <code>RUN</code> and listen for ~10 seconds. The spike sends a fixed EQ preset (<code>0508</code>), a graphic EQ frame (<code>filterType: 0</code>), and a custom PEQ probe, then restores EQ to flat/OFF.</p>
+    <p><strong>What it logs:</strong> Every exact `/ui` reply frame so we know with certainty whether V2.57 accepts or ignores PEQ writes.</p>
+  </div>
+</div>
+
+<!-- STAGE 5 -->
+<div class="stage-card">
+  <div class="disc-wrap">
+    <svg width="210" height="210" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg">
+      <defs><clipPath id="c5"><circle cx="180" cy="180" r="174"/></clipPath></defs>
+      <circle cx="180" cy="180" r="178" fill="#050608" stroke="#3b4458" stroke-width="4"/>
+      <g clip-path="url(#c5)">
+        <rect width="360" height="360" fill="#0d1117"/>
+        <rect x="0" y="0" width="360" height="62" fill="#161b22"/>
+        <text x="180" y="34" fill="#58a6ff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">M0 5/5: IPC TRACE</text>
+        <text x="180" y="54" fill="#3fb950" font-family="monospace" font-size="13" text-anchor="middle">Q14 / Q17 / Q18 CAPTURE</text>
+        <text x="48" y="115" fill="#3fb950" font-family="monospace" font-size="14">Play / Pause : OK</text>
+        <text x="48" y="145" fill="#3fb950" font-family="monospace" font-size="14">Seek 95%     : OK</text>
+        <text x="48" y="175" fill="#3fb950" font-family="monospace" font-size="14">Seek 98%     : OK</text>
+        <text x="48" y="205" fill="#3fb950" font-family="monospace" font-size="14">Natural EOF  : CAPTURED</text>
+        <text x="180" y="248" fill="#3fb950" font-family="monospace" font-size="16" font-weight="700" text-anchor="middle">ALL 5 STAGES SYNCED!</text>
+        <rect x="52" y="286" width="118" height="46" rx="10" fill="#238636"/>
+        <text x="111" y="315" fill="#fff" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">RUN</text>
+        <rect x="190" y="286" width="118" height="46" rx="10" fill="#3fb950"/>
+        <text x="249" y="315" fill="#0d1117" font-family="monospace" font-size="18" font-weight="700" text-anchor="middle">DONE</text>
+      </g>
+    </svg>
+    <div class="disc-caption">Stage 5: Golden Trace + Final Sync</div>
+  </div>
+  <div>
+    <span class="pill step">Stage 5 of 5</span>
+    <h3>Golden V2.57 IPC Trace (<code>Q14</code> / <code>Q17</code> / <code>Q18</code>)</h3>
+    <p><strong>What you do:</strong> Tap <code>RUN</code> and wait ~20 seconds while the spike plays a track, pauses/resumes, seeks to <code>95%</code>, seeks to <code>98%</code>, and lets the track finish naturally to EOF. When <code>ALL 5 STAGES SYNCED!</code> appears, tap <code>DONE</code>, then power off the Disc.</p>
+    <p><strong>What it logs:</strong> Every timestamped raw <code>/player</code> TX and <code>/ui</code> RX frame in <code>/tmp/sdcard/.dial-os/m0_ipc_trace.log</code> — the exact golden replay fixture for the M1 Mac simulator.</p>
+  </div>
+</div>
+
+<!-- METRICS SUMMARY TABLE -->
+<h2>4. On-Screen Success Messages &amp; Exact Metrics Captured</h2>
+<p>After <strong>every stage</strong> finishes, the Disc immediately displays a <strong>Result Summary screen</strong> (<code>PASS</code> in green, <code>FAIL</code> in red, or <code>LOGGED</code> in amber + <code>SAVED TO SD</code> after <code>fsync()</code>) showing these exact numbers before you tap <code>NEXT</code>:</p>
+<table>
+  <thead>
+    <tr><th>Stage</th><th>Metrics Shown on Disc &amp; Saved to <code>m0_report.txt</code></th><th>What We Are Looking For (Pass Target)</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>1. Rotation &amp; Tearing</strong></td>
+      <td>Direct blit: <code>avg fps</code>, <code>min fps</code>, <code>p99 ms</code><br>Triple-buffer pan: <code>avg fps</code>, <code>min fps</code>, <code>p99 ms</code><br>ALSA xrun delta (if readable)</td>
+      <td><code>&gt;= 30.0 fps</code> avg, <code>p99 &lt;= 33 ms</code>, zero audible stutters, note which mode eliminates vertical bar tearing.</td>
+    </tr>
+    <tr>
+      <td><strong>2. Rim Touch Rate</strong></td>
+      <td><code>samples</code>, <code>effective Hz</code>, <code>max gap ms</code>, <code>dropouts &gt;50ms</code>, <code>x/y min..max</code></td>
+      <td><code>&gt;= 60.0 Hz</code> continuous, <code>0</code> unexplained dropouts, full outer-rim reachability.</td>
+    </tr>
+    <tr>
+      <td><strong>3. Rolling-Slice Handoff</strong></td>
+      <td><code>A-&gt;B latency ms</code>, natural multi-track EOF advance (<code>OK/STOP</code>), rapid <code>&lt;2s</code> switch (<code>OK/DROP</code>), <code>song.db</code> leak check</td>
+      <td>Clean handoff (<code>&lt; 500 ms</code>, no freeze, no fallback to stock <code>song.db</code>) or trigger Plan B.</td>
+    </tr>
+    <tr>
+      <td><strong>4. V2.57 EQ/PEQ Probe</strong></td>
+      <td>Exact <code>/ui</code> reply for <code>0508</code> preset, <code>filterType=0</code> graphic EQ, and custom PEQ probe</td>
+      <td>Ground-truth confirmation of which EQ modes V2.57 <code>mq_player</code> accepts vs. ignores.</td>
+    </tr>
+    <tr>
+      <td><strong>5. Golden IPC Trace</strong></td>
+      <td><code>TX count</code>, <code>RX count</code>, <code>95% seek</code>, <code>98% seek</code>, natural EOF captured (<code>YES/NO</code>) + <code>ALL 5 STAGES SYNCED</code></td>
+      <td>Complete raw timestamped trace in <code>m0_ipc_trace.log</code> for the M1 Mac simulator.</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- PHASE 5: COLLECT RESULTS -->
+<h2>5. Collecting Results Back on Your Mac</h2>
+<div class="card">
+  <span class="pill pass">Final Step — Read Results</span>
+  <h3>Pop the microSD card into your Mac</h3>
+  <p>You will find two plain-text files inside <code>&lt;SDCARD&gt;/.dial-os/</code> (nothing else touched):</p>
+  <pre>cat /Volumes/&lt;SDCARD&gt;/.dial-os/m0_report.txt
+head -n 40 /Volumes/&lt;SDCARD&gt;/.dial-os/m0_ipc_trace.log</pre>
+  <p>Share those two files back in our session — we will record the real numbers and fallback decisions into the repo, closing <strong>M0</strong> and unlocking <strong>M1</strong>. Whenever you want your normal stock FiiO UI back in the meantime, run <code>./dialos-mac use-stock</code>.</p>
+</div>
+
+</div>
+</body>
+</html>
