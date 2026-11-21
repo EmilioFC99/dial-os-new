@@ -7,9 +7,10 @@
 ## Guardrails (Apply to Every Milestone)
 
 - **Host & Target:** Apple Silicon macOS development only (`zig cc` targeting `mipsel-linux-musl`); FiiO Snowsky Disc stock firmware `V2.57` only; GPL-3.0-or-later.
-- **Clean Architecture & Strict Reuse Rule:** Direct custom `360x360` XRGB8888 2D software renderer (no LVGL, no `fb_pan.c`), strict HAL boundaries, and **zero `diskOS` or `../dial-os` spaghetti copied into `src/` or `tools/`**:
-  - *Hardware blobs reused only where unavoidable:* The verified Ingenic X2000 Mask-ROM hardware blobs (`disc_spl_lpddr3.bin`, `my_write6_dram.bin`) and `usbboot` USB transport in `vendor/`, plus (optionally) an isolated out-of-process cover decoder helper.
-  - *Written clean & unit-tested from scratch:* The macOS flasher / microSD updater CLI and all runtime C modules (`ipc`, `playstate`, `power`, `sdio`, watchdog/crash logging, `library.db`, renderer, gestures, UI) are built fresh using `diskOS` and `../dial-os` strictly as reference checklists for V2.57 hardware invariants (`Q01–Q18`, `buttons.md`, `fstat` queue recovery, `0664=0` + `sync`, BT pre-stop, `0649` gain).
+- **Clean Architecture & First-Principles V2.57 Rule (see `AGENTS.md`):** Direct custom `360x360` XRGB8888 2D software renderer (no LVGL), strict HAL boundaries, and **zero `diskOS` or `../dial-os` documentation or source code used**:
+  - *Flashing tooling exception only:* Reuse only the 5 verified USB Mask-ROM / SquashFS host binaries (`usbboot`, `disc_spl_lpddr3.bin`, `my_write6_dram.bin`, `mksquashfs`, `unsquashfs`) behind our clean-room, TDD-tested `dial-os-mac` CLI.
+  - *First-principles understanding:* Before building any new subsystem, inspect the actual stock `V2.57` binaries in `vendor/stock_v257/` (`mq_player`, `mq_ui`, `rootfs.squashfs`) and verify directly on real Disc hardware. Do not blindly imitate stock `mq_ui`, `diskOS`, or `../dial-os` — build cleaner, faster, more reliable designs whenever we can.
+  - *Internals & wired audio first:* Stabilize core playback, display, touch, and library over wired headphones first; Bluetooth stays at the end (`M6b`). No `diskOS`, no Wi-Fi/SSH dev loop.
 - **No Theme Leakage:** Zero theme names in file names, identifiers, or logic. Themes are **Dark Mode** and **Light Mode** driven by semantic tokens (visual identity designed fresh in M2).
 - **Unbounded Library:** No track/album/artist/playlist/favorite caps. Memory is bounded by the screen (`64 MB` RAM budget), never by library size.
 - **Hardware-Verified Only:** Every setting, gesture, and playback behavior must pass on the real Disc before a milestone closes.
@@ -22,8 +23,8 @@
 *Goal: Build a clean, tested macOS flash/SD-update CLI and prove the physical limits on real V2.57 hardware before writing product code.*
 - Rewrite the macOS flasher & microSD updater CLI cleanly from scratch (unit-tested with dry-run / mocked USB & SquashFS) wrapping only the verified X2000 Mask-ROM blobs (`disc_spl_lpddr3.bin`, `my_write6_dram.bin`, `usbboot`): supports `flash`, `sd-update`, and `restore-stock`, patches V2.57 `vendor/stock_v257/rootfs.squashfs` with the 10-second microSD hot-reload hook (`/tmp/sdcard/.dial-os/mq_ui` + `.dial-os/use_stock` escape hatch, preserving `/usr/bin/mq_ui.stock`) — **no `diskOS` flash required**.
 - Stand up `zig cc` (`mipsel-linux-musl`) cross-compilation + microSD hot-reload deploy.
-- Benchmark on real hardware under active `mq_player` playback (`24/192` FLAC + EQ + BT):
-  - `360x360` fixed-point 2D rotation fps (`>=30 fps` gate; **Fallback:** static cover art + rotating progress ring) and `FBIOPAN_DISPLAY` tearing.
+- Benchmark on real hardware under active wired `mq_player` playback (FLAC + EQ over wired headphones; BT deferred to `M6b`):
+  - `360x360` fixed-point 2D rotation fps (`>=60 fps` gate; **Fallback:** static cover art + rotating progress ring) and `FBIOPAN_DISPLAY` tearing.
   - `cst816t` rim touch sample rate (`>=60 Hz` continuous without dropouts).
   - Rolling-slice playback handoff (`CUSTOM_PLAYLIST` / `comm_folder_play_control`) — **Fallback (Plan B):** if rolling slices stutter or break gapless/shuffle at slice boundaries, pass the full active album/playlist/folder to `mq_player` and slice `All songs` only above a safe track threshold.
   - V2.57 EQ/PEQ write behavior (`filterType` acceptance).
@@ -58,7 +59,7 @@
 ### M3b — Now Playing Visuals, Cover Art & Lyrics
 *Goal: Deliver the centerpiece screen on top of the proven playback engine.*
 - Build full `Now Playing` visuals: spinning vinyl (or M0 fallback ring), center progress ring & scrub (timestamp rendered above thumb), volume HUD, translucent Quick Actions (frozen spin + `90x90` cached blur), Track Details sheet, Lyrics (embedded + `.lrc`), isolated out-of-process cover decoding (`32 MiB` heap / `8 MiB` file / `4096 px` caps) + byte-capped art cache, and Not Playing state.
-- **Exit Gate:** Unit tests (lyrics, art cache eviction, time-based angle) + simulator screenshot tests + on-device verification (`>=30 fps`, RAM under `64 MB` budget, zero regressions on M3a playback reliability).
+- **Exit Gate:** Unit tests (lyrics, art cache eviction, time-based angle) + simulator screenshot tests + on-device verification (`>=60 fps`, RAM under `64 MB` budget, zero regressions on M3a playback reliability).
 
 ### M4a — Library Core, Scanner & Basic Playback (2 TB / Unbounded Scale)
 *Goal: Index and play massive libraries with constant screen-bounded RAM.*

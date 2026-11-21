@@ -1,10 +1,10 @@
-# M0 Hardware Access, Clean `dialos-mac` Rewrite & Feasibility Spikes Implementation Plan
+# M0 Hardware Access, Clean `dial-os-mac` Rewrite & Feasibility Spikes Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver a clean-room, TDD-tested `dialos-mac` macOS CLI, `zig cc` MIPS32r2 cross-compilation target, and an interactive 5-stage on-device M0 hardware feasibility spike binary (`build/m0_mq_ui`) ready for microSD hot-reload verification on the FiiO Snowsky Disc (`V2.57`).
+**Goal:** Deliver a clean-room, TDD-tested `dial-os-mac` macOS CLI, `zig cc` MIPS32r2 cross-compilation target, and an interactive 5-stage on-device M0 hardware feasibility spike binary (`build/m0_mq_ui`) ready for microSD hot-reload verification on the FiiO Snowsky Disc (`V2.57`).
 
-**Architecture:** Split M0 into two cleanly separated layers: (1) a stdlib-only Python package (`tools/dialos_mac/`) backed by `unittest` and reusing only the 5 proven vendor binaries in `tools/vendor/`, and (2) a self-contained throwaway C spike binary (`spike/m0_bench.c`, outside `src/`) cross-compiled via `zig cc` (`mipsel-linux-musleabihf` + `EF_MIPS_NAN2008`) that runs all 5 hardware benchmarks over wired headphones and `fsync`s results + raw IPC traces to `/tmp/sdcard/.dial-os/`.
+**Architecture:** Split M0 into two cleanly separated layers: (1) a stdlib-only Python package (`tools/dial_os_mac/`) backed by `unittest` and reusing only the 5 proven vendor binaries in `tools/vendor/`, and (2) a self-contained throwaway C spike binary (`spike/m0_bench.c`, outside `src/`) cross-compiled via `zig cc` (`mipsel-linux-musleabihf` + `EF_MIPS_NAN2008`) that runs all 5 hardware benchmarks over wired headphones and `fsync`s results + raw IPC traces to `/tmp/sdcard/.dial-os/`.
 
 **Tech Stack:** Python 3 (stdlib only, `unittest`), `zig cc` (`0.17.1`, `mipsel-linux-musleabihf`), GNU `make`, POSIX mqueues, Linux `/dev/fb0` & `evdev` (`event0`/`event1`), macOS `ioreg`/`hdiutil`/`openssl`/`caffeinate`.
 
@@ -14,15 +14,15 @@
 
 - **Host & Target:** Apple Silicon macOS only; FiiO Snowsky Disc stock firmware `V2.57` only; wired headphones only in M0 (no Bluetooth, no Wi-Fi, no SSH, no `diskOS`).
 - **Clean Naming & Zero Theme Leakage:** Follow global naming rules strictly — zero prohibited abbreviations (`cwd`, `dir`, `ctx`, `buf`, `src`, `dst`, `req`, `res`, `err`, `tmp`, single-letter loop variables), zero theme names in files/symbols/output.
-- **Zero Copied Source Code:** Use `../dial-os/docs/hardware/` and `../dial-os/macos/dialos_mac_installer.py` strictly as reference for V2.57 hardware/protocol constants; write all code fresh in `dial-os-new`. Copy only the 5 binary blobs into `tools/vendor/`.
+- **Zero Copied Source Code:** Use `../dial-os/docs/hardware/` and `../dial-os/macos/dial_os_mac_installer.py` strictly as reference for V2.57 hardware/protocol constants; write all code fresh in `dial-os-new`. Copy only the 5 binary blobs into `tools/vendor/`.
 - **Exact ABI & Flash Constants:**
   - `zig cc -target mipsel-linux-musleabihf -mcpu=mips32r2 -mfp64 -mno-odd-spreg -mnan=2008 -static -ffp-contract=off -O2 -s` + set `EF_MIPS_NAN2008` (`0x400`) at ELF offset `36` (`<I`).
   - `V2.57` stock rootfs: `80,596,992` bytes, SHA-256 `111e4dd7ee3d7ff91ba7e61181690be7ffd22bd1bbd13ad513f5f015ffb302ae`.
   - `NAND_IMAGE_SIZE = 100_663_296` bytes (`768 × 128 KiB`).
   - `my_write6_dram.bin` SHA-256: `a3c3aa63e0c48f501181d542d9fa0526d36ded81e2e767f0c044af876674ea84`.
   - Preserve exact 4-version base-gate digest table (`209`, `228`, `240`, `257`) inside the 272-byte DGSB plan.
-- **SD-Card Non-Destruction:** `dialos-mac build` must patch and verify `mq_player` `rm -rf %s\x00` → `rmdir  %s\x00`; `sd-update` writes atomically only to `<VOLUME>/.dial-os/mq_ui`; `spike/m0_bench.c` sends `0664000C0000`, reads audio strictly read-only, and `fsync`s after every stage.
-- **TDD Iron Law:** Write failing unit tests first for every Python module in `tools/dialos_mac/` (covering nominal, boundary, and negative/fallback cases).
+- **SD-Card Non-Destruction:** `dial-os-mac build` must patch and verify `mq_player` `rm -rf %s\x00` → `rmdir  %s\x00`; `sd-update` writes atomically only to `<VOLUME>/.dial-os/mq_ui`; `spike/m0_bench.c` sends `0664000C0000`, reads audio strictly read-only, and `fsync`s after every stage.
+- **TDD Iron Law:** Write failing unit tests first for every Python module in `tools/dial_os_mac/` (covering nominal, boundary, and negative/fallback cases).
 
 ## Review Focus
 
@@ -37,15 +37,15 @@
 ## File Map
 
 - `Makefile` — Targets `test-tools`, `m0-spike`, `clean`.
-- `dialos-mac` — Executable bash wrapper invoking `python3 tools/dialos_mac/cli.py "$@"`.
+- `dial-os-mac` — Executable bash wrapper invoking `python3 tools/dial_os_mac/cli.py "$@"`.
 - `tools/vendor/` — Copied proven binaries: `usbboot`, `disc_spl_lpddr3.bin`, `my_write6_dram.bin`, `mksquashfs`, `unsquashfs`.
-- `tools/dialos_mac/__init__.py` — Package marker.
-- `tools/dialos_mac/constants.py` — V2.57 paths, SHA-256 digests, DGSB 4-version catalogue, ELF/USB/NAND constants.
-- `tools/dialos_mac/elf.py` — `patch_mips_nan2008_flag()`, `verify_mips_nan2008_binary()`.
-- `tools/dialos_mac/firmware.py` — `decrypt_fiio_chunk()`, `patch_mq_player_rmdir_safety()`, `pad_squashfs_to_nand()`, `build_v257_nand_image()`.
-- `tools/dialos_mac/flasher.py` — `compute_catalogue_fingerprint()`, `build_dgsb_plan()`, `verify_usbboot_readback()`, `detect_maskrom_device_count()`, `flash_nand_image()`.
-- `tools/dialos_mac/sd_deploy.py` — `resolve_sdcard_volume()`, `deploy_ui_binary_to_sdcard()`, `set_stock_boot_mode()`.
-- `tools/dialos_mac/cli.py` — CLI entry point (`doctor`, `build`, `flash`, `restore-stock`, `sd-update`, `use-stock`, `use-dialos`).
+- `tools/dial_os_mac/__init__.py` — Package marker.
+- `tools/dial_os_mac/constants.py` — V2.57 paths, SHA-256 digests, DGSB 4-version catalogue, ELF/USB/NAND constants.
+- `tools/dial_os_mac/elf.py` — `patch_mips_nan2008_flag()`, `verify_mips_nan2008_binary()`.
+- `tools/dial_os_mac/firmware.py` — `decrypt_fiio_chunk()`, `patch_mq_player_rmdir_safety()`, `pad_squashfs_to_nand()`, `build_v257_nand_image()`.
+- `tools/dial_os_mac/flasher.py` — `compute_catalogue_fingerprint()`, `build_dgsb_plan()`, `verify_usbboot_readback()`, `detect_maskrom_device_count()`, `flash_nand_image()`.
+- `tools/dial_os_mac/sd_deploy.py` — `resolve_sdcard_volume()`, `deploy_ui_binary_to_sdcard()`, `set_stock_boot_mode()`.
+- `tools/dial_os_mac/cli.py` — CLI entry point (`doctor`, `build`, `flash`, `restore-stock`, `sd-update`, `use-stock`, `use-dialos`).
 - `tests/tools/test_elf.py`, `test_firmware.py`, `test_flasher.py`, `test_sd_deploy.py` — Unit tests (`python3 -m unittest`).
 - `spike/m0_bench.c` — Throwaway 5-stage interactive M0 hardware spike binary.
 
@@ -56,12 +56,12 @@
 **Files:**
 - Modify: `.gitignore`
 - Create: `Makefile`
-- Create: `dialos-mac`
-- Create: `tools/dialos_mac/__init__.py`
+- Create: `dial-os-mac`
+- Create: `tools/dial_os_mac/__init__.py`
 - Copy (binary blobs only): `tools/vendor/{usbboot,disc_spl_lpddr3.bin,my_write6_dram.bin,mksquashfs,unsquashfs}`
 
 **Interfaces:**
-- Produces: `make test-tools`, `make m0-spike`, `make clean`, executable `./dialos-mac` wrapper, and verified `tools/vendor/` binaries.
+- Produces: `make test-tools`, `make m0-spike`, `make clean`, executable `./dial-os-mac` wrapper, and verified `tools/vendor/` binaries.
 
 - [ ] **Step 1: Initialize git repo and update `.gitignore`**
 
@@ -75,18 +75,18 @@ shasum -a 256 tools/vendor/my_write6_dram.bin
 ```
 Expected: `a3c3aa63e0c48f501181d542d9fa0526d36ded81e2e767f0c044af876674ea84`.
 
-- [ ] **Step 3: Create `Makefile`, `dialos-mac`, and `tools/dialos_mac/__init__.py`**
+- [ ] **Step 3: Create `Makefile`, `dial-os-mac`, and `tools/dial_os_mac/__init__.py`**
 
 - `Makefile` defines:
   - `test-tools`: `python3 -m unittest discover -s tests/tools -p "test_*.py" -v`
-  - `m0-spike`: creates `build/`, runs `zig cc -target mipsel-linux-musleabihf -mcpu=mips32r2 -mfp64 -mno-odd-spreg -mnan=2008 -static -ffp-contract=off -O2 -s -std=c11 -Wall -Wextra -Werror spike/m0_bench.c -o build/m0_mq_ui -lm`, then patches & verifies `EF_MIPS_NAN2008` via `python3 -m tools.dialos_mac.elf build/m0_mq_ui`.
+  - `m0-spike`: creates `build/`, runs `zig cc -target mipsel-linux-musleabihf -mcpu=mips32r2 -mfp64 -mno-odd-spreg -mnan=2008 -static -ffp-contract=off -O2 -s -std=c11 -Wall -Wextra -Werror spike/m0_bench.c -o build/m0_mq_ui -lm`, then patches & verifies `EF_MIPS_NAN2008` via `python3 -m tools.dial_os_mac.elf build/m0_mq_ui`.
   - `clean`: removes `build/`.
-- `dialos-mac` (`chmod +x`): bash wrapper invoking `exec /usr/bin/python3 -m tools.dialos_mac.cli "$@"` with `PYTHONPATH` set to repo root.
+- `dial-os-mac` (`chmod +x`): bash wrapper invoking `exec /usr/bin/python3 -m tools.dial_os_mac.cli "$@"` with `PYTHONPATH` set to repo root.
 
 - [ ] **Step 4: Commit initial repo baseline & scaffold**
 
 ```bash
-git add .gitignore ROADMAP.md docs/ Makefile dialos-mac tools/
+git add .gitignore ROADMAP.md docs/ Makefile dial-os-mac tools/
 git commit -m "chore: initialize repository with M0 specs, vendor binaries, and build scaffold"
 ```
 
@@ -95,8 +95,8 @@ git commit -m "chore: initialize repository with M0 specs, vendor binaries, and 
 ### Task 2: Constants & MIPS32r2 ELF `EF_MIPS_NAN2008` Patcher/Verifier
 
 **Files:**
-- Create: `tools/dialos_mac/constants.py`
-- Create: `tools/dialos_mac/elf.py`
+- Create: `tools/dial_os_mac/constants.py`
+- Create: `tools/dial_os_mac/elf.py`
 - Test: `tests/tools/test_elf.py`
 
 **Interfaces:**
@@ -105,7 +105,7 @@ git commit -m "chore: initialize repository with M0 specs, vendor binaries, and 
   - `elf.py`:
     - `patch_mips_nan2008_flag(binary_path: Path) -> None`
     - `verify_mips_nan2008_binary(binary_path: Path) -> None`
-    - `python3 -m tools.dialos_mac.elf <binary_path>` CLI entrypoint (patches then verifies).
+    - `python3 -m tools.dial_os_mac.elf <binary_path>` CLI entrypoint (patches then verifies).
 
 - [ ] **Step 1: Write failing tests in `tests/tools/test_elf.py`**
 
@@ -119,11 +119,11 @@ Test cases (nominal, boundary, negative):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `make test-tools`
-Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dialos_mac.elf'`).
+Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dial_os_mac.elf'`).
 
-- [ ] **Step 3: Implement `tools/dialos_mac/constants.py` and `tools/dialos_mac/elf.py`**
+- [ ] **Step 3: Implement `tools/dial_os_mac/constants.py` and `tools/dial_os_mac/elf.py`**
 
-- Populate `constants.py` with exact V2.57 and 4-version `FIRMWARE_CATALOGUE` constants (cross-checked against `../dial-os/macos/dialos_mac_installer.py`).
+- Populate `constants.py` with exact V2.57 and 4-version `FIRMWARE_CATALOGUE` constants (cross-checked against `../dial-os/macos/dial_os_mac_installer.py`).
 - Implement `patch_mips_nan2008_flag()` and `verify_mips_nan2008_binary()` in `elf.py` with clean domain names (zero abbreviations) and `__main__` entrypoint for `Makefile`.
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -134,8 +134,8 @@ Expected: PASS (all 5 tests in `test_elf.py`).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tools/dialos_mac/constants.py tools/dialos_mac/elf.py tests/tools/test_elf.py
-git commit -m "feat(dialos-mac): add V2.57 constants and MIPS NAN2008 ELF verifier"
+git add tools/dial_os_mac/constants.py tools/dial_os_mac/elf.py tests/tools/test_elf.py
+git commit -m "feat(dial-os-mac): add V2.57 constants and MIPS NAN2008 ELF verifier"
 ```
 
 ---
@@ -143,7 +143,7 @@ git commit -m "feat(dialos-mac): add V2.57 constants and MIPS NAN2008 ELF verifi
 ### Task 3: Firmware Decryption, `mq_player` SD-Safety Patch & V2.57 NAND Builder
 
 **Files:**
-- Create: `tools/dialos_mac/firmware.py`
+- Create: `tools/dial_os_mac/firmware.py`
 - Test: `tests/tools/test_firmware.py`
 
 **Interfaces:**
@@ -168,9 +168,9 @@ Test cases (nominal, boundary, negative — including Review Focus #1):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `make test-tools`
-Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dialos_mac.firmware'`).
+Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dial_os_mac.firmware'`).
 
-- [ ] **Step 3: Implement `tools/dialos_mac/firmware.py`**
+- [ ] **Step 3: Implement `tools/dial_os_mac/firmware.py`**
 
 Implement all 5 functions:
 - `build_v257_nand_image()` verifies `ui_binary_path` via `verify_mips_nan2008_binary()`, uses `STOCK_V257_ROOTFS_PATH` directly if `verify_stock_v257_squashfs()` passes (or decrypts `V2.57` ZIP chunks and rejects non-V2.57 ZIPs), backs up padded `stock_V257_nand.bin` to `BACKUP_DIRECTORY`, mounts a temporary Case-Sensitive APFS sparse image via `/usr/bin/hdiutil` (always detached in `finally`), unpacks with `tools/vendor/unsquashfs`, preserves `/usr/bin/mq_ui.stock`, installs `ui_binary_path` as `/usr/bin/mq_ui`, applies `patch_mq_player_rmdir_safety()` to `/usr/bin/mq_player`, repacks with `tools/vendor/mksquashfs -comp lzo -b 131072 -no-xattrs -all-root -noappend -processors 1`, and pads to `build/dialos_v257_nand.bin`.
@@ -183,8 +183,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tools/dialos_mac/firmware.py tests/tools/test_firmware.py
-git commit -m "feat(dialos-mac): add V2.57 firmware builder with mq_player rmdir safety patch"
+git add tools/dial_os_mac/firmware.py tests/tools/test_firmware.py
+git commit -m "feat(dial-os-mac): add V2.57 firmware builder with mq_player rmdir safety patch"
 ```
 
 ---
@@ -192,7 +192,7 @@ git commit -m "feat(dialos-mac): add V2.57 firmware builder with mq_player rmdir
 ### Task 4: DGSB Base-Gate Plan & USB Mask-ROM Flasher
 
 **Files:**
-- Create: `tools/dialos_mac/flasher.py`
+- Create: `tools/dial_os_mac/flasher.py`
 - Test: `tests/tools/test_flasher.py`
 
 **Interfaces:**
@@ -217,9 +217,9 @@ Test cases (nominal, boundary, negative — including Review Focus #5):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `make test-tools`
-Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dialos_mac.flasher'`).
+Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dial_os_mac.flasher'`).
 
-- [ ] **Step 3: Implement `tools/dialos_mac/flasher.py`**
+- [ ] **Step 3: Implement `tools/dial_os_mac/flasher.py`**
 
 Implement all 6 functions. In `flash_nand_image()`:
 - Verify `image_path` exists and equals `NAND_IMAGE_SIZE`.
@@ -235,17 +235,17 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tools/dialos_mac/flasher.py tests/tools/test_flasher.py
-git commit -m "feat(dialos-mac): add DGSB plan builder and USB Mask-ROM flasher"
+git add tools/dial_os_mac/flasher.py tests/tools/test_flasher.py
+git commit -m "feat(dial-os-mac): add DGSB plan builder and USB Mask-ROM flasher"
 ```
 
 ---
 
-### Task 5: Non-Destructive SD Deploy, Escape Hatch & `dialos-mac` CLI
+### Task 5: Non-Destructive SD Deploy, Escape Hatch & `dial-os-mac` CLI
 
 **Files:**
-- Create: `tools/dialos_mac/sd_deploy.py`
-- Create: `tools/dialos_mac/cli.py`
+- Create: `tools/dial_os_mac/sd_deploy.py`
+- Create: `tools/dial_os_mac/cli.py`
 - Test: `tests/tools/test_sd_deploy.py`
 
 **Interfaces:**
@@ -254,7 +254,7 @@ git commit -m "feat(dialos-mac): add DGSB plan builder and USB Mask-ROM flasher"
   - `resolve_sdcard_volume(explicit_volume: Path | None, volumes_root: Path = Path("/Volumes")) -> Path`
   - `deploy_ui_binary_to_sdcard(binary_path: Path, sdcard_volume: Path, clear_stock_flag: bool = False) -> tuple[Path, bool]` (returns `(deployed_binary_path, stock_flag_warning)`).
   - `set_stock_boot_mode(sdcard_volume: Path, use_stock: bool) -> Path`
-  - `./dialos-mac {doctor,build,flash,restore-stock,sd-update,use-stock,use-dialos}` CLI.
+  - `./dial-os-mac {doctor,build,flash,restore-stock,sd-update,use-stock,use-dialos}` CLI.
 
 - [ ] **Step 1: Write failing tests in `tests/tools/test_sd_deploy.py`**
 
@@ -269,9 +269,9 @@ Test cases (nominal, boundary, negative — including Review Focus #2, #3, #4):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `make test-tools`
-Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dialos_mac.sd_deploy'`).
+Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dial_os_mac.sd_deploy'`).
 
-- [ ] **Step 3: Implement `tools/dialos_mac/sd_deploy.py` and `tools/dialos_mac/cli.py`**
+- [ ] **Step 3: Implement `tools/dial_os_mac/sd_deploy.py` and `tools/dial_os_mac/cli.py`**
 
 - Implement `sd_deploy.py` with atomic temp-file + `os.fsync()` + `os.replace()` deployment.
 - Implement `cli.py` with `argparse` subcommands:
@@ -282,16 +282,16 @@ Expected: FAIL (`ModuleNotFoundError: No module named 'tools.dialos_mac.sd_deplo
   - `sd-update [--binary PATH] [--volume PATH] [--clear-stock-flag]` (defaults `--binary` to `build/m0_mq_ui`).
   - `use-stock [--volume PATH]` and `use-dialos [--volume PATH]`.
 
-- [ ] **Step 4: Run tests and `./dialos-mac doctor`**
+- [ ] **Step 4: Run tests and `./dial-os-mac doctor`**
 
-Run: `make test-tools && ./dialos-mac doctor`
-Expected: All Python unit tests PASS; `./dialos-mac doctor` prints `[READY]` for `zig`, all 5 vendor binaries, and `vendor/stock_v257/rootfs.squashfs`.
+Run: `make test-tools && ./dial-os-mac doctor`
+Expected: All Python unit tests PASS; `./dial-os-mac doctor` prints `[READY]` for `zig`, all 5 vendor binaries, and `vendor/stock_v257/rootfs.squashfs`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tools/dialos_mac/sd_deploy.py tools/dialos_mac/cli.py tests/tools/test_sd_deploy.py
-git commit -m "feat(dialos-mac): add atomic SD deploy, stock escape hatch, and CLI"
+git add tools/dial_os_mac/sd_deploy.py tools/dial_os_mac/cli.py tests/tools/test_sd_deploy.py
+git commit -m "feat(dial-os-mac): add atomic SD deploy, stock escape hatch, and CLI"
 ```
 
 ---
@@ -302,8 +302,8 @@ git commit -m "feat(dialos-mac): add atomic SD deploy, stock escape hatch, and C
 - Create: `spike/m0_bench.c`
 
 **Interfaces:**
-- Consumes: `Makefile` `m0-spike` target (`zig cc` + `tools/dialos_mac/elf.py`).
-- Produces: Cross-compiled static MIPS32r2 FP64A `EF_MIPS_NAN2008` binary at `build/m0_mq_ui`, deployable via `./dialos-mac sd-update --binary build/m0_mq_ui`.
+- Consumes: `Makefile` `m0-spike` target (`zig cc` + `tools/dial_os_mac/elf.py`).
+- Produces: Cross-compiled static MIPS32r2 FP64A `EF_MIPS_NAN2008` binary at `build/m0_mq_ui`, deployable via `./dial-os-mac sd-update --binary build/m0_mq_ui`.
 
 - [ ] **Step 1: Implement `spike/m0_bench.c` conforming to the M0 design spec**
 
@@ -323,7 +323,7 @@ Keep all identifiers clean (zero prohibited abbreviations, fixed-width types `ui
 
 Run:
 ```bash
-make m0-spike && make test-tools && ./dialos-mac doctor
+make m0-spike && make test-tools && ./dial-os-mac doctor
 ```
 Expected: `build/m0_mq_ui` builds cleanly with zero warnings (`-Wall -Wextra -Werror`), passes `verify_mips_nan2008_binary()`, all Python unit tests pass, and `doctor` reports ready.
 
@@ -339,6 +339,6 @@ git commit -m "feat(m0): add interactive 5-stage V2.57 hardware feasibility spik
 ## Hardware Verification Gate (Operator Runs on Snowsky Disc)
 
 Once Task 6 passes on Mac:
-1. Open [docs/superpowers/specs/2026-11-21-m0-operator-guide.html](../specs/2026-11-21-m0-operator-guide.html) and run `./dialos-mac sd-update --binary build/m0_mq_ui`.
+1. Open [docs/superpowers/specs/2026-11-21-m0-operator-guide.html](../specs/2026-11-21-m0-operator-guide.html) and run `./dial-os-mac sd-update --binary build/m0_mq_ui`.
 2. Run Stages 1–5 on the Snowsky Disc with wired headphones.
 3. Read `/Volumes/<SDCARD>/.dial-os/m0_report.txt` and `m0_ipc_trace.log` back on Mac, record the measured numbers and fallback decisions in `docs/benchmarks/m0-v257-results.md`, and close M0.
