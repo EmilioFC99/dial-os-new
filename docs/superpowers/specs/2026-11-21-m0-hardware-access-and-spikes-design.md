@@ -1,4 +1,4 @@
-# M0 — V2.57 Hardware Access, Clean `dialos-mac` Rewrite & Feasibility Spikes
+# M0 — V2.57 Hardware Access, Clean `dial-os-mac` Rewrite & Feasibility Spikes
 
 **Date:** 2026-11-21
 **Scope:** Milestone `M0` of [ROADMAP.md](../../../ROADMAP.md)
@@ -11,14 +11,14 @@
 
 Before writing any M1+ product code, we need real measurements from the FiiO Snowsky Disc (`V2.57`) so architectural decisions (spinning cover art vs. static art + rotating ring, rolling-slice playback vs. Plan B, graphic EQ vs. PEQ, and `mq_player` EOF/seek behavior) are based on hardware data instead of guesses.
 
-At the same time, the legacy `../dial-os` macOS flasher (`dialos-mac`) violates our coding standards (cryptic abbreviations, theme leakage, hardcoded `/Volumes/MUSIC`, zero unit tests). Rewriting `dialos-mac` clean in M0 gives us a trustworthy, unit-tested, SD-card-safe deployment and recovery tool from day one.
+At the same time, the legacy `../dial-os` macOS flasher (`dial-os-mac`) violates our coding standards (cryptic abbreviations, theme leakage, hardcoded `/Volumes/MUSIC`, zero unit tests). Rewriting `dial-os-mac` clean in M0 gives us a trustworthy, unit-tested, SD-card-safe deployment and recovery tool from day one.
 
 ---
 
 ## 2. Goals, Non-Goals, and Anti-Goals
 
 ### Goals
-1. **Clean-room, TDD-tested `dialos-mac` CLI** in `dial-os-new` conforming to all global naming/style conventions, reusing only the 5 proven vendor binaries (`usbboot`, `disc_spl_lpddr3.bin`, `my_write6_dram.bin`, `mksquashfs`, `unsquashfs`).
+1. **Clean-room, TDD-tested `dial-os-mac` CLI** in `dial-os-new` conforming to all global naming/style conventions, reusing only the 5 proven vendor binaries (`usbboot`, `disc_spl_lpddr3.bin`, `my_write6_dram.bin`, `mksquashfs`, `unsquashfs`).
 2. **Absolute SD-card non-destruction safety** across flashing, SD updates, and on-device spikes.
 3. **`zig cc` MIPS32r2 cross-compilation** producing static `O32 FP64A` + `EF_MIPS_NAN2008` (`0x400`) binaries deployable in ~10 seconds via the Disc's existing microSD hot-reload hook (`/tmp/sdcard/.dial-os/mq_ui`).
 4. **Interactive 5-stage M0 hardware spike binary** (`spike/m0_bench.c`) measuring all 5 M0 gates on real V2.57 hardware over **wired headphones** (`24/192` FLAC + EQ) and writing structured results (`m0_report.txt`) + golden IPC traces (`m0_ipc_trace.log`) to `/tmp/sdcard/.dial-os/`.
@@ -39,10 +39,10 @@ At the same time, the legacy `../dial-os` macOS flasher (`dialos-mac`) violates 
 
 ## 3. Hardware & Platform Constraints
 
-- **Authorized protocol/hardware reference:** Per [ROADMAP.md](../../../ROADMAP.md#L10-L12), `../dial-os/docs/hardware/` (`platform.md`, `display-touch.md`, `buttons.md`, `ipc-protocol.md`, `quirks.md`) and `../dial-os/macos/dialos_mac_installer.py` are authorized **strictly as reference specifications** for V2.57 hardware constants, IPC wire formats (`0602`, `0508`, `0201`, `0103`, `0642`, `0666`, `0657`, `0664`, `0715`, `a202`, `a103`), backlight sysfs paths, DGSB 272-byte struct layout, OpenSSL PBKDF2-HMAC-SHA256 chunk decryption, and `usbboot` DRAM addresses (`0xa0c00000`, `0xa1000000`, `0xa0b00000`, `0xa0a00000`). **Zero code is copied** into `dial-os-new`; all logic is written fresh and unit-tested.
-- **Existing Disc state & hot-reload ownership:** The target Disc already has the microSD hot-reload hook flashed on NAND (`/usr/bin/mq_ui` stages `/tmp/sdcard/.dial-os/mq_ui` to `/usr/data/.dial-os/mq_ui` + `/tmp/mq_ui.sd` and `exec`s it; `/tmp/sdcard/.dial-os/use_stock` escapes to `/usr/bin/mq_ui.stock`). Routine M0 deploys use `./dialos-mac sd-update` (~10 seconds) and **do not flash NAND**. Consequently, `dialos-mac build` installs `--ui-binary` directly as `/usr/bin/mq_ui` (preserving stock as `/usr/bin/mq_ui.stock`); DialOS's own clean-room hot-reload boot shim is built into `mq_ui` in `src/bsp/` during M1 before any full NAND flash in M8.
+- **Authorized protocol/hardware reference:** Per [ROADMAP.md](../../../ROADMAP.md#L10-L12), `../dial-os/docs/hardware/` (`platform.md`, `display-touch.md`, `buttons.md`, `ipc-protocol.md`, `quirks.md`) and `../dial-os/macos/dial_os_mac_installer.py` are authorized **strictly as reference specifications** for V2.57 hardware constants, IPC wire formats (`0602`, `0508`, `0201`, `0103`, `0642`, `0666`, `0657`, `0664`, `0715`, `a202`, `a103`), backlight sysfs paths, DGSB 272-byte struct layout, OpenSSL PBKDF2-HMAC-SHA256 chunk decryption, and `usbboot` DRAM addresses (`0xa0c00000`, `0xa1000000`, `0xa0b00000`, `0xa0a00000`). **Zero code is copied** into `dial-os-new`; all logic is written fresh and unit-tested.
+- **Existing Disc state & hot-reload ownership:** The target Disc already has the microSD hot-reload hook flashed on NAND (`/usr/bin/mq_ui` stages `/tmp/sdcard/.dial-os/mq_ui` to `/usr/data/.dial-os/mq_ui` + `/tmp/mq_ui.sd` and `exec`s it; `/tmp/sdcard/.dial-os/use_stock` escapes to `/usr/bin/mq_ui.stock`). Routine M0 deploys use `./dial-os-mac sd-update` (~10 seconds) and **do not flash NAND**. Consequently, `dial-os-mac build` installs `--ui-binary` directly as `/usr/bin/mq_ui` (preserving stock as `/usr/bin/mq_ui.stock`); DialOS's own clean-room hot-reload boot shim is built into `mq_ui` in `src/bsp/` during M1 before any full NAND flash in M8.
 - **Cross-compile ABI:** `zig cc -target mipsel-linux-musleabihf -mcpu=mips32r2 -mfp64 -mno-odd-spreg -mnan=2008 -static -ffp-contract=off -O2 -s` followed by setting bit `0x400` (`EF_MIPS_NAN2008`) in ELF header `e_flags` (byte offset `36`, little-endian `uint32`).
-- **DGSB base-gate digest compatibility:** `my_write6_dram.bin` (expected SHA-256 `a3c3aa63e0c48f501181d542d9fa0526d36ded81e2e767f0c044af876674ea84`) validates a 272-byte DGSB plan containing a SHA-256 fingerprint over the 4-version base-gate catalogue (`209`, `228`, `240`, `257`). `dialos-mac` restricts *building and flashing* to `V2.57` only, while preserving the exact 4-version catalogue digest bytes required by `my_write6_dram.bin` and zero-padding SquashFS images to `100,663,296` bytes (`768 × 128 KiB` blocks).
+- **DGSB base-gate digest compatibility:** `my_write6_dram.bin` (expected SHA-256 `a3c3aa63e0c48f501181d542d9fa0526d36ded81e2e767f0c044af876674ea84`) validates a 272-byte DGSB plan containing a SHA-256 fingerprint over the 4-version base-gate catalogue (`209`, `228`, `240`, `257`). `dial-os-mac` restricts *building and flashing* to `V2.57` only, while preserving the exact 4-version catalogue digest bytes required by `my_write6_dram.bin` and zero-padding SquashFS images to `100,663,296` bytes (`768 × 128 KiB` blocks).
 - **Watchdog & IPC invariants:**
   - `prctl(PR_SET_NAME, "mq_ui")` so `/usr/project/fiio_init.sh`'s `pgrep -x mq_ui` does not respawn stock UI.
   - Create `/ui` POSIX mqueue (`O_CREAT | O_RDONLY | O_NONBLOCK`, `mq_maxmsg = 10`, `mq_msgsize = 8192`) and pass a `>= 8192`-byte buffer (`16384` bytes) to `mq_receive()` (`Q01`).
@@ -58,7 +58,7 @@ At the same time, the legacy `../dial-os` macOS flasher (`dialos-mac`) violates 
 ## 4. Approaches Considered
 
 ### Approach 1: Single Interactive Multi-Stage Spike Binary + Raw SD Logs *(Selected)*
-- **Design:** One throwaway C spike binary (`spike/m0_bench.c`) deployed once via `./dialos-mac sd-update`. Controlled on-device via large touch buttons (`RUN` / `NEXT`) + physical Long-Press Play/Pause (`268`) backup, while native Play/Pause (`250`) and Vol Up/Down (`251`/`252`) let the operator verify wired `24/192` FLAC playback before each stage. Flushes (`fsync`) `m0_report.txt` and `m0_ipc_trace.log` to `/tmp/sdcard/.dial-os/` after every stage.
+- **Design:** One throwaway C spike binary (`spike/m0_bench.c`) deployed once via `./dial-os-mac sd-update`. Controlled on-device via large touch buttons (`RUN` / `NEXT`) + physical Long-Press Play/Pause (`268`) backup, while native Play/Pause (`250`) and Vol Up/Down (`251`/`252`) let the operator verify wired `24/192` FLAC playback before each stage. Flushes (`fsync`) `m0_report.txt` and `m0_ipc_trace.log` to `/tmp/sdcard/.dial-os/` after every stage.
 - **Tradeoffs:** Slightly larger throwaway file (~500–700 lines of C) than single-purpose programs, but requires only one SD card swap to collect all 5 benchmarks and gives exact human control over active playback and timed rim-touch input.
 
 ### Approach 2: Five Separate Auto-Run Micro-Spike Binaries *(Rejected)*
@@ -75,17 +75,17 @@ At the same time, the legacy `../dial-os` macOS flasher (`dialos-mac`) violates 
 
 - Initialize `git` repository in `dial-os-new` (so all M0 work follows branch/worktree/atomic-commit discipline from the start).
 - Layout introduced in M0:
-  - `dialos-mac` — executable bash wrapper invoking `python3 tools/dialos_mac/cli.py "$@"`.
-  - `tools/dialos_mac/` — clean-room Python package (stdlib only, zero third-party deps, zero prohibited abbreviations, zero theme names).
+  - `dial-os-mac` — executable bash wrapper invoking `python3 tools/dial_os_mac/cli.py "$@"`.
+  - `tools/dial_os_mac/` — clean-room Python package (stdlib only, zero third-party deps, zero prohibited abbreviations, zero theme names).
   - `tools/vendor/` — the 5 proven vendor binaries copied from `../dial-os/macos/vendor/`: `usbboot`, `disc_spl_lpddr3.bin`, `my_write6_dram.bin`, `mksquashfs`, `unsquashfs`.
-  - `tests/tools/` — Python `unittest` suite testing all pure logic in `tools/dialos_mac/` (TDD).
+  - `tests/tools/` — Python `unittest` suite testing all pure logic in `tools/dial_os_mac/` (TDD).
   - `spike/m0_bench.c` — throwaway M0 on-device benchmark binary (explicitly outside `src/`).
   - `Makefile` — targets: `test-tools`, `m0-spike` (cross-compile + `EF_MIPS_NAN2008` patch -> `build/m0_mq_ui`), `clean`.
   - `docs/superpowers/specs/2026-11-21-m0-operator-guide.html` — detailed visual operator guide.
 
-### 5.2 Clean-Room `dialos-mac` CLI Specification
+### 5.2 Clean-Room `dial-os-mac` CLI Specification
 
-Commands supported by `./dialos-mac`:
+Commands supported by `./dial-os-mac`:
 - `doctor`: Verifies macOS host, `zig`, the 5 vendor binaries (including `my_write6_dram.bin` SHA-256), V2.57 stock rootfs availability (`vendor/stock_v257/rootfs.squashfs`), USB Mask-ROM device count (`ioreg -p IOUSB` matching `idVendor=41224`, `idProduct=60143`), mounted microSD volumes under `/Volumes/`, and saved stock backups in `~/Library/Application Support/DialOS/backups/`.
 - `build [firmware_zip] [--ui-binary PATH]`:
   - Uses verified `vendor/stock_v257/rootfs.squashfs` directly if SHA-256 matches `V2.57` (`111e4dd7ee3d7ff91ba7e61181690be7ffd22bd1bbd13ad513f5f015ffb302ae`, `80,596,992` bytes); otherwise decrypts `V2.57` chunks from an official FiiO ZIP via PBKDF2-HMAC-SHA256 + macOS `/usr/bin/openssl` (rejecting non-V2.57 archives).
@@ -137,7 +137,7 @@ Commands supported by `./dialos-mac`:
 
 ## 6. What's Left to the Builder
 
-- Internal module decomposition inside `tools/dialos_mac/` (e.g. `cli.py`, `firmware.py`, `flasher.py`, `elf.py`, `sd_deploy.py`, `constants.py`).
+- Internal module decomposition inside `tools/dial_os_mac/` (e.g. `cli.py`, `firmware.py`, `flasher.py`, `elf.py`, `sd_deploy.py`, `constants.py`).
 - Exact 8x8 bitmap font table and fixed-point sin/cos LUT implementation inside `spike/m0_bench.c`.
 - Exact synthetic ELF/SquashFS/ZIP test fixtures inside `tests/tools/`.
 - Exact placement of the recorded M0 benchmark report in the repo (`docs/benchmarks/m0-v257-results.md`) once hardware runs complete.

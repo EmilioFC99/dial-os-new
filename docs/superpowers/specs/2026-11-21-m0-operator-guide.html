@@ -125,10 +125,10 @@
   <div class="callout-title">SD-Card Non-Destruction &amp; Recovery Guarantees</div>
   <ul>
     <li><strong>No USB re-flash needed for M0:</strong> Your Disc already has the microSD hot-reload hook. Deploying M0 only copies one binary to <code>&lt;SDCARD&gt;/.dial-os/mq_ui</code>.</li>
-    <li><strong>Music files are strictly read-only:</strong> <code>./dialos-mac sd-update</code> writes atomically to <code>.dial-os/mq_ui</code> (temp file + <code>fsync</code> + rename) and never deletes, formats, or modifies any other file or folder.</li>
-    <li><strong>Stock <code>rm -rf %s</code> bug neutralized:</strong> Whenever <code>./dialos-mac build</code> repacks a V2.57 NAND image, it automatically patches <code>mq_player</code>'s dangerous <code>mount_sdcard()</code> <code>rm -rf %s</code> string to <code>rmdir  %s</code> and fails the build if the patch is not verified.</li>
+    <li><strong>Music files are strictly read-only:</strong> <code>./dial-os-mac sd-update</code> writes atomically to <code>.dial-os/mq_ui</code> (temp file + <code>fsync</code> + rename) and never deletes, formats, or modifies any other file or folder.</li>
+    <li><strong>Stock <code>rm -rf %s</code> bug neutralized:</strong> Whenever <code>./dial-os-mac build</code> repacks a V2.57 NAND image, it automatically patches <code>mq_player</code>'s dangerous <code>mount_sdcard()</code> <code>rm -rf %s</code> string to <code>rmdir  %s</code> and fails the build if the patch is not verified.</li>
     <li><strong>On-device power-off safety:</strong> The M0 spike sends <code>0664=0</code> on boot so <code>mq_player</code> can never trigger an unsynced <code>poweroff -f</code> while logs are open, and calls <code>fsync()</code> after every stage.</li>
-    <li><strong>5-second instant escape back to stock FiiO UI:</strong> Run <code>./dialos-mac use-stock</code> (creates empty <code>&lt;SDCARD&gt;/.dial-os/use_stock</code>) and reboot. Your Disc boots stock <code>/usr/bin/mq_ui.stock</code> immediately.</li>
+    <li><strong>5-second instant escape back to stock FiiO UI:</strong> Run <code>./dial-os-mac use-stock</code> (creates empty <code>&lt;SDCARD&gt;/.dial-os/use_stock</code>) and reboot. Your Disc boots stock <code>/usr/bin/mq_ui.stock</code> immediately.</li>
   </ul>
 </div>
 
@@ -140,7 +140,7 @@
     <span class="pill step">Step A — Verify &amp; Build</span>
     <h3>Run Mac tests &amp; cross-compile M0 spike</h3>
     <pre>make test-tools
-./dialos-mac doctor
+./dial-os-mac doctor
 make m0-spike</pre>
     <p><strong>What you will see:</strong></p>
     <ul>
@@ -153,7 +153,7 @@ make m0-spike</pre>
   <div class="card">
     <span class="pill step">Step B — Stage 2 Test Tracks + Binary</span>
     <h3>Copy binary to microSD (Zero music touched)</h3>
-    <pre>./dialos-mac sd-update --binary build/m0_mq_ui</pre>
+    <pre>./dial-os-mac sd-update --binary build/m0_mq_ui</pre>
     <p><strong>Test audio tracks:</strong> Your real <code>24/48</code> FLAC tracks work great! Put 2 tracks in <code>&lt;SDCARD&gt;/.dial-os/m0_test/</code> (or skip this and the spike safely picks the first 2 audio files already on your card, read-only). We can also optionally generate a 20 s synthetic <code>24/192</code> FLAC tone on Mac if you want peak-load stress testing.</p>
     <p><strong>Exact files created on SD:</strong></p>
     <ul>
@@ -423,7 +423,7 @@ make m0-spike</pre>
   <p>You will find two plain-text files inside <code>&lt;SDCARD&gt;/.dial-os/</code> (nothing else touched):</p>
   <pre>cat /Volumes/&lt;SDCARD&gt;/.dial-os/m0_report.txt
 head -n 40 /Volumes/&lt;SDCARD&gt;/.dial-os/m0_ipc_trace.log</pre>
-  <p>Share those two files back in our session — we will record the real numbers and fallback decisions into the repo, closing <strong>M0</strong> and unlocking <strong>M1</strong>. Whenever you want your normal stock FiiO UI back in the meantime, run <code>./dialos-mac use-stock</code>.</p>
+  <p>Share those two files back in our session — we will record the real numbers and fallback decisions into the repo, closing <strong>M0</strong> and unlocking <strong>M1</strong>. Whenever you want your normal stock FiiO UI back in the meantime, run <code>./dial-os-mac use-stock</code>.</p>
 </div>
 
 </div>
