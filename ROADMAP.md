@@ -2,7 +2,7 @@
 
 > **How this roadmap works:** DialOS is built **one phase at a time**, from first principles against real **FiiO Snowsky Disc (V2.57)** stock binaries (`vendor/stock_v257/`) and real hardware.
 >
-> We do **not** build speculative "foundations" upfront. Shared layers (display, input, IPC, storage) emerge organically as each phase needs them.
+> We do **not** build speculative "foundations" upfront. Shared layers (display, input, IPC, storage) emerge organically as each phase needs them. Product UX vision lives in [docs/north_star.md](docs/north_star.md).
 
 ## Per-Phase Workflow
 
@@ -43,7 +43,7 @@ Every phase follows the same five steps before moving to the next:
 - Browsing and indexing large microSD music collections (`Favorites`, `Playlists`, `Artists`, `Albums`, `Genres`, `All songs`, letter seek) with screen-bounded RAM and launching playback via `mq_player`.
 
 ### Phase 5 — Now Playing
-- Reliable playback controls, spinning album art, progress ring & scrub, volume HUD, Quick Actions, Track Details, and Lyrics.
+- Reliable playback controls, classic playback modes (linear/sequential, shuffle, repeat all, repeat one), spinning album art, progress ring & scrub, volume HUD, Quick Actions, Track Details, and Lyrics.
 
 ### Phase 6 — Home Screen
 - Curved mechanical app launcher (`Now Playing`, `Library`, `Modes`, `Settings`), pull-down Control Center, and screen transitions.
