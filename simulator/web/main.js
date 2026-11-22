@@ -38,7 +38,6 @@ const WARNING_POLL_INTERVAL_MS = 1000;
 const TAP_MAX_DRIFT_PX = 14;
 const WHEEL_COOLDOWN_MS = 130;
 const WHEEL_MIN_DELTA_PX = 8;
-const LIBRARY_HANDOFF_MIN_LAUNCH_PROGRESS = 0.98;
 
 const displayCanvas = document.getElementById("display-canvas");
 const drawingContext = displayCanvas.getContext("2d");
@@ -134,6 +133,33 @@ function handleExitLibraryToHome() {
   homeController.returnFromScreen("library");
   syncDisplayCanvasCursorClasses(lastHoverPoint);
   syncShellIfNeeded(true);
+}
+
+/**
+ * Immediately switch into the real Library view whenever Home launches `library`.
+ *
+ * @returns {boolean} True when control transferred from Home to Library.
+ */
+function handoffHomeToLibraryIfLaunched() {
+  if (router.getState().activeScreen !== "home") {
+    return false;
+  }
+  const launchedHomeState = homeController.getRenderSnapshot();
+  if (
+    launchedHomeState.launchTarget === 1 &&
+    launchedHomeState.launchedAppId === "library"
+  ) {
+    if (activePointerId !== null) {
+      const releasedPointerId = activePointerId;
+      activePointerId = null;
+      pointerDownPoint = null;
+      releaseActivePointerCapture(releasedPointerId);
+    }
+    libraryController.enterFromHome();
+    router.navigateTo("library");
+    return true;
+  }
+  return false;
 }
 
 function handlePersistPlaylists(updatedPlaylists) {
@@ -650,7 +676,11 @@ function handleNavigateRight() {
 
 function handleNavigateUp() {
   if (router.getState().activeScreen === "library") {
-    libraryController.stepDetent(-1);
+    if (libraryController.getRenderSnapshot().currentView?.kind === "albums") {
+      libraryController.openFocusedAlbumTracks();
+    } else {
+      libraryController.stepDetent(-1);
+    }
     syncShellIfNeeded(false);
   }
 }
@@ -679,6 +709,7 @@ function handleActivate() {
   } else if (homeState.launchedAppId === "now-playing" && homeState.playbackState === "idle") {
     homeController.jumpFromNotPlayingToLibrary();
   }
+  handoffHomeToLibraryIfLaunched();
   syncDisplayCanvasCursorClasses(lastHoverPoint);
   syncShellIfNeeded(false);
 }
@@ -787,6 +818,7 @@ displayCanvas.addEventListener("pointerup", (pointerEvent) => {
   if (routerState.activeScreen === "home") {
     if (releasePoint) {
       homeController.handlePointerUp(releasePoint.pointX, releasePoint.pointY);
+      handoffHomeToLibraryIfLaunched();
       lastHoverPoint = releasePoint;
     } else {
       homeController.handlePointerCancel();
@@ -976,20 +1008,7 @@ function animationTick(timestampMs) {
 
   if (routerState.activeScreen === "home") {
     homeController.step(frameDeltaSeconds);
-    const launchedHomeState = homeController.getRenderSnapshot();
-    if (
-      launchedHomeState.launchTarget === 1 &&
-      launchedHomeState.launchedAppId === "library" &&
-      launchedHomeState.launchProgress >= LIBRARY_HANDOFF_MIN_LAUNCH_PROGRESS
-    ) {
-      if (activePointerId !== null) {
-        const releasedPointerId = activePointerId;
-        activePointerId = null;
-        pointerDownPoint = null;
-        releaseActivePointerCapture(releasedPointerId);
-      }
-      libraryController.enterFromHome();
-      router.navigateTo("library");
+    if (handoffHomeToLibraryIfLaunched()) {
       routerState = router.getState();
     }
   } else if (routerState.activeScreen === "library") {

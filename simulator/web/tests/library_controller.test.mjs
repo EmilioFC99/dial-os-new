@@ -986,7 +986,9 @@ describe("createLibraryController nominal behavior", () => {
     assert.equal(artistAlbumsSnapshot.viewStack[2].kind, "albums");
     assert.deepEqual(artistAlbumsSnapshot.viewStack[2].albumIds, ["album-a"]);
 
-    tapPoint(libraryController, CRATE_SLEEVE_TAP_X, CRATE_CENTER_Y);
+    libraryController.handlePointerDown(CRATE_SLEEVE_TAP_X, 210);
+    libraryController.handlePointerMove(CRATE_SLEEVE_TAP_X, 130);
+    libraryController.handlePointerUp(CRATE_SLEEVE_TAP_X, 130);
     const tracksSnapshot = advanceLibraryController(
       libraryController,
       STEP_DELTA_SECONDS,
@@ -1011,7 +1013,7 @@ describe("createLibraryController nominal behavior", () => {
     ]);
   });
 
-  test("tapping peeking vinyl disc in Albums Crate launches track 0 immediately", () => {
+  test("tapping album sleeve or peeking vinyl disc in Albums Crate starts playing the album, while swipe up opens tracklist", () => {
     const launchedPayloads = [];
     const libraryController = createSettledLibraryController({
       onLaunchTrack: (launchPayload) => launchedPayloads.push(launchPayload),
@@ -1020,11 +1022,11 @@ describe("createLibraryController nominal behavior", () => {
     const albumsSnapshot = openHubSectionTile(libraryController, 3);
     assert.equal(albumsSnapshot.viewStack[albumsSnapshot.viewStack.length - 1].kind, "albums");
 
-    tapPoint(libraryController, CRATE_PEEK_DISC_TAP_X, CRATE_CENTER_Y);
-    const launchedSnapshot = libraryController.getRenderSnapshot();
+    tapPoint(libraryController, CRATE_SLEEVE_TAP_X, CRATE_CENTER_Y);
+    const sleeveLaunchedSnapshot = libraryController.getRenderSnapshot();
 
-    assert.equal(launchedSnapshot.vinylLaunchTarget, 1);
-    assert.equal(launchedSnapshot.activeTrackId, "t-a1");
+    assert.equal(sleeveLaunchedSnapshot.vinylLaunchTarget, 1);
+    assert.equal(sleeveLaunchedSnapshot.activeTrackId, "t-a1");
     assert.deepEqual(launchedPayloads, [
       {
         trackId: "t-a1",
@@ -1032,6 +1034,31 @@ describe("createLibraryController nominal behavior", () => {
         albumId: "album-a",
       },
     ]);
+
+    libraryController.stepBack();
+    advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+
+    tapPoint(libraryController, CRATE_PEEK_DISC_TAP_X, CRATE_CENTER_Y);
+    const discLaunchedSnapshot = libraryController.getRenderSnapshot();
+
+    assert.equal(discLaunchedSnapshot.vinylLaunchTarget, 1);
+    assert.equal(launchedPayloads.length, 2);
+
+    libraryController.stepBack();
+    advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+
+    libraryController.handlePointerDown(180, 296);
+    libraryController.handlePointerMove(180, 180);
+    libraryController.handlePointerUp(180, 180);
+    const tracksSnapshot = advanceLibraryController(
+      libraryController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+
+    assert.equal(tracksSnapshot.currentView.kind, "tracks");
+    assert.equal(tracksSnapshot.currentView.sourceType, "album");
+    assert.equal(tracksSnapshot.currentView.albumId, "album-a");
   });
 
   test("rim-arc drag triggers >180 degree Crystal-Slab Letter Seek and populates rimSlabPullLevels in All songs", () => {

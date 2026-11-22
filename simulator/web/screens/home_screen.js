@@ -12,7 +12,6 @@ import {
   easeInOutCubic,
   easeOutCubic,
   easeOutExpo,
-  formatIntegerCount,
   lerp,
   normalizeRange,
   projectPoint3d,
@@ -1522,14 +1521,7 @@ function drawNowPlayingExpandedChrome(
   }
 }
 
-function buildDestinationRows(appId, appearance, counts) {
-  if (appId === "library") {
-    return [
-      `ALBUMS \u00b7 ${formatIntegerCount(counts.albums)}  \u00b7  ARTISTS \u00b7 ${formatIntegerCount(counts.artists)}`,
-      `ALL SONGS \u00b7 ${formatIntegerCount(counts.tracks)}`,
-      `FAVORITES \u00b7 ${formatIntegerCount(counts.favorites)}  \u00b7  GENRES \u00b7 ${formatIntegerCount(counts.genres)}`,
-    ];
-  }
+function buildDestinationRows(appId, appearance) {
   if (appId === "modes") {
     return [
       "USB STORAGE \u00b7 READY",
@@ -1546,7 +1538,7 @@ function buildDestinationRows(appId, appearance, counts) {
 
 /**
  * Render launched destination screen overlays for idle/storage Now Playing,
- * Library, Modes, and Settings.
+ * Modes, and Settings.
  */
 function drawDestinationPreviewContent(
   drawingContext,
@@ -1556,12 +1548,16 @@ function drawDestinationPreviewContent(
   clockSeconds,
   resolvedContext,
 ) {
+  if (focusedApp.id === "library") {
+    return;
+  }
+
   const contentReveal = easeOutCubic(normalizeRange(launchProgress, 0.36, 0.92));
   if (contentReveal <= 0.01) {
     return;
   }
 
-  const { appearance, palette, counts } = resolvedContext;
+  const { appearance, palette } = resolvedContext;
   const slideOffsetY = lerp(22, 0, easeOutExpo(normalizeRange(launchProgress, 0.36, 0.95)));
 
   drawingContext.save();
@@ -1639,7 +1635,7 @@ function drawDestinationPreviewContent(
     drawingContext.textBaseline = "middle";
     drawingContext.fillText(focusedApp.title, DISPLAY_CENTER_PX, 146);
 
-    const previewRows = buildDestinationRows(focusedApp.id, appearance, counts);
+    const previewRows = buildDestinationRows(focusedApp.id, appearance);
     const rowWidth = 178;
     const rowHeight = 24;
     for (let rowIndex = 0; rowIndex < previewRows.length; rowIndex += 1) {

@@ -35,6 +35,8 @@ export const LIBRARY_CONSTANTS = Object.freeze({
   VINYL_LAUNCH_DURATION_SECONDS: 0.62,
   DELETE_HOLD_DURATION_SECONDS: 1.10,
   LONG_PRESS_DURATION_SECONDS: 0.48,
+  CRATE_SWIPE_UP_MIN_DELTA_Y: 26,
+  CRATE_SWIPE_UP_SLOPE_RATIO: 1.15,
   BACK_SWIPE_DISTANCE_PX: 96,
   BACK_SWIPE_COMMIT_THRESHOLD: 0.45,
   TAP_DRIFT_LIMIT_PX: 10,
@@ -1142,6 +1144,59 @@ export function createLibraryController({
    *
    * @param {number} [explicitRowIndex] Optional row index override from pointer hit testing.
    */
+  function resolveFocusedCrateAlbum(currentView) {
+    const crateAlbums = resolveCrateAlbums(currentView);
+    if (crateAlbums.length === 0) {
+      return null;
+    }
+    const focusedIndex = clamp(
+      Math.round(currentView.scrollPosition),
+      0,
+      crateAlbums.length - 1,
+    );
+    return crateAlbums[focusedIndex] || null;
+  }
+
+  function launchFocusedCrateAlbum(currentView) {
+    const selectedAlbum = resolveFocusedCrateAlbum(currentView);
+    if (!selectedAlbum) {
+      return;
+    }
+    const firstTrack = selectedAlbum.tracks[0];
+    launchVinyl(
+      selectedAlbum.id,
+      "albums",
+      firstTrack ? firstTrack.id : null,
+      { queueSource: "album", albumId: selectedAlbum.id },
+    );
+  }
+
+  /**
+   * Open the tracklist view for the currently focused album in an Albums crate.
+   */
+  function openFocusedAlbumTracks() {
+    if (vinylLaunchTarget === 1 || playlistSheetOpen) {
+      return;
+    }
+    const currentView = getCurrentView();
+    if (currentView.kind !== "albums") {
+      return;
+    }
+    const selectedAlbum = resolveFocusedCrateAlbum(currentView);
+    if (!selectedAlbum) {
+      return;
+    }
+    pushView({
+      kind: "tracks",
+      sourceType: "album",
+      albumId: selectedAlbum.id,
+      title: selectedAlbum.title,
+      subtitle: `${selectedAlbum.artist.toUpperCase()} \u00b7 ${selectedAlbum.tracks.length} TRACKS`,
+      scrollPosition: 0,
+      targetIndex: 0,
+    });
+  }
+
   function activateFocused(explicitRowIndex) {
     if (vinylLaunchTarget === 1) {
       stepBack();
@@ -1170,25 +1225,7 @@ export function createLibraryController({
     }
 
     if (currentView.kind === "albums") {
-      const crateAlbums = resolveCrateAlbums(currentView);
-      if (crateAlbums.length === 0) {
-        return;
-      }
-      const focusedIndex = clamp(
-        Math.round(currentView.scrollPosition),
-        0,
-        crateAlbums.length - 1,
-      );
-      const selectedAlbum = crateAlbums[focusedIndex];
-      pushView({
-        kind: "tracks",
-        sourceType: "album",
-        albumId: selectedAlbum.id,
-        title: selectedAlbum.title,
-        subtitle: `${selectedAlbum.artist.toUpperCase()} \u00b7 ${selectedAlbum.tracks.length} TRACKS`,
-        scrollPosition: 0,
-        targetIndex: 0,
-      });
+      launchFocusedCrateAlbum(currentView);
       return;
     }
 
@@ -1679,6 +1716,16 @@ export function createLibraryController({
         backSwipeProgress = clamp(deltaX / LIBRARY_CONSTANTS.BACK_SWIPE_DISTANCE_PX, 0, 1);
         return;
       }
+      if (
+        currentView.kind === "albums" &&
+        deltaY < -LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX &&
+        Math.abs(deltaY) > Math.abs(deltaX) * LIBRARY_CONSTANTS.CRATE_SWIPE_UP_SLOPE_RATIO
+      ) {
+        pointerMode = "crate";
+        currentView.scrollPosition = pointerStartScroll;
+        pointerVelocity = 0;
+        return;
+      }
       const currentDistance = Math.hypot(
         pointX - DISPLAY_CENTER_PX,
         pointY - DISPLAY_CENTER_PX,
@@ -1741,6 +1788,14 @@ export function createLibraryController({
     }
 
     if (pointerMode === "crate") {
+      if (
+        deltaY < 0 &&
+        Math.abs(deltaY) > Math.abs(deltaX) * LIBRARY_CONSTANTS.CRATE_SWIPE_UP_SLOPE_RATIO
+      ) {
+        currentView.scrollPosition = pointerStartScroll;
+        pointerVelocity = 0;
+        return;
+      }
       const albums = resolveCrateAlbums(currentView);
       const maxIndex = Math.max(0, albums.length - 1);
       pointerVelocity = stepX;
@@ -1775,7 +1830,10 @@ export function createLibraryController({
 
     const releaseX = Number.isFinite(pointX) ? pointX : pointerLastX;
     const releaseY = Number.isFinite(pointY) ? pointY : pointerLastY;
-    const finalDistance = Math.hypot(releaseX - pointerStartX, releaseY - pointerStartY);
+    const totalDeltaX = releaseX - pointerStartX;
+    const totalDeltaY = releaseY - pointerStartY;
+    const releaseStartScroll = pointerStartScroll;
+    const finalDistance = Math.hypot(totalDeltaX, totalDeltaY);
     const movedDistance = Math.max(pointerMovedDistance, finalDistance);
     const wasTap = movedDistance < LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX;
     const currentView = getCurrentView();
@@ -1889,16 +1947,8 @@ export function createLibraryController({
           releaseY >= CRATE_SLEEVE_TOP_Y &&
           releaseY <= CRATE_SLEEVE_BOTTOM_Y;
 
-        if (hitPeekingVinyl && albums[focusedIndex]) {
-          const firstTrack = albums[focusedIndex].tracks[0];
-          launchVinyl(
-            albums[focusedIndex].id,
-            "albums",
-            firstTrack ? firstTrack.id : null,
-            { queueSource: "album", albumId: albums[focusedIndex].id },
-          );
-        } else if (hitCenterSleeve) {
-          activateFocused();
+        if ((hitPeekingVinyl || hitCenterSleeve) && albums[focusedIndex]) {
+          launchFocusedCrateAlbum(currentView);
         } else if (releaseX < CRATE_SLEEVE_LEFT_X && focusedIndex > 0) {
           currentView.targetIndex = focusedIndex - 1;
         } else if (releaseX > CRATE_PEEK_RIGHT_X && focusedIndex < maxIndex) {
@@ -1906,6 +1956,14 @@ export function createLibraryController({
         } else {
           currentView.targetIndex = focusedIndex;
         }
+      } else if (
+        totalDeltaY <= -LIBRARY_CONSTANTS.CRATE_SWIPE_UP_MIN_DELTA_Y &&
+        Math.abs(totalDeltaY) > Math.abs(totalDeltaX) * LIBRARY_CONSTANTS.CRATE_SWIPE_UP_SLOPE_RATIO
+      ) {
+        const anchorIndex = clamp(Math.round(releaseStartScroll), 0, maxIndex);
+        currentView.scrollPosition = anchorIndex;
+        currentView.targetIndex = anchorIndex;
+        openFocusedAlbumTracks();
       } else {
         const projected =
           currentView.scrollPosition -
@@ -2029,6 +2087,7 @@ export function createLibraryController({
     stepBack,
     stepDetent,
     activateFocused,
+    openFocusedAlbumTracks,
     handlePointerDown,
     handlePointerMove,
     handlePointerUp,
