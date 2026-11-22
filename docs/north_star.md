@@ -9,7 +9,7 @@ Crafted from the ground up for a small round touchscreen rather than squeezed do
 ### Tactile, Rim-First Interaction
 Every gesture is shaped around the round bezel:
 - **Infinite glass wheel**: The Home screen presents apps as floating 3D translucent glass cubes with living animated icons suspended inside, arranged on a seamless infinite cyclic wheel (wrapping smoothly from the last app back to the first and vice versa) where scrolling rotates each cube into focus.
-- **Rim-arc browsing & fast Letter Search**: On any list, you can swipe vertically or trace your thumb around the circular bezel—clockwise scrolls down, counter-clockwise scrolls up. Sweeping past half an arc in an alphabetical list automatically enters **Letter Search**, where each fixed slice of the arc steps cleanly to the next or previous letter for instant lookup.
+- **Rim-arc browsing & Crystal-Slab Letter Seek**: On any list, you can swipe vertically or trace your thumb around the circular bezel—clockwise scrolls down, counter-clockwise scrolls up. Sweeping past half an arc in an alphabetical list enters **Letter Seek**, where each `6%` rim segment pulls inward like a beveled crystal slab as your finger passes over it, jumping cleanly to the next or previous letter for instant lookup.
 - **Distraction-free listening**: Now Playing opens directly to full-bleed spinning album art with a small progress ring at the center and no cluttering text. Controls appear only when you ask for them.
 - **Consistent edge gestures**: Swiping right from the left edge always takes you back a step. Swiping down from the top edge pulls open a compact grid of circular quick-control buttons from anywhere.
 - **Deliberate friction**: Destructive actions, like deleting a playlist, ask you to press and hold for a moment so nothing happens by accident.
@@ -44,28 +44,25 @@ When a song is loaded:
 The **Library** is your quiet, organized music shelf—built to make browsing a large collection feel effortless on a small round screen.
 
 ### The Main Hub
-When you open the Library, you're greeted by a clean, curved list of six ways into your music:
-- **Favorites**
-- **Playlists**
-- **Artists**
-- **Albums**
-- **Genres**
-- **All songs**
+When you open the Library, you're greeted by a **2-up spatial crystal grid** of six ways into your music—continuing the optical-glass visual language of Home:
+- **Favorites** | **Playlists**
+- **Artists** | **Albums**
+- **Genres** | **All songs**
 
-Each row is a soft rounded pill pairing a pure, lightweight geometric icon on the left with a simple count on the right—no blocky frames, heavy contrast, or busy subtitles. Lists display **two full rows** at equal clarity with a soft preview of the **third item** peeking below, and never highlight a resting center row—a pill highlights only while pressed and opens immediately on tap.
+Two floating chamfered translucent glass tiles sit side-by-side at full clarity (with the next pair softly peeking below), each cradling a living sculptural icon, clean title, and simple count. Resting tiles never highlight—a crystal tile illuminates with signal corner brackets only while pressed and opens immediately on tap.
 
-### Alphabetical Ordering & Rim-Arc Letter Search
+### Alphabetical Ordering & Crystal-Slab Letter Seek
 - **A–Z everywhere**: All songs (by song title), Favorites, Albums, Artists, Genres, and Playlists are ordered alphabetically ascending so you always know where to look.
 - **Circular rim scrolling**: In addition to vertical swiping, tracing your finger around the circular bezel navigates smoothly—**clockwise moves down**, **counter-clockwise moves up**.
-- **Half-arc Letter Search**: Continuously sweeping past **half an arc (180°)** around the bezel enters **Letter Search**. A fixed slice of the arc corresponds to each letter so continuing clockwise or counter-clockwise jumps rapidly to the next or previous letter, settling straight onto the matching item when you lift your thumb.
+- **Half-arc Crystal-Slab Letter Seek**: Continuously sweeping past **half an arc (180°)** around the bezel in an alphabetical list enters **Letter Seek**. A circular optical ring lens appears in the center while the outer bezel divides into `6%` letter dashes—as your thumb glides over each dash, it physically **pulls inward like a translucent beveled crystal slab** (with a subtle wave on immediate neighbors), jumping cleanly to the next or previous letter and settling onto the matching item when you lift your thumb.
 
 ### Flipping Through Albums
-Opening **Albums** shifts from a list into a visual cover carousel (ordered A–Z). The focused album art sits front and center while neighboring covers peek in from the sides, with the album title and artist resting neatly underneath. Turning through them—by swiping horizontally or tracing the rim arc—feels like thumbing through a crate of vinyl records.
+Opening **Albums** shifts into a visual cover carousel (ordered A–Z). The focused album art sits front and center with a peeking spinning vinyl record while neighboring covers angle in from the sides, with the album title and artist resting neatly underneath. Turning through them—by swiping horizontally or tracing the rim arc—feels like thumbing through a crate of vinyl records.
 
 ### Drilling Down & Listening
 - **Artists** and **Genres** let you narrow things down naturally—pick an artist to see their albums, then pick an album to see its songs.
 - **Playlists** and **Favorites** give you quick access to your own mixes, with simple action menus when you want to manage or remove a playlist.
-- **Track lists** follow the same direct-touch pill layout—two full rows plus a preview of the next, highlighting a pill only while pressed—so you can jump straight into any visible song with a single tap.
+- **Track & drill-down lists** use slim, airy acrylic glass strips—two full rows plus a soft preview of the third, highlighting a row only while pressed—so you can jump straight into any visible song or section with a single tap.
 
 ### Calm Empty States & Easy Backtracking
 If a section doesn't have anything in it yet—like Favorites before you've hearted a track—it shows a centered icon, a short friendly message, and a button to step back. Wherever you are in the Library, a quick swipe from the left edge steps smoothly back up one level at a time.
@@ -126,4 +123,4 @@ The top level is a clean, five-row list where each item has a simple icon and, w
 - **Power & System**: Check battery status, control how the player draws power when plugged in, set an automatic idle shut-off timer, or start a **library rescan**—which opens a live progress screen showing how many songs were found before offering a shortcut straight back to your Library.
 
 ### Tactile Controls Throughout
-Sliders (like Brightness and Volume Limit) fill the entire pill row as you drag across them, lists show two full rounded pill rows with a soft preview of the third and highlight a pill only while pressed (with rim-arc scrolling clockwise down / counter-clockwise up), and a swipe from the left edge always steps you cleanly back up.
+Sliders (like Brightness and Volume Limit) fill the entire row as you drag across them, lists show two full slim acrylic rows with a soft preview of the third and highlight a row only while pressed (with rim-arc scrolling clockwise down / counter-clockwise up), and a swipe from the left edge always steps you cleanly back up.
