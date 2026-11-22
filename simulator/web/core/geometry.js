@@ -14,6 +14,7 @@ export const REGISTRATION_MARK_RADIUS_PX = 136;
 export const FULL_CIRCLE_RADIANS = Math.PI * 2;
 export const TOP_ANGLE_RADIANS = -Math.PI / 2;
 export const MILLISECONDS_PER_SECOND = 1000;
+const SECONDS_PER_MINUTE = 60;
 
 const INTEGER_COUNT_FORMATTER = new Intl.NumberFormat("en-US");
 
@@ -123,6 +124,28 @@ export function rotatePoint3d(pointX, pointY, pointZ, angleX, angleY, angleZ) {
 }
 
 /**
+ * Project a 3D point onto the 2D display plane using perspective division.
+ *
+ * @param {number} pointX 3D X coordinate relative to center.
+ * @param {number} pointY 3D Y coordinate relative to center.
+ * @param {number} pointZ 3D Z coordinate toward the viewer.
+ * @param {number} centerX 2D projection center X in pixels.
+ * @param {number} centerY 2D projection center Y in pixels.
+ * @param {number} focalLength Perspective focal distance in pixels.
+ * @returns {{ screenX: number, screenY: number, depthZ: number, scale: number }} Projected screen coordinates.
+ */
+export function projectPoint3d(pointX, pointY, pointZ, centerX, centerY, focalLength) {
+  const depthDenominator = focalLength - pointZ;
+  const perspectiveScale = depthDenominator !== 0 ? focalLength / depthDenominator : 1;
+  return {
+    screenX: centerX + pointX * perspectiveScale,
+    screenY: centerY + pointY * perspectiveScale,
+    depthZ: pointZ,
+    scale: perspectiveScale,
+  };
+}
+
+/**
  * Format a non-negative integer count with US grouping commas.
  *
  * @param {number} value Numeric count to format.
@@ -134,4 +157,20 @@ export function formatIntegerCount(value) {
     ? Math.max(0, Math.round(numericValue))
     : 0;
   return INTEGER_COUNT_FORMATTER.format(safeInteger);
+}
+
+/**
+ * Format elapsed or duration seconds safely as zero-padded "MM:SS".
+ *
+ * @param {number} totalSeconds Duration in seconds.
+ * @returns {string} Formatted clock string, or "00:00" when negative/non-finite.
+ */
+export function formatClockTime(totalSeconds) {
+  if (typeof totalSeconds !== "number" || !Number.isFinite(totalSeconds) || totalSeconds <= 0) {
+    return "00:00";
+  }
+  const wholeSeconds = Math.floor(totalSeconds);
+  const minutes = Math.floor(wholeSeconds / SECONDS_PER_MINUTE);
+  const seconds = wholeSeconds % SECONDS_PER_MINUTE;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
