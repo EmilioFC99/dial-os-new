@@ -1,7 +1,28 @@
-.PHONY: test-tools clean
+.PHONY: mq-ui test-tools test-c test clean
+
+BUILD_DIRECTORY := build
+PORTABLE_SOURCES := src/protocol.c src/render.c src/app.c
+TEST_SOURCES := tests/c/test_runner.c tests/c/test_protocol.c tests/c/test_render.c tests/c/test_app.c
+LINUX_SOURCES := $(PORTABLE_SOURCES) src/platform_linux.c src/main.c
+
+mq-ui:
+	mkdir -p $(BUILD_DIRECTORY)
+	zig cc -target mipsel-linux-musleabihf -mcpu=mips32r2 -mfp64 -mno-odd-spreg -mnan=2008 \
+		-static -ffp-contract=off -std=c11 -D_GNU_SOURCE -Isrc -Wall -Wextra -Werror -O2 -s \
+		$(LINUX_SOURCES) -lm -o $(BUILD_DIRECTORY)/mq_ui
+	python3 -m tools.dial_os_mac.elf $(BUILD_DIRECTORY)/mq_ui
 
 test-tools:
 	python3 -m unittest discover -s tests/tools -p "test_*.py" -v
 
+test-c:
+	mkdir -p $(BUILD_DIRECTORY)
+	zig cc -std=c11 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -Isrc -Itests/c \
+		-Wall -Wextra -Werror -fsanitize=address,undefined \
+		$(PORTABLE_SOURCES) $(TEST_SOURCES) -lm -o $(BUILD_DIRECTORY)/test_phase1
+	./$(BUILD_DIRECTORY)/test_phase1
+
+test: test-tools test-c
+
 clean:
-	rm -rf build/
+	rm -rf $(BUILD_DIRECTORY)/
