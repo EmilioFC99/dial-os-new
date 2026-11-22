@@ -461,7 +461,9 @@ function drawHomeGlassStage(
       ? `USB MODE \u00b7 BAT ${DEFAULT_BATTERY_PERCENT}%`
       : playbackState === "playing"
         ? `PLAY \u00b7 VOL ${volumePercent} \u00b7 ${DEFAULT_BATTERY_PERCENT}%`
-        : `IDLE \u00b7 VOL ${volumePercent} \u00b7 ${DEFAULT_BATTERY_PERCENT}%`;
+        : playbackState === "paused"
+          ? `PAUSE \u00b7 VOL ${volumePercent} \u00b7 ${DEFAULT_BATTERY_PERCENT}%`
+          : `IDLE \u00b7 VOL ${volumePercent} \u00b7 ${DEFAULT_BATTERY_PERCENT}%`;
 
   drawingContext.font = `600 9.5px ${FONT_MONO}`;
   const statusWidth = drawingContext.measureText(statusText).width;
@@ -587,7 +589,7 @@ function drawAliveCubeIcon(
   drawingContext.lineJoin = "miter";
 
   if (appId === "now-playing") {
-    if (playbackState === "playing") {
+    if (playbackState === "playing" || playbackState === "paused") {
       const discRadius = halfSize * 0.64;
       const foreshortenX = clamp(Math.cos(angleY) * 0.92, 0.24, 1.0);
       const foreshortenY = clamp(Math.cos(angleX) * 0.96, 0.55, 1.0);
@@ -637,8 +639,10 @@ function drawAliveCubeIcon(
         const baseLineY = centerY + halfSize * 0.72;
         for (let barIndex = 0; barIndex < barCount; barIndex += 1) {
           const waveLevel =
-            0.28 +
-            0.72 * (0.5 + 0.5 * Math.sin(clockSeconds * (4.6 + barIndex * 1.1) + barIndex * 1.4));
+            playbackState === "playing"
+              ? 0.28 +
+                0.72 * (0.5 + 0.5 * Math.sin(clockSeconds * (4.6 + barIndex * 1.1) + barIndex * 1.4))
+              : 0.28;
           const barHeight = (3.5 + waveLevel * 9.5) * cubeScale;
           const barX = centerX - totalBarWidth / 2 + barIndex * (barWidth + barGap);
           drawingContext.fillStyle = barIndex % 2 === 0 ? accentColor : primaryInk;
@@ -1750,7 +1754,9 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
 
     const appSpec = HOME_APPS[layout.appIndex];
     const isFocusedTarget = layout.virtualSlot === focusedSlot;
-    const isNowPlayingVinyl = appSpec.id === "now-playing" && playbackState === "playing";
+    const isNowPlayingVinyl =
+      appSpec.id === "now-playing" &&
+      (playbackState === "playing" || playbackState === "paused");
 
     let cubeCenterX = layout.centerX;
     let cubeCenterY = layout.centerY;
@@ -1875,7 +1881,10 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
 
   /* 5. Destination screen overlays when launched */
   if (launchProgress > LAUNCH_OVERLAY_MIN_PROGRESS) {
-    if (focusedApp.id === "now-playing" && playbackState === "playing") {
+    if (
+      focusedApp.id === "now-playing" &&
+      (playbackState === "playing" || playbackState === "paused")
+    ) {
       drawNowPlayingExpandedChrome(
         drawingContext,
         launchProgress,

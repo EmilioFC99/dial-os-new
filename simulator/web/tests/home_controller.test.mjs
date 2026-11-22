@@ -18,6 +18,8 @@ const STEP_DELTA_SECONDS = 0.05;
 const SETTLE_STEP_COUNT = 40;
 const WHEEL_STRESS_DETENT_COUNT = 20;
 const FLOAT_TOLERANCE = 1e-6;
+const TRANSITION_ROTATION_RADIANS = (20 * Math.PI) / 180;
+const TRANSITION_SETTLE_TOLERANCE = 1e-4;
 
 const CENTER_TAP_X = 180;
 const CENTER_TAP_Y = 148;
@@ -430,6 +432,97 @@ describe("createHomeController nominal behavior", () => {
     const settledSnapshot = homeController.getRenderSnapshot();
     assert.equal(settledSnapshot.launchProgress, 0);
     assert.equal(settledSnapshot.backSwipeProgress, 0);
+  });
+
+  test("returnFromScreen('now-playing') sets a 20-degree smooth transition rotation angle that settles cleanly for playing and paused active tracks", () => {
+    // 1. Playing state with active track
+    const playingHomeController = createSettledHomeController();
+    playingHomeController.syncPlaybackState({
+      playbackState: "playing",
+      hasActiveTrack: true,
+    });
+    playingHomeController.selectAppById("now-playing");
+    playingHomeController.launchFocusedApp();
+    playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+
+    playingHomeController.returnFromScreen("now-playing");
+    const playingReturnStart = playingHomeController.getRenderSnapshot();
+    assert.equal(playingReturnStart.focusedApp.id, "now-playing");
+    assert.equal(playingReturnStart.launchProgress, 1);
+    assert.equal(playingReturnStart.launchTarget, 0);
+    assert.ok(
+      Math.abs(playingReturnStart.vinylNudgeRadians - TRANSITION_ROTATION_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
+
+    playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
+    const playingReturnMid = playingHomeController.getRenderSnapshot();
+    assert.ok(playingReturnMid.launchProgress > 0 && playingReturnMid.launchProgress < 1);
+    assert.ok(
+      playingReturnMid.vinylNudgeRadians > 0 &&
+        playingReturnMid.vinylNudgeRadians < TRANSITION_ROTATION_RADIANS,
+    );
+
+    const playingSettled = advanceController(
+      playingHomeController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.equal(playingSettled.launchProgress, 0);
+    assert.ok(Math.abs(playingSettled.vinylNudgeRadians) < TRANSITION_SETTLE_TOLERANCE);
+
+    // 2. Paused state with active track
+    const pausedHomeController = createSettledHomeController();
+    pausedHomeController.syncPlaybackState({
+      playbackState: "paused",
+      hasActiveTrack: true,
+    });
+    pausedHomeController.selectAppById("now-playing");
+    pausedHomeController.launchFocusedApp();
+    pausedHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+
+    pausedHomeController.returnFromScreen("now-playing");
+    const pausedReturnStart = pausedHomeController.getRenderSnapshot();
+    assert.equal(pausedReturnStart.focusedApp.id, "now-playing");
+    assert.equal(pausedReturnStart.launchProgress, 1);
+    assert.equal(pausedReturnStart.launchTarget, 0);
+    assert.ok(
+      Math.abs(pausedReturnStart.vinylNudgeRadians - TRANSITION_ROTATION_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
+
+    pausedHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
+    const pausedReturnMid = pausedHomeController.getRenderSnapshot();
+    assert.ok(pausedReturnMid.launchProgress > 0 && pausedReturnMid.launchProgress < 1);
+    assert.ok(
+      pausedReturnMid.vinylNudgeRadians > 0 &&
+        pausedReturnMid.vinylNudgeRadians < TRANSITION_ROTATION_RADIANS,
+    );
+
+    const pausedSettled = advanceController(
+      pausedHomeController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.equal(pausedSettled.launchProgress, 0);
+    assert.ok(Math.abs(pausedSettled.vinylNudgeRadians) < TRANSITION_SETTLE_TOLERANCE);
+
+    // 3. Idle state with no active track returns cleanly without vinyl spin rotation offset
+    const idleHomeController = createSettledHomeController();
+    idleHomeController.syncPlaybackState({
+      playbackState: "idle",
+      hasActiveTrack: false,
+    });
+    idleHomeController.selectAppById("now-playing");
+    idleHomeController.launchFocusedApp();
+    idleHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+
+    idleHomeController.returnFromScreen("now-playing");
+    const idleReturnStart = idleHomeController.getRenderSnapshot();
+    assert.equal(idleReturnStart.launchProgress, 1);
+    assert.equal(idleReturnStart.vinylNudgeRadians, 0);
+    idleHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+    assert.equal(idleHomeController.getRenderSnapshot().launchProgress, 0);
   });
 });
 

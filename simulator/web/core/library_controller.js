@@ -35,8 +35,6 @@ export const LIBRARY_CONSTANTS = Object.freeze({
   VINYL_LAUNCH_DURATION_SECONDS: 0.62,
   DELETE_HOLD_DURATION_SECONDS: 1.10,
   LONG_PRESS_DURATION_SECONDS: 0.48,
-  CRATE_SWIPE_UP_MIN_DELTA_Y: 26,
-  CRATE_SWIPE_UP_SLOPE_RATIO: 1.15,
   BACK_SWIPE_DISTANCE_PX: 96,
   BACK_SWIPE_COMMIT_THRESHOLD: 0.45,
   TAP_DRIFT_LIMIT_PX: 10,
@@ -160,11 +158,9 @@ const CRATE_PEEK_BOTTOM_Y = 212;
 const CRATE_SLEEVE_LEFT_X = 108;
 const CRATE_SLEEVE_TOP_Y = 90;
 const CRATE_SLEEVE_BOTTOM_Y = 216;
-const CRATE_PULL_UP_PREVIEW_DISTANCE_PX = 72;
-const CRATE_PULL_UP_DECAY_RATE = 7.5;
-const CRATE_SWIPE_UP_HINT_HALF_WIDTH_PX = 58;
-const CRATE_SWIPE_UP_HINT_TOP_Y = 302;
-const CRATE_SWIPE_UP_HINT_BOTTOM_Y = 346;
+const CRATE_NOTE_BUTTON_X = DISPLAY_CENTER_PX;
+const CRATE_NOTE_BUTTON_Y = 325;
+const CRATE_NOTE_BUTTON_RADIUS_PX = 22;
 
 const EMPTY_COPY_BY_SECTION = Object.freeze({
   favorites: Object.freeze({
@@ -1268,12 +1264,20 @@ export function createLibraryController({
     if (!selectedAlbum) {
       return;
     }
-    const firstTrack = selectedAlbum.tracks[0];
+    const albumTracks = Array.isArray(selectedAlbum.tracks) ? selectedAlbum.tracks : [];
+    const matchingActiveTrack = activeTrackId
+      ? albumTracks.find((trackEntry) => trackEntry.id === activeTrackId)
+      : null;
+    const targetTrack = matchingActiveTrack || albumTracks[0] || null;
     launchVinyl(
       selectedAlbum.id,
       "albums",
-      firstTrack ? firstTrack.id : null,
-      { queueSource: "album", albumId: selectedAlbum.id },
+      targetTrack ? targetTrack.id : null,
+      {
+        queueSource: "album",
+        albumId: selectedAlbum.id,
+        launchOrigin: "album-crate",
+      },
     );
   }
 
@@ -1672,12 +1676,6 @@ export function createLibraryController({
     if (!isArcEngaged) {
       arcFeedbackAlpha = Math.max(0, arcFeedbackAlpha - deltaSeconds * ARC_FEEDBACK_DECAY_RATE);
     }
-    if (!pointerActive && cratePullUpProgress > 0) {
-      cratePullUpProgress = Math.max(
-        0,
-        cratePullUpProgress - deltaSeconds * CRATE_PULL_UP_DECAY_RATE,
-      );
-    }
 
     const isDraggingScroll =
       pointerActive &&
@@ -1829,17 +1827,6 @@ export function createLibraryController({
         backSwipeProgress = clamp(deltaX / LIBRARY_CONSTANTS.BACK_SWIPE_DISTANCE_PX, 0, 1);
         return;
       }
-      if (
-        currentView.kind === "albums" &&
-        deltaY < -LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX &&
-        Math.abs(deltaY) > Math.abs(deltaX) * LIBRARY_CONSTANTS.CRATE_SWIPE_UP_SLOPE_RATIO
-      ) {
-        pointerMode = "crate";
-        currentView.scrollPosition = pointerStartScroll;
-        pointerVelocity = 0;
-        cratePullUpProgress = clamp(-deltaY / CRATE_PULL_UP_PREVIEW_DISTANCE_PX, 0, 1);
-        return;
-      }
       const currentDistance = Math.hypot(
         pointX - DISPLAY_CENTER_PX,
         pointY - DISPLAY_CENTER_PX,
@@ -1902,15 +1889,6 @@ export function createLibraryController({
     }
 
     if (pointerMode === "crate") {
-      if (
-        deltaY < 0 &&
-        Math.abs(deltaY) > Math.abs(deltaX) * LIBRARY_CONSTANTS.CRATE_SWIPE_UP_SLOPE_RATIO
-      ) {
-        currentView.scrollPosition = pointerStartScroll;
-        pointerVelocity = 0;
-        cratePullUpProgress = clamp(-deltaY / CRATE_PULL_UP_PREVIEW_DISTANCE_PX, 0, 1);
-        return;
-      }
       cratePullUpProgress = 0;
       const albums = resolveCrateAlbums(currentView);
       const maxIndex = Math.max(0, albums.length - 1);
@@ -1948,7 +1926,6 @@ export function createLibraryController({
     const releaseY = Number.isFinite(pointY) ? pointY : pointerLastY;
     const totalDeltaX = releaseX - pointerStartX;
     const totalDeltaY = releaseY - pointerStartY;
-    const releaseStartScroll = pointerStartScroll;
     const finalDistance = Math.hypot(totalDeltaX, totalDeltaY);
     const movedDistance = Math.max(pointerMovedDistance, finalDistance);
     const wasTap = movedDistance < LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX;
@@ -2053,10 +2030,9 @@ export function createLibraryController({
       cratePullUpProgress = 0;
       if (wasTap) {
         const focusedIndex = clamp(Math.round(currentView.scrollPosition), 0, maxIndex);
-        const hitSwipeUpIndicator =
-          Math.abs(releaseX - DISPLAY_CENTER_PX) <= CRATE_SWIPE_UP_HINT_HALF_WIDTH_PX &&
-          releaseY >= CRATE_SWIPE_UP_HINT_TOP_Y &&
-          releaseY <= CRATE_SWIPE_UP_HINT_BOTTOM_Y;
+        const hitAlbumTracksButton =
+          Math.hypot(releaseX - CRATE_NOTE_BUTTON_X, releaseY - CRATE_NOTE_BUTTON_Y) <=
+          CRATE_NOTE_BUTTON_RADIUS_PX;
         const hitPeekingVinyl =
           releaseX >= CRATE_PEEK_LEFT_X &&
           releaseX <= CRATE_PEEK_RIGHT_X &&
@@ -2068,7 +2044,7 @@ export function createLibraryController({
           releaseY >= CRATE_SLEEVE_TOP_Y &&
           releaseY <= CRATE_SLEEVE_BOTTOM_Y;
 
-        if (hitSwipeUpIndicator && albums[focusedIndex]) {
+        if (hitAlbumTracksButton && albums[focusedIndex]) {
           openFocusedAlbumTracks();
         } else if ((hitPeekingVinyl || hitCenterSleeve) && albums[focusedIndex]) {
           launchFocusedCrateAlbum(currentView);
@@ -2079,14 +2055,6 @@ export function createLibraryController({
         } else {
           currentView.targetIndex = focusedIndex;
         }
-      } else if (
-        totalDeltaY <= -LIBRARY_CONSTANTS.CRATE_SWIPE_UP_MIN_DELTA_Y &&
-        Math.abs(totalDeltaY) > Math.abs(totalDeltaX) * LIBRARY_CONSTANTS.CRATE_SWIPE_UP_SLOPE_RATIO
-      ) {
-        const anchorIndex = clamp(Math.round(releaseStartScroll), 0, maxIndex);
-        currentView.scrollPosition = anchorIndex;
-        currentView.targetIndex = anchorIndex;
-        openFocusedAlbumTracks();
       } else {
         const projected =
           currentView.scrollPosition -
@@ -2110,7 +2078,14 @@ export function createLibraryController({
           previouslyPressedRow !== null
             ? previouslyPressedRow
             : hitTestListRow(releaseX, releaseY, currentView, rows);
-        if (tappedRowIndex !== null) {
+        const isAlbumTracksOverlay =
+          currentView.kind === "tracks" && currentView.sourceType === "album";
+        const hitAlbumTracksButton =
+          Math.hypot(releaseX - CRATE_NOTE_BUTTON_X, releaseY - CRATE_NOTE_BUTTON_Y) <=
+          CRATE_NOTE_BUTTON_RADIUS_PX;
+        if (isAlbumTracksOverlay && tappedRowIndex === null && hitAlbumTracksButton) {
+          stepBack();
+        } else if (tappedRowIndex !== null) {
           pressFlashRowIndex = tappedRowIndex;
           pressFlashLevel = 1.0;
           activateFocused(tappedRowIndex);
@@ -2147,6 +2122,8 @@ export function createLibraryController({
    */
   function getRenderSnapshot() {
     const activeView = getCurrentView();
+    const albumTracksOverlayOpen =
+      activeView.kind === "tracks" && activeView.sourceType === "album";
     return {
       catalog: {
         ...catalog,
@@ -2195,6 +2172,7 @@ export function createLibraryController({
       letterSearchHudAlpha,
       letterEntries: resolveViewLetterEntries(activeView),
       rimSlabPullLevels: rimSlabPullLevels.slice(),
+      albumTracksOverlayOpen,
       cratePullUpProgress,
       backSwipeProgress,
       pointerActive,

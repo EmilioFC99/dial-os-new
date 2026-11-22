@@ -29,6 +29,9 @@ const RIM_STEP_EPSILON_RADIANS = 0.02;
 const CRATE_SLEEVE_TAP_X = 165;
 const CRATE_PEEK_DISC_TAP_X = 248;
 const CRATE_CENTER_Y = 152;
+const CRATE_NOTE_BUTTON_X = 180;
+const CRATE_NOTE_BUTTON_Y = 325;
+const CRATE_NOTE_BUTTON_RADIUS_PX = 22;
 
 const EMPTY_BACK_BUTTON_X = 180;
 const EMPTY_BACK_BUTTON_Y = 260;
@@ -986,14 +989,13 @@ describe("createLibraryController nominal behavior", () => {
     assert.equal(artistAlbumsSnapshot.viewStack[2].kind, "albums");
     assert.deepEqual(artistAlbumsSnapshot.viewStack[2].albumIds, ["album-a"]);
 
-    libraryController.handlePointerDown(CRATE_SLEEVE_TAP_X, 210);
-    libraryController.handlePointerMove(CRATE_SLEEVE_TAP_X, 130);
-    libraryController.handlePointerUp(CRATE_SLEEVE_TAP_X, 130);
+    tapPoint(libraryController, CRATE_NOTE_BUTTON_X, CRATE_NOTE_BUTTON_Y);
     const tracksSnapshot = advanceLibraryController(
       libraryController,
       STEP_DELTA_SECONDS,
       SETTLE_STEP_COUNT,
     );
+    assert.equal(tracksSnapshot.albumTracksOverlayOpen, true);
     assert.equal(tracksSnapshot.viewStack.length, 4);
     assert.equal(tracksSnapshot.viewStack[3].kind, "tracks");
     assert.equal(tracksSnapshot.viewStack[3].sourceType, "album");
@@ -1013,7 +1015,7 @@ describe("createLibraryController nominal behavior", () => {
     ]);
   });
 
-  test("tapping album sleeve or peeking vinyl disc in Albums Crate starts playing the album, while swipe up opens tracklist", () => {
+  test("tapping album sleeve or peeking vinyl disc in Albums Crate launches with album-crate origin, swipe-up does not open tracklist, and floating note button toggles albumTracksOverlayOpen", () => {
     const launchedPayloads = [];
     const libraryController = createSettledLibraryController({
       onLaunchTrack: (launchPayload) => launchedPayloads.push(launchPayload),
@@ -1021,6 +1023,7 @@ describe("createLibraryController nominal behavior", () => {
 
     const albumsSnapshot = openHubSectionTile(libraryController, 3);
     assert.equal(albumsSnapshot.viewStack[albumsSnapshot.viewStack.length - 1].kind, "albums");
+    assert.equal(albumsSnapshot.albumTracksOverlayOpen, false);
 
     tapPoint(libraryController, CRATE_SLEEVE_TAP_X, CRATE_CENTER_Y);
     const sleeveLaunchedSnapshot = libraryController.getRenderSnapshot();
@@ -1032,6 +1035,7 @@ describe("createLibraryController nominal behavior", () => {
         trackId: "t-a1",
         queueSource: "album",
         albumId: "album-a",
+        launchOrigin: "album-crate",
       },
     ]);
 
@@ -1043,29 +1047,61 @@ describe("createLibraryController nominal behavior", () => {
 
     assert.equal(discLaunchedSnapshot.vinylLaunchTarget, 1);
     assert.equal(launchedPayloads.length, 2);
+    assert.deepEqual(launchedPayloads[1], {
+      trackId: "t-a1",
+      queueSource: "album",
+      albumId: "album-a",
+      launchOrigin: "album-crate",
+    });
 
     libraryController.stepBack();
     advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
 
+    // Vertical swipe-up inside Albums crate must NOT open the album tracklist anymore.
     libraryController.handlePointerDown(180, 296);
     libraryController.handlePointerMove(180, 240);
-    const pullMidSnapshot = libraryController.getRenderSnapshot();
-    assert.ok(
-      pullMidSnapshot.cratePullUpProgress > 0 && pullMidSnapshot.cratePullUpProgress <= 1,
-    );
-
     libraryController.handlePointerMove(180, 180);
     libraryController.handlePointerUp(180, 180);
+    const afterSwipeUpSnapshot = advanceLibraryController(
+      libraryController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+
+    assert.equal(afterSwipeUpSnapshot.currentView.kind, "albums");
+    assert.equal(afterSwipeUpSnapshot.albumTracksOverlayOpen, false);
+    assert.equal(afterSwipeUpSnapshot.cratePullUpProgress, 0);
+    assert.equal(afterSwipeUpSnapshot.viewStack.length, 2);
+
+    // Swipe-up starting directly on the album sleeve must also stay in Albums crate.
+    libraryController.handlePointerDown(CRATE_SLEEVE_TAP_X, 210);
+    libraryController.handlePointerMove(CRATE_SLEEVE_TAP_X, 130);
+    libraryController.handlePointerUp(CRATE_SLEEVE_TAP_X, 130);
+    const afterSleeveSwipeSnapshot = advanceLibraryController(
+      libraryController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.equal(afterSleeveSwipeSnapshot.currentView.kind, "albums");
+    assert.equal(afterSleeveSwipeSnapshot.albumTracksOverlayOpen, false);
+
+    // Tapping outside the 22px floating music-note button radius does not open the tracklist.
+    tapPoint(libraryController, CRATE_NOTE_BUTTON_X + CRATE_NOTE_BUTTON_RADIUS_PX + 8, CRATE_NOTE_BUTTON_Y);
+    assert.equal(libraryController.getRenderSnapshot().albumTracksOverlayOpen, false);
+    assert.equal(libraryController.getRenderSnapshot().currentView.kind, "albums");
+
+    // Tapping the floating music-note icon button opens the album tracklist overlay.
+    tapPoint(libraryController, CRATE_NOTE_BUTTON_X, CRATE_NOTE_BUTTON_Y);
     const tracksSnapshot = advanceLibraryController(
       libraryController,
       STEP_DELTA_SECONDS,
       SETTLE_STEP_COUNT,
     );
 
+    assert.equal(tracksSnapshot.albumTracksOverlayOpen, true);
     assert.equal(tracksSnapshot.currentView.kind, "tracks");
     assert.equal(tracksSnapshot.currentView.sourceType, "album");
     assert.equal(tracksSnapshot.currentView.albumId, "album-a");
-    assert.equal(tracksSnapshot.cratePullUpProgress, 0);
 
     // Horizontal swipe inside the crystal album tracklist must stay locked to this album.
     libraryController.handlePointerDown(260, 180);
@@ -1076,20 +1112,87 @@ describe("createLibraryController nominal behavior", () => {
       STEP_DELTA_SECONDS,
       SETTLE_STEP_COUNT,
     );
+    assert.equal(lockedTracksSnapshot.albumTracksOverlayOpen, true);
     assert.equal(lockedTracksSnapshot.currentView.kind, "tracks");
     assert.equal(lockedTracksSnapshot.currentView.albumId, "album-a");
 
-    // Step back to Albums and verify tapping the bottom swipe-up indicator opens tracks.
+    // Pressing back closes the album tracklist overlay cleanly, and edge-radius note tap re-opens it.
     libraryController.stepBack();
-    advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
-    tapPoint(libraryController, 180, 320);
-    const indicatorTracksSnapshot = advanceLibraryController(
+    const closedOverlaySnapshot = advanceLibraryController(
       libraryController,
       STEP_DELTA_SECONDS,
       SETTLE_STEP_COUNT,
     );
-    assert.equal(indicatorTracksSnapshot.currentView.kind, "tracks");
-    assert.equal(indicatorTracksSnapshot.currentView.albumId, "album-a");
+    assert.equal(closedOverlaySnapshot.albumTracksOverlayOpen, false);
+    assert.equal(closedOverlaySnapshot.currentView.kind, "albums");
+
+    tapPoint(libraryController, CRATE_NOTE_BUTTON_X + 16, CRATE_NOTE_BUTTON_Y);
+    const edgeButtonSnapshot = advanceLibraryController(
+      libraryController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.equal(edgeButtonSnapshot.albumTracksOverlayOpen, true);
+    assert.equal(edgeButtonSnapshot.currentView.albumId, "album-a");
+
+    performLeftEdgeBackSwipe(libraryController);
+    const swipeClosedSnapshot = advanceLibraryController(
+      libraryController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.equal(swipeClosedSnapshot.albumTracksOverlayOpen, false);
+    assert.equal(swipeClosedSnapshot.currentView.kind, "albums");
+  });
+
+  test("tapping album sleeve or peeking disc launches already-playing track of that album instead of tracks[0]", () => {
+    const launchedPayloads = [];
+    const libraryController = createSettledLibraryController({
+      onLaunchTrack: (launchPayload) => launchedPayloads.push(launchPayload),
+    });
+
+    // Simulate second track of album-a ("t-a2") already active before entering Albums crate.
+    libraryController.setActiveTrackId("t-a2");
+    openHubSectionTile(libraryController, 3);
+
+    tapPoint(libraryController, CRATE_SLEEVE_TAP_X, CRATE_CENTER_Y);
+    const sleeveContinuedSnapshot = libraryController.getRenderSnapshot();
+    assert.equal(sleeveContinuedSnapshot.vinylLaunchTarget, 1);
+    assert.equal(sleeveContinuedSnapshot.activeTrackId, "t-a2");
+    assert.deepEqual(launchedPayloads, [
+      {
+        trackId: "t-a2",
+        queueSource: "album",
+        albumId: "album-a",
+        launchOrigin: "album-crate",
+      },
+    ]);
+
+    libraryController.stepBack();
+    advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+
+    tapPoint(libraryController, CRATE_PEEK_DISC_TAP_X, CRATE_CENTER_Y);
+    const discContinuedSnapshot = libraryController.getRenderSnapshot();
+    assert.equal(discContinuedSnapshot.vinylLaunchTarget, 1);
+    assert.equal(discContinuedSnapshot.activeTrackId, "t-a2");
+    assert.deepEqual(launchedPayloads[1], {
+      trackId: "t-a2",
+      queueSource: "album",
+      albumId: "album-a",
+      launchOrigin: "album-crate",
+    });
+
+    // When activeTrackId belongs to a different album, tapping album-a launches album-a's first track.
+    libraryController.stepBack();
+    advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    libraryController.setActiveTrackId("t-m1");
+    tapPoint(libraryController, CRATE_SLEEVE_TAP_X, CRATE_CENTER_Y);
+    assert.deepEqual(launchedPayloads[2], {
+      trackId: "t-a1",
+      queueSource: "album",
+      albumId: "album-a",
+      launchOrigin: "album-crate",
+    });
   });
 
   test("rim-arc drag triggers >180 degree Crystal-Slab Letter Seek and populates rimSlabPullLevels in All songs", () => {

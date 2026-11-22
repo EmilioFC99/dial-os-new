@@ -466,6 +466,16 @@ export function createAudioEngine({ createAudioElement } = {}) {
         ? genreAlbumIds.slice()
         : [];
 
+    if (activeTrack && targetTrack.id === activeTrack.id) {
+      queueIndex = selectedIndex;
+      activeTrack = resolvedTracks[selectedIndex];
+      activeAlbum = cachedAlbumByIdMap.get(activeTrack.albumId) || null;
+      if (!isPlaying || playbackState !== "playing" || (audioElement && audioElement.paused)) {
+        play();
+      }
+      return;
+    }
+
     pendingSeekSeconds = null;
     loadQueueTrackAt(selectedIndex, { autoplay: true });
   }
@@ -552,6 +562,14 @@ export function createAudioEngine({ createAudioElement } = {}) {
       return;
     }
     const clampedIndex = clamp(Math.trunc(targetIndex), 0, queueTracks.length - 1);
+    const selectedTrack = queueTracks[clampedIndex];
+    if (selectedTrack && activeTrack && selectedTrack.id === activeTrack.id) {
+      queueIndex = clampedIndex;
+      if (!isPlaying || playbackState !== "playing" || (audioElement && audioElement.paused)) {
+        play();
+      }
+      return;
+    }
     loadQueueTrackAt(clampedIndex, { autoplay: true });
   }
 

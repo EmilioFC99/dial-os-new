@@ -57,6 +57,15 @@ const VOLUME_BEZEL_MAX_UP_Y = 10;
 const VOLUME_BEZEL_MAX_DOWN_Y = 350;
 const RIGHT_BEZEL_RADIUS_PX = 150;
 const RIGHT_BEZEL_SWEEP_STEPS = 20;
+const VOLUME_MIN_START_RADIUS_PX = 135;
+const VOLUME_OUTER_START_RADIUS_PX = 160;
+const VOLUME_INNER_REJECT_RADIUS_PX = 100;
+const VOLUME_MID_REJECT_RADIUS_PX = 120;
+const SEEK_BOUNDARY_RADIUS_PX = 90;
+const SEEK_INSIDE_TEST_RADIUS_PX = 85;
+const SEEK_OUTSIDE_TEST_RADIUS_PX = 110;
+const QUEUE_PULL_ZONE_TOP_Y = 245;
+const ENTRANCE_ROTATION_OFFSET_RADIANS = (20 * Math.PI) / 180;
 
 const SKIP_LEFT_START_X = 230;
 const SKIP_LEFT_END_X = 150;
@@ -340,6 +349,32 @@ function traceRightBezelSweep(
     );
   }
   controller.handlePointerMove(endWaypoint.pointX, endWaypoint.pointY);
+}
+
+/**
+ * Trace smooth pointer movement around display center at `radiusPx` between two angles.
+ *
+ * @param {object} controller Controller instance under test.
+ * @param {number} radiusPx Arc radius from display center in pixels.
+ * @param {number} startAngleRadians Starting polar angle in radians.
+ * @param {number} endAngleRadians Target polar angle in radians.
+ * @param {number} [stepCount=RIGHT_BEZEL_SWEEP_STEPS] Number of interpolation segments.
+ */
+function traceCircularBezelArc(
+  controller,
+  radiusPx,
+  startAngleRadians,
+  endAngleRadians,
+  stepCount = RIGHT_BEZEL_SWEEP_STEPS,
+) {
+  for (let stepIndex = 1; stepIndex <= stepCount; stepIndex += 1) {
+    const angleRadians =
+      startAngleRadians + ((endAngleRadians - startAngleRadians) * stepIndex) / stepCount;
+    controller.handlePointerMove(
+      DISPLAY_CENTER_PX + radiusPx * Math.cos(angleRadians),
+      DISPLAY_CENTER_PX + radiusPx * Math.sin(angleRadians),
+    );
+  }
 }
 
 /**
@@ -769,9 +804,9 @@ describe("now_playing_controller.js constants and pure helpers", () => {
     assert.equal(NOW_PLAYING_CONSTANTS.SKIP_DURATION_SECONDS, 0.42);
     assert.equal(NOW_PLAYING_CONSTANTS.QUICK_ACTIONS_TIMEOUT_SECONDS, 4.6);
     assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_HOLD_SECONDS, 1.45);
-    assert.equal(NOW_PLAYING_CONSTANTS.SPINDLE_BASE_RADIUS_PX, 27);
+    assert.equal(NOW_PLAYING_CONSTANTS.SPINDLE_BASE_RADIUS_PX, 13.5);
     assert.equal(NOW_PLAYING_CONSTANTS.SPINDLE_SEEK_RADIUS_PX, 62);
-    assert.equal(NOW_PLAYING_CONSTANTS.SEEK_HOLD_RADIUS_PX, 124);
+    assert.equal(NOW_PLAYING_CONSTANTS.SEEK_HOLD_RADIUS_PX, 90);
     assert.equal(NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS, 0.42);
     assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_LIMIT_RATIO, 0.85);
     assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_FULL_ARC_RADIANS, Math.PI);
@@ -995,7 +1030,8 @@ describe("createNowPlayingController entry, operating modes, and tap gestures", 
     const pausedSnapshot = nowPlayingController.getRenderSnapshot();
     assert.equal(callbackLogs.togglePlayPauseCalls, 1);
     assert.equal(pausedSnapshot.playPausePulseAlpha, 1);
-    assert.equal(pausedSnapshot.toastText, "PAUSED");
+    assert.equal(pausedSnapshot.toastText, "");
+    assert.equal(pausedSnapshot.toastAlpha, 0);
     assert.equal(pausedSnapshot.quickActionsOpen, false);
 
     nowPlayingController.step(0.30);
@@ -1004,9 +1040,12 @@ describe("createNowPlayingController entry, operating modes, and tap gestures", 
     tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
     nowPlayingController.step(0.10);
     tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
+    const resumedSnapshot = nowPlayingController.getRenderSnapshot();
     assert.equal(callbackLogs.togglePlayPauseCalls, 2);
-    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "PLAYING");
-    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, false);
+    assert.equal(resumedSnapshot.playPausePulseAlpha, 1);
+    assert.equal(resumedSnapshot.toastText, "");
+    assert.equal(resumedSnapshot.toastAlpha, 0);
+    assert.equal(resumedSnapshot.quickActionsOpen, false);
 
     tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
     nowPlayingController.step(NOW_PLAYING_CONSTANTS.DOUBLE_TAP_WINDOW_SECONDS + 0.03);
@@ -1128,32 +1167,51 @@ describe("createNowPlayingController seek, volume arc, and wheel controls", () =
     assert.ok(queueAfterWheelSnapshot.queueScrollPosition > queueScrollBeforeWheel);
   });
 
-  test("180-degree right-bezel arc maps full semicircle (6 to 12 o'clock) across [0, 1] with zero over-clamp dead-zone", () => {
+  test("180-degree right-bezel arc maps full semicircle across [0, 1] from right-bezel start zone without dead-zone", () => {
     const { audioEngine, nowPlayingController } = createNowPlayingTestHarness();
     audioEngine.setVolume(0);
     nowPlayingController.syncAudioState(audioEngine.getState());
 
+    const outerRightThreeOClock = {
+      pointX: DISPLAY_CENTER_PX + VOLUME_OUTER_START_RADIUS_PX,
+      pointY: DISPLAY_CENTER_PX,
+    };
     const sixOClock = { pointX: 180, pointY: 330 };
     const lowerRightDiagonal = { pointX: 286, pointY: 286 };
     const threeOClock = { pointX: 330, pointY: 180 };
     const upperRightDiagonal = { pointX: 286, pointY: 74 };
     const twelveOClock = { pointX: 180, pointY: 30 };
 
-    // Sweep upward from 6 o'clock (0.0) through +45° to 3 o'clock (0.5) and 12 o'clock (1.0)
-    nowPlayingController.handlePointerDown(sixOClock.pointX, sixOClock.pointY);
-    traceRightBezelSweep(nowPlayingController, sixOClock, lowerRightDiagonal);
-    traceRightBezelSweep(nowPlayingController, lowerRightDiagonal, threeOClock);
-    const midpointUpSnapshot = nowPlayingController.getRenderSnapshot();
-    assert.equal(midpointUpSnapshot.pointerMode, "volume");
-    assert.ok(Math.abs(midpointUpSnapshot.volumeLevel - 0.5) < FLOAT_TOLERANCE);
+    // Starting at (180 + 160, 180) (0 deg, r = 160 >= 135) and tracing 180 deg (Math.PI rad) sweeps volume 0 -> 1
+    nowPlayingController.handlePointerDown(
+      outerRightThreeOClock.pointX,
+      outerRightThreeOClock.pointY,
+    );
+    traceCircularBezelArc(
+      nowPlayingController,
+      VOLUME_OUTER_START_RADIUS_PX,
+      0,
+      -Math.PI,
+      RIGHT_BEZEL_SWEEP_STEPS * 2,
+    );
+    const fullArcUpSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(fullArcUpSnapshot.pointerMode, "volume");
+    assert.ok(Math.abs(fullArcUpSnapshot.volumeLevel - 1.0) < FLOAT_TOLERANCE);
+    nowPlayingController.handlePointerUp(
+      DISPLAY_CENTER_PX - VOLUME_OUTER_START_RADIUS_PX,
+      DISPLAY_CENTER_PX,
+    );
 
+    // Starting at 3 o'clock with 0.5 volume sweeps up to 12 o'clock (1.0), down to 6 o'clock (0.0), and back to 12 o'clock (1.0)
+    audioEngine.setVolume(0.5);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.handlePointerDown(threeOClock.pointX, threeOClock.pointY);
     traceRightBezelSweep(nowPlayingController, threeOClock, upperRightDiagonal);
     traceRightBezelSweep(nowPlayingController, upperRightDiagonal, twelveOClock);
     assert.ok(
       Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 1.0) < FLOAT_TOLERANCE,
     );
 
-    // Still holding at 12 o'clock (1.0), trace downward through 3 o'clock (0.5) to 6 o'clock (0.0)
     traceRightBezelSweep(nowPlayingController, twelveOClock, upperRightDiagonal);
     traceRightBezelSweep(nowPlayingController, upperRightDiagonal, threeOClock);
     assert.ok(
@@ -1165,25 +1223,21 @@ describe("createNowPlayingController seek, volume arc, and wheel controls", () =
     assert.ok(
       Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.0) < FLOAT_TOLERANCE,
     );
-    nowPlayingController.handlePointerUp(sixOClock.pointX, sixOClock.pointY);
 
-    // Fresh press at 12 o'clock (1.0) traces downward cleanly to 0.5 at 3 o'clock and 0.0 at 6 o'clock
-    audioEngine.setVolume(1.0);
-    nowPlayingController.syncAudioState(audioEngine.getState());
-    nowPlayingController.handlePointerDown(twelveOClock.pointX, twelveOClock.pointY);
-    traceRightBezelSweep(nowPlayingController, twelveOClock, upperRightDiagonal);
-    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, threeOClock);
+    traceRightBezelSweep(nowPlayingController, sixOClock, lowerRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, lowerRightDiagonal, threeOClock);
     assert.ok(
       Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.5) < FLOAT_TOLERANCE,
     );
-    traceRightBezelSweep(nowPlayingController, threeOClock, lowerRightDiagonal);
-    traceRightBezelSweep(nowPlayingController, lowerRightDiagonal, sixOClock);
-    assert.ok(
-      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.0) < FLOAT_TOLERANCE,
-    );
-    nowPlayingController.handlePointerUp(sixOClock.pointX, sixOClock.pointY);
 
-    // Push past 1.0 (staying clamped at 1.0), then trace backward 45° for immediate drop to 0.75
+    traceRightBezelSweep(nowPlayingController, threeOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, twelveOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 1.0) < FLOAT_TOLERANCE,
+    );
+    nowPlayingController.handlePointerUp(twelveOClock.pointX, twelveOClock.pointY);
+
+    // Push past 1.0 (staying clamped at 1.0), then trace backward 45 deg for immediate drop to 0.75
     audioEngine.setVolume(0.75);
     nowPlayingController.syncAudioState(audioEngine.getState());
     nowPlayingController.handlePointerDown(threeOClock.pointX, threeOClock.pointY);
@@ -1198,6 +1252,106 @@ describe("createNowPlayingController seek, volume arc, and wheel controls", () =
       Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.75) < FLOAT_TOLERANCE,
     );
     nowPlayingController.handlePointerUp(upperRightDiagonal.pointX, upperRightDiagonal.pointY);
+  });
+
+  test("volume start zone requires r >= 135 and |atan2(deltaY, deltaX)| <= Math.PI / 4 on the right bezel", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness();
+    audioEngine.setVolume(0.5);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+
+    // 1. Bottom 6 o'clock (180, 330) is outside |angle| <= PI/4 and must NOT enter volume mode
+    nowPlayingController.handlePointerDown(180, 330);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+    traceCircularBezelArc(nowPlayingController, 150, Math.PI / 2, 0);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+    assert.equal(nowPlayingController.getRenderSnapshot().volumeLevel, 0.5);
+    nowPlayingController.handlePointerUp(330, 180);
+
+    // 2. Left side 9 o'clock (180 - 150, 180) must NOT enter volume mode
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX - 150, DISPLAY_CENTER_PX);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+    traceCircularBezelArc(nowPlayingController, 150, Math.PI, Math.PI * 0.5);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+    assert.equal(nowPlayingController.getRenderSnapshot().volumeLevel, 0.5);
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX + 150);
+
+    // 3. Inner radii r = 100 and r = 120 (< 135) on the right side must NOT enter volume mode
+    for (const rejectRadiusPx of [VOLUME_INNER_REJECT_RADIUS_PX, VOLUME_MID_REJECT_RADIUS_PX]) {
+      nowPlayingController.handlePointerDown(
+        DISPLAY_CENTER_PX + rejectRadiusPx,
+        DISPLAY_CENTER_PX,
+      );
+      assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+      traceCircularBezelArc(nowPlayingController, rejectRadiusPx, 0, -Math.PI / 3);
+      assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+      assert.equal(nowPlayingController.getRenderSnapshot().volumeLevel, 0.5);
+      nowPlayingController.handlePointerUp(
+        DISPLAY_CENTER_PX + rejectRadiusPx * Math.cos(-Math.PI / 3),
+        DISPLAY_CENTER_PX + rejectRadiusPx * Math.sin(-Math.PI / 3),
+      );
+    }
+
+    // 4. Outer right bezel outside 45-degree wedge (60 deg) must NOT enter volume mode
+    const sixtyDegreesRadians = Math.PI / 3;
+    const sixtyDegPointX = DISPLAY_CENTER_PX + 150 * Math.cos(sixtyDegreesRadians);
+    const sixtyDegPointY = DISPLAY_CENTER_PX + 150 * Math.sin(sixtyDegreesRadians);
+    nowPlayingController.handlePointerDown(sixtyDegPointX, sixtyDegPointY);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+    traceCircularBezelArc(nowPlayingController, 150, sixtyDegreesRadians, 0);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+    assert.equal(nowPlayingController.getRenderSnapshot().volumeLevel, 0.5);
+    nowPlayingController.handlePointerUp(330, 180);
+
+    // 5. Boundary at r = 135 and angle = -45 deg DOES enter volume mode
+    nowPlayingController.handlePointerDown(
+      DISPLAY_CENTER_PX + VOLUME_MIN_START_RADIUS_PX,
+      DISPLAY_CENTER_PX,
+    );
+    assert.equal(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+    traceCircularBezelArc(nowPlayingController, VOLUME_MIN_START_RADIUS_PX, 0, -Math.PI / 4);
+    assert.equal(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+    assert.ok(nowPlayingController.getRenderSnapshot().volumeLevel > 0.5);
+    nowPlayingController.handlePointerUp(
+      DISPLAY_CENTER_PX + VOLUME_MIN_START_RADIUS_PX * Math.cos(-Math.PI / 4),
+      DISPLAY_CENTER_PX + VOLUME_MIN_START_RADIUS_PX * Math.sin(-Math.PI / 4),
+    );
+  });
+
+  test("seek start zone is a full 360-degree circle inside r <= 90px and rejects long-taps outside r > 90px", () => {
+    const { nowPlayingController } = createNowPlayingTestHarness();
+
+    // Long-tapping outside r > 90px (e.g. r = 110 at 3 o'clock and r = 95 at 12 o'clock) must NOT enter seek mode
+    const rejectedSeekPoints = [
+      { pointX: DISPLAY_CENTER_PX + SEEK_OUTSIDE_TEST_RADIUS_PX, pointY: DISPLAY_CENTER_PX },
+      { pointX: DISPLAY_CENTER_PX, pointY: DISPLAY_CENTER_PX - 95 },
+    ];
+    for (const candidatePoint of rejectedSeekPoints) {
+      nowPlayingController.handlePointerDown(candidatePoint.pointX, candidatePoint.pointY);
+      nowPlayingController.step(NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS + 0.05);
+      const outsideSnapshot = nowPlayingController.getRenderSnapshot();
+      assert.equal(outsideSnapshot.isSeeking, false);
+      assert.notEqual(outsideSnapshot.pointerMode, "seek");
+      assert.equal(outsideSnapshot.seekHoldProgress, 0);
+      nowPlayingController.handlePointerUp(candidatePoint.pointX, candidatePoint.pointY);
+    }
+
+    // Full 360-degree circle inside r <= 90px (3, 9, 6, and exact 90px boundary) enters seek after 0.42s
+    const acceptedSeekPoints = [
+      { pointX: DISPLAY_CENTER_PX + SEEK_INSIDE_TEST_RADIUS_PX, pointY: DISPLAY_CENTER_PX },
+      { pointX: DISPLAY_CENTER_PX - SEEK_INSIDE_TEST_RADIUS_PX, pointY: DISPLAY_CENTER_PX },
+      { pointX: DISPLAY_CENTER_PX, pointY: DISPLAY_CENTER_PX + SEEK_INSIDE_TEST_RADIUS_PX },
+      { pointX: DISPLAY_CENTER_PX + SEEK_BOUNDARY_RADIUS_PX, pointY: DISPLAY_CENTER_PX },
+    ];
+    for (const candidatePoint of acceptedSeekPoints) {
+      nowPlayingController.handlePointerDown(candidatePoint.pointX, candidatePoint.pointY);
+      nowPlayingController.step(NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS + 0.02);
+      const insideSnapshot = nowPlayingController.getRenderSnapshot();
+      assert.equal(insideSnapshot.isSeeking, true);
+      assert.equal(insideSnapshot.pointerMode, "seek");
+      nowPlayingController.handlePointerUp(candidatePoint.pointX, candidatePoint.pointY);
+      assert.equal(nowPlayingController.getRenderSnapshot().isSeeking, false);
+      advanceSteps(nowPlayingController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    }
   });
 });
 
@@ -1390,6 +1544,193 @@ describe("createNowPlayingController skip transitions, quick actions, and queue 
     tapPoint(zeroQueueHarness.nowPlayingController, secondQueueRow.centerX, secondQueueRow.centerY);
     assert.deepEqual(zeroQueueHarness.callbackLogs.selectedQueueIndices, [1]);
     assert.equal(zeroQueueHarness.nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+  });
+
+  test("Context Queue swipe-up starts only from pointY >= 245 and left-edge drags never fall through into queue-pull or skip-drag", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      returnScreen: "home",
+    });
+
+    // 1. Valid start at exact pointY = 245 boundary dragging straight up enters queue-pull and opens Queue Sheet
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, QUEUE_PULL_ZONE_TOP_Y);
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, QUEUE_PULL_ZONE_TOP_Y - 50);
+    assert.equal(nowPlayingController.getRenderSnapshot().pointerMode, "queue-pull");
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, QUEUE_PULL_ZONE_TOP_Y - 50);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, true);
+    nowPlayingController.stepBack();
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+
+    // 2. Starting upward drag at middle (pointY = 180) or upper half (pointY = 110) must NOT open queue-pull
+    for (const invalidStartY of [180, 110]) {
+      nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, invalidStartY);
+      nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, invalidStartY - 70);
+      assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "queue-pull");
+      nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, invalidStartY - 70);
+      assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+    }
+
+    // 3. Left edge upward drag (pointX = 20, pointY = 200) must NOT enter queue-pull or skip-drag
+    nowPlayingController.handlePointerDown(20, 200);
+    nowPlayingController.handlePointerMove(20, 130);
+    const leftEdgeUpSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.notEqual(leftEdgeUpSnapshot.pointerMode, "queue-pull");
+    assert.notEqual(leftEdgeUpSnapshot.pointerMode, "skip-drag");
+    assert.equal(leftEdgeUpSnapshot.skipDragOffsetX, 0);
+    nowPlayingController.handlePointerUp(20, 130);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+    assert.deepEqual(callbackLogs.skipDirections, []);
+
+    // 4. Left edge small diagonal/rightward progression never falls through into skip-drag or queue-pull
+    nowPlayingController.handlePointerDown(20, 200);
+    nowPlayingController.handlePointerMove(30, 195);
+    const initialLeftDriftSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.notEqual(initialLeftDriftSnapshot.pointerMode, "skip-drag");
+    assert.notEqual(initialLeftDriftSnapshot.pointerMode, "queue-pull");
+    assert.equal(initialLeftDriftSnapshot.skipDragOffsetX, 0);
+
+    nowPlayingController.handlePointerMove(90, 195);
+    const committedLeftBackSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(committedLeftBackSnapshot.pointerMode, "back-swipe");
+    assert.equal(committedLeftBackSnapshot.skipDragOffsetX, 0);
+    assert.ok(committedLeftBackSnapshot.backSwipeProgress > 0.45);
+    nowPlayingController.handlePointerUp(90, 195);
+    assert.deepEqual(callbackLogs.exitReturnScreens, ["home"]);
+    assert.deepEqual(callbackLogs.skipDirections, []);
+
+    // 5. Left edge leftward drag never falls through into skip-drag
+    const secondHarness = createNowPlayingTestHarness({ returnScreen: "home" });
+    secondHarness.nowPlayingController.handlePointerDown(20, 200);
+    secondHarness.nowPlayingController.handlePointerMove(6, 200);
+    const leftwardLeftEdgeSnapshot = secondHarness.nowPlayingController.getRenderSnapshot();
+    assert.notEqual(leftwardLeftEdgeSnapshot.pointerMode, "skip-drag");
+    assert.notEqual(leftwardLeftEdgeSnapshot.pointerMode, "queue-pull");
+    assert.equal(leftwardLeftEdgeSnapshot.skipDragOffsetX, 0);
+    secondHarness.nowPlayingController.handlePointerUp(6, 200);
+  });
+
+  test("Track Details sheet stays open on downward or non-left-edge drags and closes only via left-edge back-swipe or stepBack", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      returnScreen: "library",
+    });
+
+    openQuickActionsViaTap(nowPlayingController);
+    tapPoint(nowPlayingController, QUICK_DETAILS_X, QUICK_DETAILS_Y);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+
+    // Dragging downward inside Details must NOT close Details
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, 120);
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, 240);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, 240);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+
+    // Dragging rightward from center (outside left edge) must NOT close Details
+    nowPlayingController.handlePointerDown(140, DISPLAY_CENTER_PX);
+    nowPlayingController.handlePointerMove(250, DISPLAY_CENTER_PX);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+    nowPlayingController.handlePointerUp(250, DISPLAY_CENTER_PX);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+
+    // Left-edge back-swipe closes Details without exiting Now Playing
+    performLeftEdgeBackSwipe(nowPlayingController);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, false);
+    assert.deepEqual(callbackLogs.exitReturnScreens, []);
+
+    // Re-open Details and close via stepBack()
+    nowPlayingController.toggleTrackDetails();
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+    nowPlayingController.stepBack();
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, false);
+    assert.deepEqual(callbackLogs.exitReturnScreens, []);
+  });
+
+  test("enterFromHome triggers 20-degree entrance rotation offset easing to 0, tracks launchOrigin, and exposes enter/exit transition state", () => {
+    const { audioEngine, nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      returnScreen: "home",
+    });
+
+    // enterFromHome while playing sets launchOrigin "home", openTransitionProgress 0, and 20-deg entrance rotation offset
+    nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: audioEngine.getState(),
+    });
+    const homeEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(homeEntrySnapshot.launchOrigin, "home");
+    assert.equal(homeEntrySnapshot.returnScreen, "home");
+    assert.equal(homeEntrySnapshot.openTransitionProgress, 0);
+    assert.ok(
+      Math.abs(homeEntrySnapshot.vinylNudgeRadians - ENTRANCE_ROTATION_OFFSET_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
+
+    // Stepping halfway eases openTransitionProgress toward 1 and entrance rotation offset smoothly toward 0
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
+    const homeMidSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(
+      homeMidSnapshot.openTransitionProgress > 0 && homeMidSnapshot.openTransitionProgress < 1,
+    );
+    assert.ok(
+      homeMidSnapshot.vinylNudgeRadians > 0 &&
+        homeMidSnapshot.vinylNudgeRadians < ENTRANCE_ROTATION_OFFSET_RADIANS,
+    );
+
+    // Settling completes openTransitionProgress = 1 and eases entrance rotation offset smoothly to 0
+    const settledHomeEntrySnapshot = advanceSteps(
+      nowPlayingController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.equal(settledHomeEntrySnapshot.openTransitionProgress, 1);
+    assert.ok(Math.abs(settledHomeEntrySnapshot.vinylNudgeRadians) < 0.005);
+
+    // Smooth exit transition state via left-edge swipe progress, decay on cancel/partial, and clean exit commit
+    nowPlayingController.handlePointerDown(BACK_SWIPE_START_X, BACK_SWIPE_Y);
+    nowPlayingController.handlePointerMove(BACK_SWIPE_PARTIAL_END_X, BACK_SWIPE_Y);
+    const partialExitSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(partialExitSnapshot.backSwipeProgress > 0 && partialExitSnapshot.backSwipeProgress < 0.45);
+    nowPlayingController.handlePointerUp(BACK_SWIPE_PARTIAL_END_X, BACK_SWIPE_Y);
+    assert.deepEqual(callbackLogs.exitReturnScreens, []);
+    advanceSteps(nowPlayingController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    assert.equal(nowPlayingController.getRenderSnapshot().backSwipeProgress, 0);
+
+    performLeftEdgeBackSwipe(nowPlayingController);
+    assert.deepEqual(callbackLogs.exitReturnScreens, ["home"]);
+    assert.equal(nowPlayingController.getRenderSnapshot().backSwipeProgress, 0);
+
+    // enterFromHome when paused with an active track also triggers 20-deg entrance rotation offset
+    audioEngine.pause();
+    nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: audioEngine.getState(),
+    });
+    const pausedHomeEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(pausedHomeEntrySnapshot.operatingMode, "playing");
+    assert.equal(pausedHomeEntrySnapshot.isPlaying, false);
+    assert.equal(pausedHomeEntrySnapshot.launchOrigin, "home");
+    assert.ok(
+      Math.abs(pausedHomeEntrySnapshot.vinylNudgeRadians - ENTRANCE_ROTATION_OFFSET_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
+
+    // enterFromLibrary tracks both "album-crate" and default "library" launchOrigin values
+    audioEngine.play();
+    nowPlayingController.enterFromLibrary({
+      returnScreen: "library",
+      launchOrigin: "album-crate",
+      audioState: audioEngine.getState(),
+    });
+    const crateEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(crateEntrySnapshot.launchOrigin, "album-crate");
+    assert.equal(crateEntrySnapshot.returnScreen, "library");
+    assert.equal(crateEntrySnapshot.openTransitionProgress, 0);
+
+    nowPlayingController.enterFromLibrary({
+      returnScreen: "library",
+      audioState: audioEngine.getState(),
+    });
+    const libraryEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(libraryEntrySnapshot.launchOrigin, "library");
+    assert.equal(libraryEntrySnapshot.returnScreen, "library");
   });
 });
 
@@ -1596,17 +1937,20 @@ describe("createNowPlayingController lyrics playback, back navigation, and negat
       sourceSpec: { trackId: "t2", queueSource: "all-songs" },
     });
 
-    // togglePlayPause updates playback, pulse, and toast
+    // togglePlayPause updates playback and pulse without showing a top status toast
     nowPlayingController.togglePlayPause();
     assert.equal(callbackLogs.togglePlayPauseCalls, 1);
     assert.equal(nowPlayingController.getRenderSnapshot().isPlaying, false);
     assert.equal(nowPlayingController.getRenderSnapshot().playPausePulseAlpha, 1);
-    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "PAUSED");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastAlpha, 0);
 
     nowPlayingController.togglePlayPause();
     assert.equal(callbackLogs.togglePlayPauseCalls, 2);
     assert.equal(nowPlayingController.getRenderSnapshot().isPlaying, true);
-    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "PLAYING");
+    assert.equal(nowPlayingController.getRenderSnapshot().playPausePulseAlpha, 1);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastAlpha, 0);
 
     // toggleLyrics closes Quick Actions/sheets and toggles lyricsOpen
     openQuickActionsViaTap(nowPlayingController);

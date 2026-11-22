@@ -73,7 +73,7 @@ const VINYL_SPIN_ATTACK_RATE = 5.2;
 const VINYL_SPIN_COAST_RATE = 3.8;
 const VINYL_SPIN_ZERO_THRESHOLD = 0.002;
 const VINYL_NUDGE_SPRING_RATE = 8.5;
-const VINYL_OPEN_NUDGE_RADIANS = 0.56;
+const HOME_ENTRANCE_ROTATION_RADIANS = (20 * Math.PI) / 180;
 const VINYL_PLAY_NUDGE_RADIANS = 0.24;
 const VINYL_SKIP_CROSSFADE_NUDGE_RADIANS = 0.42;
 const VINYL_SKIP_SAME_ALBUM_NUDGE_RADIANS = 0.14;
@@ -102,8 +102,6 @@ const SEEK_SPINDLE_SENSITIVITY = 0.35;
 const SEEK_SPINDLE_SPIN_FACTOR = 0.012;
 const SEEK_END_GUARD_SECONDS = 0.5;
 
-const VOLUME_BEZEL_MIN_X_PX = DISPLAY_CENTER_PX;
-const VOLUME_BEZEL_MIN_RADIUS_PX = 114;
 const VOLUME_BEZEL_START_MOVE_PX = 8;
 const VOLUME_HUD_ATTACK_RATE = 20;
 const VOLUME_HUD_DECAY_RATE = 3.2;
@@ -114,8 +112,6 @@ const LEFT_EDGE_MIN_BACK_DELTA_X_PX = 12;
 const LEFT_EDGE_BACK_SLOPE_RATIO = 1.25;
 const LEFT_EDGE_ACTIONS_MIN_DELTA_X_PX = 14;
 const LEFT_EDGE_ACTIONS_SLOPE_RATIO = 1.2;
-const LEFT_EDGE_QUEUE_MIN_DELTA_Y_PX = -18;
-const LEFT_EDGE_QUEUE_SLOPE_RATIO = 1.2;
 
 const VINYL_QUEUE_MIN_DELTA_Y_PX = -20;
 const VINYL_QUEUE_SLOPE_RATIO = 1.3;
@@ -150,10 +146,7 @@ const PICKER_ROW_PITCH_PX = 35;
 const PICKER_ROW_HEIGHT_PX = 32;
 const PICKER_MAX_VISIBLE_ROWS = 4;
 
-const DETAILS_CLOSE_DELTA_Y_PX = 44;
-const DETAILS_CLOSE_SLOPE_RATIO = 1.2;
-const DETAILS_BACK_MIN_DELTA_X_PX = 24;
-const DETAILS_BACK_SLOPE_RATIO = 1.35;
+const QUEUE_HEADER_CLOSE_SLOPE_RATIO = 1.2;
 
 const PULSE_DECAY_RATE = 2.5;
 const BANNER_FADE_IN_SECONDS = 0.24;
@@ -168,16 +161,19 @@ export const NOW_PLAYING_CONSTANTS = Object.freeze({
   SKIP_DURATION_SECONDS: 0.42,
   QUICK_ACTIONS_TIMEOUT_SECONDS: 4.6,
   VOLUME_HOLD_SECONDS: 1.45,
-  SPINDLE_BASE_RADIUS_PX: 27,
+  SPINDLE_BASE_RADIUS_PX: 13.5,
   SPINDLE_SEEK_RADIUS_PX: 62,
-  SEEK_HOLD_RADIUS_PX: 124,
+  SEEK_HOLD_RADIUS_PX: 90,
   SEEK_HOLD_DURATION_SECONDS: 0.42,
+  VOLUME_START_MIN_RADIUS_PX: 135,
+  VOLUME_START_MAX_ANGLE_RADIANS: Math.PI / 4,
   VOLUME_LIMIT_RATIO: 0.85,
   VOLUME_FULL_ARC_RADIANS: Math.PI,
   DOUBLE_TAP_WINDOW_SECONDS: 0.25,
   QUEUE_ROW_PITCH_PX: 58,
   QUEUE_ROW_HEIGHT_PX: 48,
   QUEUE_TOP_Y: 136,
+  QUEUE_START_MIN_Y_PX: 245,
   LYRICS_TRANSITION_DURATION_SECONDS: 0.44,
   SKIP_DRAG_COMMIT_PX: 56,
   QUEUE_PULL_COMMIT_DELTA_Y: -38,
@@ -689,6 +685,7 @@ export function createNowPlayingController({
 
   let operatingMode = "idle";
   let returnScreen = "home";
+  let launchOrigin = "home";
   let activeTrack = null;
   let activeAlbum = null;
   let previousTrack = null;
@@ -787,6 +784,7 @@ export function createNowPlayingController({
   let pointerLastY = 0;
   let pointerStartDistFromCenter = 0;
   let pointerMovedDistance = 0;
+  let pointerHoldSeconds = 0;
   let volumeLastAngle = 0;
 
   function clearPendingSingleTap() {
@@ -803,6 +801,7 @@ export function createNowPlayingController({
     pointerLastY = 0;
     pointerStartDistFromCenter = 0;
     pointerMovedDistance = 0;
+    pointerHoldSeconds = 0;
     volumeLastAngle = 0;
     seekHoldSeconds = 0;
     seekHoldTriggered = false;
@@ -1011,8 +1010,9 @@ export function createNowPlayingController({
     }
   }
 
-  function enterScreen(resolvedReturnScreen, audioState) {
+  function enterScreen(resolvedReturnScreen, resolvedLaunchOrigin, audioState) {
     returnScreen = resolvedReturnScreen;
+    launchOrigin = resolvedLaunchOrigin;
     clearPendingSingleTap();
     clearPointerState();
 
@@ -1052,11 +1052,14 @@ export function createNowPlayingController({
       openTransitionProgress = 0;
       openChromeHoldSeconds = OPEN_CHROME_HOLD_SECONDS;
       openChromeHoldAlpha = 0;
-      vinylNudgeTarget += VINYL_OPEN_NUDGE_RADIANS;
+      vinylNudgeRadians = resolvedLaunchOrigin === "home" ? HOME_ENTRANCE_ROTATION_RADIANS : 0;
+      vinylNudgeTarget = 0;
     } else {
       openTransitionProgress = 1;
       openChromeHoldSeconds = 0;
       openChromeHoldAlpha = 0;
+      vinylNudgeRadians = 0;
+      vinylNudgeTarget = 0;
     }
   }
 
@@ -1124,7 +1127,6 @@ export function createNowPlayingController({
     if (isPlaying) {
       vinylNudgeTarget += VINYL_PLAY_NUDGE_RADIANS;
     }
-    showToast(isPlaying ? "PLAYING" : "PAUSED");
   }
 
   function selectQueueTrack(targetIndex) {
@@ -1245,33 +1247,51 @@ export function createNowPlayingController({
   }
 
   /**
-   * Enter Now Playing from the Home app wheel with optional return screen override.
+   * Enter Now Playing from the Home app wheel with optional return screen and launch origin overrides.
    *
    * @param {object} [options] Entry payload.
    * @param {string} [options.returnScreen="home"] Screen identifier for bare back exits.
+   * @param {string} [options.launchOrigin="home"] Launch origin identifier (`home` | `album-crate` | `library`).
    * @param {object | null} [options.audioState] Current audio engine snapshot.
    */
-  function enterFromHome({ returnScreen: nextReturnScreen = "home", audioState } = {}) {
+  function enterFromHome({
+    returnScreen: nextReturnScreen = "home",
+    launchOrigin: nextLaunchOrigin = "home",
+    audioState,
+  } = {}) {
     const resolvedReturn =
       typeof nextReturnScreen === "string" && nextReturnScreen.length > 0
         ? nextReturnScreen
         : "home";
-    enterScreen(resolvedReturn, audioState);
+    const resolvedOrigin =
+      nextLaunchOrigin === "album-crate" || nextLaunchOrigin === "library"
+        ? nextLaunchOrigin
+        : "home";
+    enterScreen(resolvedReturn, resolvedOrigin, audioState);
   }
 
   /**
-   * Enter Now Playing from Library vinyl launch with optional return screen override.
+   * Enter Now Playing from Library vinyl launch with optional return screen and launch origin overrides.
    *
    * @param {object} [options] Entry payload.
    * @param {string} [options.returnScreen="library"] Screen identifier for bare back exits.
+   * @param {string} [options.launchOrigin="library"] Launch origin identifier (`home` | `album-crate` | `library`).
    * @param {object | null} [options.audioState] Current audio engine snapshot.
    */
-  function enterFromLibrary({ returnScreen: nextReturnScreen = "library", audioState } = {}) {
+  function enterFromLibrary({
+    returnScreen: nextReturnScreen = "library",
+    launchOrigin: nextLaunchOrigin = "library",
+    audioState,
+  } = {}) {
     const resolvedReturn =
       typeof nextReturnScreen === "string" && nextReturnScreen.length > 0
         ? nextReturnScreen
         : "library";
-    enterScreen(resolvedReturn, audioState);
+    const resolvedOrigin =
+      nextLaunchOrigin === "album-crate" || nextLaunchOrigin === "home"
+        ? nextLaunchOrigin
+        : "library";
+    enterScreen(resolvedReturn, resolvedOrigin, audioState);
   }
 
   /**
@@ -1545,6 +1565,10 @@ export function createNowPlayingController({
       }
     }
 
+    if (pointerActive) {
+      pointerHoldSeconds += deltaSeconds;
+    }
+
     if (
       pointerActive &&
       pointerMode === "vinyl" &&
@@ -1781,6 +1805,10 @@ export function createNowPlayingController({
       pointX - DISPLAY_CENTER_PX,
       pointY - DISPLAY_CENTER_PX,
     );
+    const startAngleFromCenter = Math.atan2(
+      pointY - DISPLAY_CENTER_PX,
+      pointX - DISPLAY_CENTER_PX,
+    );
 
     pointerActive = true;
     pointerStartX = pointX;
@@ -1789,7 +1817,8 @@ export function createNowPlayingController({
     pointerLastY = pointY;
     pointerStartDistFromCenter = distanceFromCenter;
     pointerMovedDistance = 0;
-    volumeLastAngle = Math.atan2(pointY - DISPLAY_CENTER_PX, pointX - DISPLAY_CENTER_PX);
+    pointerHoldSeconds = 0;
+    volumeLastAngle = startAngleFromCenter;
     seekHoldSeconds = 0;
     seekHoldProgress = 0;
     seekHoldTriggered = false;
@@ -1881,7 +1910,10 @@ export function createNowPlayingController({
       return;
     }
 
-    if (pointX >= VOLUME_BEZEL_MIN_X_PX && distanceFromCenter >= VOLUME_BEZEL_MIN_RADIUS_PX) {
+    if (
+      distanceFromCenter >= NOW_PLAYING_CONSTANTS.VOLUME_START_MIN_RADIUS_PX &&
+      Math.abs(startAngleFromCenter) <= NOW_PLAYING_CONSTANTS.VOLUME_START_MAX_ANGLE_RADIANS
+    ) {
       pointerMode = "volume-pending";
     } else if (pointX <= LEFT_EDGE_SWIPE_MAX_X_PX) {
       pointerMode = "left-edge-pending";
@@ -1945,14 +1977,6 @@ export function createNowPlayingController({
           0,
           1,
         );
-      } else if (
-        deltaY < LEFT_EDGE_QUEUE_MIN_DELTA_Y_PX &&
-        Math.abs(deltaY) > Math.abs(deltaX) * LEFT_EDGE_QUEUE_SLOPE_RATIO
-      ) {
-        pointerMode = "queue-pull";
-      } else {
-        pointerMode = "skip-drag";
-        skipDragOffsetX = clamp(deltaX, -SKIP_DRAG_CLAMP_PX, SKIP_DRAG_CLAMP_PX);
       }
       return;
     }
@@ -2008,6 +2032,7 @@ export function createNowPlayingController({
 
     if (pointerMode === "vinyl") {
       if (
+        pointerStartY >= NOW_PLAYING_CONSTANTS.QUEUE_START_MIN_Y_PX &&
         deltaY < VINYL_QUEUE_MIN_DELTA_Y_PX &&
         Math.abs(deltaY) > Math.abs(deltaX) * VINYL_QUEUE_SLOPE_RATIO
       ) {
@@ -2036,6 +2061,7 @@ export function createNowPlayingController({
         pressedActionId = null;
       }
       if (
+        pointerStartY >= NOW_PLAYING_CONSTANTS.QUEUE_START_MIN_Y_PX &&
         deltaY < QUICK_ACTION_QUEUE_MIN_DELTA_Y_PX &&
         Math.abs(deltaY) > Math.abs(deltaX) * VINYL_QUEUE_SLOPE_RATIO
       ) {
@@ -2048,7 +2074,7 @@ export function createNowPlayingController({
     if (pointerMode === "queue-header") {
       if (
         deltaY > QUEUE_HEADER_CLOSE_DELTA_Y_PX &&
-        Math.abs(deltaY) > Math.abs(deltaX) * DETAILS_CLOSE_SLOPE_RATIO
+        Math.abs(deltaY) > Math.abs(deltaX) * QUEUE_HEADER_CLOSE_SLOPE_RATIO
       ) {
         queueSheetOpen = false;
         pointerMode = "none";
@@ -2105,23 +2131,6 @@ export function createNowPlayingController({
     }
 
     if (pointerMode === "details") {
-      if (
-        deltaY > DETAILS_CLOSE_DELTA_Y_PX &&
-        Math.abs(deltaY) > Math.abs(deltaX) * DETAILS_CLOSE_SLOPE_RATIO
-      ) {
-        detailsSheetOpen = false;
-        pointerMode = "none";
-      } else if (
-        deltaX > DETAILS_BACK_MIN_DELTA_X_PX &&
-        Math.abs(deltaX) > Math.abs(deltaY) * DETAILS_BACK_SLOPE_RATIO
-      ) {
-        pointerMode = "back-swipe";
-        backSwipeProgress = clamp(
-          deltaX / NOW_PLAYING_CONSTANTS.BACK_SWIPE_DISTANCE_PX,
-          0,
-          1,
-        );
-      }
       return;
     }
 
@@ -2159,6 +2168,7 @@ export function createNowPlayingController({
     const queueRowIndex = pressedQueueRowIndex;
     const wasCtaPressed = pressedCta;
     const wasSeekHold = seekHoldTriggered;
+    const holdSecondsAtRelease = pointerHoldSeconds;
 
     clearPointerState();
 
@@ -2309,7 +2319,12 @@ export function createNowPlayingController({
       return;
     }
 
-    if (wasTap && !wasSeekHold && operatingMode === "playing") {
+    if (
+      wasTap &&
+      !wasSeekHold &&
+      holdSecondsAtRelease < NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS &&
+      operatingMode === "playing"
+    ) {
       if (
         pendingSingleTapActive &&
         pendingSingleTapSeconds < NOW_PLAYING_CONSTANTS.DOUBLE_TAP_WINDOW_SECONDS
@@ -2388,6 +2403,7 @@ export function createNowPlayingController({
     return {
       operatingMode,
       returnScreen,
+      launchOrigin,
       activeTrack,
       activeAlbum,
       previousTrack,

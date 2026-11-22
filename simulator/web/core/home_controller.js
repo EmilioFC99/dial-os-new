@@ -39,6 +39,7 @@ export const HOME_CONSTANTS = Object.freeze({
 const VINYL_SPIN_RADIANS_PER_SECOND = 0.55;
 const VINYL_NUDGE_SPRING_RATE = 8.5;
 const VINYL_LAUNCH_NUDGE_RADIANS = 0.35;
+const RETURN_TRANSITION_ROTATION_RADIANS = (20 * Math.PI) / 180;
 const CAROUSEL_SNAP_SPRING_RATE = 13.5;
 const CAROUSEL_SNAP_SETTLE_EPSILON = 0.001;
 const CAROUSEL_NORMALIZE_REVOLUTION_THRESHOLD = 4;
@@ -81,7 +82,7 @@ const MAX_SUBTITLE_TITLE_LENGTH = 18;
 const TRUNCATED_TITLE_LENGTH = 17;
 const DEFAULT_PLAYBACK_VOLUME = 0.62;
 const LIBRARY_SLOT_INDEX = 1;
-const VALID_PLAYBACK_STATES = new Set(["idle", "playing", "storage"]);
+const VALID_PLAYBACK_STATES = new Set(["idle", "playing", "paused", "storage"]);
 
 /**
  * Wrap any positive or negative virtual slot index into [0, HOME_APPS.length - 1].
@@ -266,7 +267,7 @@ export function resolveHomeAppSubtitle(appSpec, context = {}) {
   const appId = appSpec?.id;
   if (appId === "now-playing") {
     const playbackState = context?.playbackState || "idle";
-    if (playbackState === "playing") {
+    if (playbackState === "playing" || playbackState === "paused") {
       const titleSource =
         typeof context?.trackTitle === "string" && context.trackTitle.trim().length > 0
           ? context.trackTitle.trim()
@@ -323,6 +324,7 @@ export function createHomeController() {
   let launchTarget = 0;
   let launchedAppId = null;
   let playbackState = "idle";
+  let hasActiveTrack = false;
   let volumeLevel = DEFAULT_PLAYBACK_VOLUME;
   let idleClockSeconds = 0;
   let vinylRotationRadians = 0;
@@ -485,7 +487,11 @@ export function createHomeController() {
   function launchFocusedApp() {
     focusedSlot = targetSlot;
     const focusedApp = HOME_APPS[wrapAppIndex(targetSlot)];
-    if (launchTarget !== 1 && focusedApp.id === "now-playing" && playbackState === "playing") {
+    if (
+      launchTarget !== 1 &&
+      focusedApp.id === "now-playing" &&
+      (hasActiveTrack || playbackState === "playing" || playbackState === "paused")
+    ) {
       vinylNudgeTarget += VINYL_LAUNCH_NUDGE_RADIANS;
     }
     launchTarget = 1;
@@ -502,7 +508,8 @@ export function createHomeController() {
   }
 
   /**
-   * Sync external playback telemetry (`idle` | `playing` | `storage`) and clamped volume level.
+   * Sync external playback telemetry (`idle` | `playing` | `paused` | `storage`),
+   * active track presence, and clamped volume level.
    *
    * @param {object} [nextTelemetry={}] Updated playback state and/or normalized volume level.
    */
@@ -515,6 +522,16 @@ export function createHomeController() {
       VALID_PLAYBACK_STATES.has(nextTelemetry.playbackState)
     ) {
       playbackState = nextTelemetry.playbackState;
+    }
+    if (typeof nextTelemetry.hasActiveTrack === "boolean") {
+      hasActiveTrack = nextTelemetry.hasActiveTrack;
+    } else if (nextTelemetry.playbackState === "playing" || nextTelemetry.playbackState === "paused") {
+      hasActiveTrack = true;
+    } else if (
+      nextTelemetry.playbackState === "idle" ||
+      nextTelemetry.playbackState === "storage"
+    ) {
+      hasActiveTrack = false;
     }
     if (
       typeof nextTelemetry.volumeLevel === "number" &&
@@ -539,6 +556,11 @@ export function createHomeController() {
     launchTarget = 0;
     launchedAppId = null;
     backSwipeProgress = 0;
+    const shouldApplyReturnRotation =
+      appId === "now-playing" &&
+      (hasActiveTrack || playbackState === "playing" || playbackState === "paused");
+    vinylNudgeRadians = shouldApplyReturnRotation ? RETURN_TRANSITION_ROTATION_RADIANS : 0;
+    vinylNudgeTarget = 0;
     clearPointerState();
   }
 
@@ -709,6 +731,7 @@ export function createHomeController() {
       launchTarget,
       launchedAppId,
       playbackState,
+      hasActiveTrack,
       volumeLevel,
       idleClockSeconds,
       vinylRotationRadians,

@@ -137,14 +137,25 @@ function clearActiveCanvasPointer() {
   }
 }
 
+function buildHomePlaybackTelemetry(audioState) {
+  const hasActiveTrack = Boolean(audioState?.activeTrack);
+  const playbackState = hasActiveTrack
+    ? audioState.isPlaying
+      ? "playing"
+      : "paused"
+    : "idle";
+  return {
+    playbackState,
+    hasActiveTrack,
+    volumeLevel: audioState?.volumeLevel,
+  };
+}
+
 function syncPlaybackAcrossControllers() {
   const audioState = audioEngine.getState();
   nowPlayingController.syncAudioState(audioState);
   libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
-  homeController.syncPlaybackState({
-    playbackState: audioState.isPlaying ? "playing" : "idle",
-    volumeLevel: audioState.volumeLevel,
-  });
+  homeController.syncPlaybackState(buildHomePlaybackTelemetry(audioState));
   syncShellIfNeeded(false);
 }
 
@@ -245,12 +256,10 @@ function handleLaunchLibraryTrack(selectionSpec) {
   const audioState = audioEngine.getState();
   libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
   libraryController.resetVinylLaunch();
-  homeController.syncPlaybackState({
-    playbackState: audioState.isPlaying ? "playing" : "idle",
-    volumeLevel: audioState.volumeLevel,
-  });
+  homeController.syncPlaybackState(buildHomePlaybackTelemetry(audioState));
   nowPlayingController.enterFromLibrary({
     returnScreen: "library",
+    launchOrigin: selectionSpec?.launchOrigin || "library",
     audioState,
   });
   clearActiveCanvasPointer();
@@ -1333,10 +1342,7 @@ function animationTick(timestampMs) {
   audioEngine.step(frameDeltaSeconds);
   const audioState = audioEngine.getState();
   libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
-  homeController.syncPlaybackState({
-    playbackState: audioState.isPlaying ? "playing" : "idle",
-    volumeLevel: audioState.volumeLevel,
-  });
+  homeController.syncPlaybackState(buildHomePlaybackTelemetry(audioState));
 
   router.stepTransition(frameDeltaSeconds);
   let routerState = router.getState();
