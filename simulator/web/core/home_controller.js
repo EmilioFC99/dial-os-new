@@ -81,6 +81,7 @@ const MAX_SUBTITLE_TITLE_LENGTH = 18;
 const TRUNCATED_TITLE_LENGTH = 17;
 const DEFAULT_PLAYBACK_VOLUME = 0.62;
 const LIBRARY_SLOT_INDEX = 1;
+const VALID_PLAYBACK_STATES = new Set(["idle", "playing", "storage"]);
 
 /**
  * Wrap any positive or negative virtual slot index into [0, HOME_APPS.length - 1].
@@ -321,8 +322,8 @@ export function createHomeController() {
   let launchProgress = 0;
   let launchTarget = 0;
   let launchedAppId = null;
-  const playbackState = "idle";
-  const volumeLevel = DEFAULT_PLAYBACK_VOLUME;
+  let playbackState = "idle";
+  let volumeLevel = DEFAULT_PLAYBACK_VOLUME;
   let idleClockSeconds = 0;
   let vinylRotationRadians = 0;
   let vinylNudgeRadians = 0;
@@ -498,6 +499,47 @@ export function createHomeController() {
     launchTarget = 0;
     launchedAppId = null;
     backSwipeProgress = 0;
+  }
+
+  /**
+   * Sync external playback telemetry (`idle` | `playing` | `storage`) and clamped volume level.
+   *
+   * @param {object} [nextTelemetry={}] Updated playback state and/or normalized volume level.
+   */
+  function syncPlaybackState(nextTelemetry = {}) {
+    if (!nextTelemetry || typeof nextTelemetry !== "object") {
+      return;
+    }
+    if (
+      typeof nextTelemetry.playbackState === "string" &&
+      VALID_PLAYBACK_STATES.has(nextTelemetry.playbackState)
+    ) {
+      playbackState = nextTelemetry.playbackState;
+    }
+    if (
+      typeof nextTelemetry.volumeLevel === "number" &&
+      Number.isFinite(nextTelemetry.volumeLevel)
+    ) {
+      volumeLevel = clamp(nextTelemetry.volumeLevel, 0, 1);
+    }
+  }
+
+  /**
+   * Re-anchor Home on `appId`'s slot at full launch depth and animate zoom-back to 0.
+   *
+   * @param {string} [appId="library"] App identifier being exited back to Home.
+   */
+  function returnFromScreen(appId = "library") {
+    const matchedIndex = HOME_APPS.findIndex((appEntry) => appEntry.id === appId);
+    const slotIndex = matchedIndex >= 0 ? matchedIndex : 0;
+    scrollPosition = slotIndex;
+    targetSlot = slotIndex;
+    focusedSlot = slotIndex;
+    launchProgress = 1;
+    launchTarget = 0;
+    launchedAppId = null;
+    backSwipeProgress = 0;
+    clearPointerState();
   }
 
   /**
@@ -685,6 +727,8 @@ export function createHomeController() {
     stepDetent,
     launchFocusedApp,
     closeLaunchedApp,
+    syncPlaybackState,
+    returnFromScreen,
     jumpFromNotPlayingToLibrary,
     handlePointerDown,
     handlePointerMove,

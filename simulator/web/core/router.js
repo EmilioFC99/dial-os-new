@@ -20,6 +20,7 @@ const SCREEN_ENTRY_DURATION_SECONDS = 0.45;
  *     entryProgress: number
  *   },
  *   completeBootToHome: () => void,
+ *   navigateTo: (screenId: string) => void,
  *   stepTransition: (deltaSeconds: number) => void,
  *   reboot: () => void
  * }} Router control API.
@@ -63,6 +64,22 @@ export function createRouter({ initialScreen = "boot" } = {}) {
   }
 
   /**
+   * Switch directly to `screenId` with entryProgress reset to 0.
+   * Ignores empty or non-string screen identifiers.
+   *
+   * @param {string} screenId Destination screen identifier.
+   */
+  function navigateTo(screenId) {
+    if (typeof screenId !== "string" || screenId.trim().length === 0) {
+      return;
+    }
+    previousScreen = activeScreen;
+    activeScreen = screenId;
+    handoffProgress = screenId === "boot" ? 0 : 1;
+    entryProgress = 0;
+  }
+
+  /**
    * Advance active screen entry transition progress toward 1.
    * Negative or non-finite deltas are safely ignored.
    *
@@ -91,6 +108,7 @@ export function createRouter({ initialScreen = "boot" } = {}) {
   return {
     getState,
     completeBootToHome,
+    navigateTo,
     stepTransition,
     reboot,
   };

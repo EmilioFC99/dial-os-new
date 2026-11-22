@@ -96,3 +96,40 @@ export function triggerLibraryRescan() {
     cache: "no-store",
   });
 }
+
+/**
+ * Persist updated user playlists to the simulator backend.
+ *
+ * @param {Array<{ id: string, name: string, trackIds: string[] }>} playlists Updated playlists array.
+ * @returns {Promise<{ ok: true, payload: object } | { ok: false, error: string }>} Saved playlists response.
+ */
+export function savePlaylists(playlists) {
+  const safePlaylists = Array.isArray(playlists) ? playlists : [];
+  return requestJson("/api/playlists", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ playlists: safePlaylists }),
+    cache: "no-store",
+  });
+}
+
+/**
+ * Update or toggle the favorite flag for a track in the simulator backend.
+ *
+ * @param {string} trackId Canonical track identifier.
+ * @param {boolean} [isFavorite] Explicit favorite state, or omit to toggle on server.
+ * @returns {Promise<{ ok: true, payload: object } | { ok: false, error: string }>} Updated favorite state response.
+ */
+export function setTrackFavorite(trackId, isFavorite) {
+  if (typeof trackId !== "string" || trackId.trim().length === 0) {
+    return Promise.resolve({ ok: false, error: "invalid_track_id" });
+  }
+  const requestBody =
+    isFavorite === undefined ? {} : { isFavorite: Boolean(isFavorite) };
+  return requestJson(`/api/favorites/${encodeURIComponent(trackId.trim())}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
+    cache: "no-store",
+  });
+}
