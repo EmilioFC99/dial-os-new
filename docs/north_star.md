@@ -30,7 +30,7 @@ Moving into Now Playing feels like lifting a record straight onto a turntable.
 When a song is loaded:
 - **Seamless growth**: The centered album artwork swells smoothly from a compact circle into a full-screen spinning record, gaining a gentle forward nudge of rotation as it opens—and again when you close it.
 - **Fading accent ring**: A soft accent halo around the artwork dissolves quickly as the cover expands, leaving a thin outline that disappears right as the record fills the face.
-- **Staged controls**: If the on-screen controls are active, they appear in two calm waves—first the inner progress ring blooms open at the center spindle, then the curved right-edge volume bar, top handle, back arrow, and bottom details chevron fade softly into place.
+- **Staged controls**: If the on-screen controls are active, they appear in two calm waves—first the inner progress ring blooms open at the center spindle, then the curved right-edge volume bar, top handle, and bottom details chevron fade softly into place.
 
 ### When Nothing Is Playing (or in Other Modes)
 - If no song is queued, the center pebble shrinks slightly and rises to make room for a calm *"Not Playing"* message and a **Browse Library** button that glide softly into view.
@@ -120,4 +120,4 @@ The top level is a clean, five-row list where each item has a simple icon and, w
 - **Power & System**: Check battery status, control how the player draws power when plugged in, set an automatic idle shut-off timer, or start a **library rescan**—which opens a live progress screen showing how many songs were found before offering a shortcut straight back to your Library.
 
 ### Tactile Controls Throughout
-Sliders (like Brightness and Volume Limit) fill the entire row as you drag across them, lists scroll smoothly along the circular edge, and a swipe from the left—or a tap on the back arrow—always steps you cleanly back up.
+Sliders (like Brightness and Volume Limit) fill the entire row as you drag across them, lists scroll smoothly along the circular edge, and a swipe from the left edge always steps you cleanly back up.
