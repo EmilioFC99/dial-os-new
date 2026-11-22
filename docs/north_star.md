@@ -51,7 +51,7 @@ When you open the Library, you're greeted by a clean, curved list of six ways in
 - **Genres**
 - **All songs**
 
-Each row pairs a subtle colored icon with a simple count on the right—no extra clutter or busy subtitles. Only a few rows sit on screen at once.
+Each row pairs a subtle colored icon with a simple count on the right—no extra clutter or busy subtitles. Lists display the top three rows at full clarity with a soft preview of the fourth item peeking below, and never highlight a resting center row—a tile highlights only while pressed and opens immediately on tap.
 
 ### Flipping Through Albums
 Opening **Albums** shifts from a list into a visual cover carousel. The focused album art sits front and center while neighboring covers peek in from the sides, with the album title and artist resting neatly underneath. Turning through them feels like thumbing through a crate of vinyl records.
@@ -59,7 +59,7 @@ Opening **Albums** shifts from a list into a visual cover carousel. The focused 
 ### Drilling Down & Listening
 - **Artists** and **Genres** let you narrow things down naturally—pick an artist to see their albums, then pick an album to see its songs.
 - **Playlists** and **Favorites** give you quick access to your own mixes, with simple action menus when you want to manage or remove a playlist.
-- **Track lists** stay minimal and readable so you can jump straight into a song without hunting through menus.
+- **Track lists** follow the same direct-touch layout—three full rows plus a preview of the next, highlighting a tile only while pressed—so you can jump straight into any visible song with a single tap.
 
 ### Calm Empty States & Easy Backtracking
 If a section doesn't have anything in it yet—like Favorites before you've hearted a track—it shows a centered icon, a short friendly message, and a button to step back. Wherever you are in the Library, a quick swipe from the left edge steps smoothly back up one level at a time.
@@ -120,4 +120,4 @@ The top level is a clean, five-row list where each item has a simple icon and, w
 - **Power & System**: Check battery status, control how the player draws power when plugged in, set an automatic idle shut-off timer, or start a **library rescan**—which opens a live progress screen showing how many songs were found before offering a shortcut straight back to your Library.
 
 ### Tactile Controls Throughout
-Sliders (like Brightness and Volume Limit) fill the entire row as you drag across them, lists scroll smoothly along the circular edge, and a swipe from the left edge always steps you cleanly back up.
+Sliders (like Brightness and Volume Limit) fill the entire row as you drag across them, lists show three full rows with a preview of the next and highlight a tile only while pressed, and a swipe from the left edge always steps you cleanly back up.
