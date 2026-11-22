@@ -55,6 +55,8 @@ const VOLUME_BEZEL_START_Y = 180;
 const VOLUME_BEZEL_UP_END_Y = 97;
 const VOLUME_BEZEL_MAX_UP_Y = 10;
 const VOLUME_BEZEL_MAX_DOWN_Y = 350;
+const RIGHT_BEZEL_RADIUS_PX = 150;
+const RIGHT_BEZEL_SWEEP_STEPS = 20;
 
 const SKIP_LEFT_START_X = 230;
 const SKIP_LEFT_END_X = 150;
@@ -306,6 +308,38 @@ function advanceSteps(controller, stepDeltaSeconds, stepCount) {
 function openQuickActionsViaTap(nowPlayingController) {
   tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
   nowPlayingController.step(NOW_PLAYING_CONSTANTS.DOUBLE_TAP_WINDOW_SECONDS + 0.03);
+}
+
+/**
+ * Trace smooth pointer movement along the right bezel circle (radius 150px) between two waypoints.
+ *
+ * @param {object} controller Controller instance under test.
+ * @param {{ pointX: number, pointY: number }} startWaypoint Starting bezel point.
+ * @param {{ pointX: number, pointY: number }} endWaypoint Ending bezel point.
+ * @param {number} [stepCount=RIGHT_BEZEL_SWEEP_STEPS] Number of arc interpolation steps.
+ */
+function traceRightBezelSweep(
+  controller,
+  startWaypoint,
+  endWaypoint,
+  stepCount = RIGHT_BEZEL_SWEEP_STEPS,
+) {
+  const startAngle = Math.atan2(
+    startWaypoint.pointY - DISPLAY_CENTER_PX,
+    startWaypoint.pointX - DISPLAY_CENTER_PX,
+  );
+  const endAngle = Math.atan2(
+    endWaypoint.pointY - DISPLAY_CENTER_PX,
+    endWaypoint.pointX - DISPLAY_CENTER_PX,
+  );
+  for (let stepIndex = 1; stepIndex < stepCount; stepIndex += 1) {
+    const angleRadians = startAngle + ((endAngle - startAngle) * stepIndex) / stepCount;
+    controller.handlePointerMove(
+      DISPLAY_CENTER_PX + RIGHT_BEZEL_RADIUS_PX * Math.cos(angleRadians),
+      DISPLAY_CENTER_PX + RIGHT_BEZEL_RADIUS_PX * Math.sin(angleRadians),
+    );
+  }
+  controller.handlePointerMove(endWaypoint.pointX, endWaypoint.pointY);
 }
 
 /**
@@ -740,6 +774,7 @@ describe("now_playing_controller.js constants and pure helpers", () => {
     assert.equal(NOW_PLAYING_CONSTANTS.SEEK_HOLD_RADIUS_PX, 124);
     assert.equal(NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS, 0.42);
     assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_LIMIT_RATIO, 0.85);
+    assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_FULL_ARC_RADIANS, Math.PI);
     assert.equal(NOW_PLAYING_CONSTANTS.DOUBLE_TAP_WINDOW_SECONDS, 0.25);
     assert.equal(NOW_PLAYING_CONSTANTS.QUEUE_ROW_PITCH_PX, 58);
     assert.equal(NOW_PLAYING_CONSTANTS.QUEUE_ROW_HEIGHT_PX, 48);
@@ -1091,6 +1126,78 @@ describe("createNowPlayingController seek, volume arc, and wheel controls", () =
     const queueAfterWheelSnapshot = nowPlayingController.getRenderSnapshot();
     assert.equal(queueAfterWheelSnapshot.volumeLevel, queueVolumeBeforeWheel);
     assert.ok(queueAfterWheelSnapshot.queueScrollPosition > queueScrollBeforeWheel);
+  });
+
+  test("180-degree right-bezel arc maps full semicircle (6 to 12 o'clock) across [0, 1] with zero over-clamp dead-zone", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness();
+    audioEngine.setVolume(0);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+
+    const sixOClock = { pointX: 180, pointY: 330 };
+    const lowerRightDiagonal = { pointX: 286, pointY: 286 };
+    const threeOClock = { pointX: 330, pointY: 180 };
+    const upperRightDiagonal = { pointX: 286, pointY: 74 };
+    const twelveOClock = { pointX: 180, pointY: 30 };
+
+    // Sweep upward from 6 o'clock (0.0) through +45° to 3 o'clock (0.5) and 12 o'clock (1.0)
+    nowPlayingController.handlePointerDown(sixOClock.pointX, sixOClock.pointY);
+    traceRightBezelSweep(nowPlayingController, sixOClock, lowerRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, lowerRightDiagonal, threeOClock);
+    const midpointUpSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(midpointUpSnapshot.pointerMode, "volume");
+    assert.ok(Math.abs(midpointUpSnapshot.volumeLevel - 0.5) < FLOAT_TOLERANCE);
+
+    traceRightBezelSweep(nowPlayingController, threeOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, twelveOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 1.0) < FLOAT_TOLERANCE,
+    );
+
+    // Still holding at 12 o'clock (1.0), trace downward through 3 o'clock (0.5) to 6 o'clock (0.0)
+    traceRightBezelSweep(nowPlayingController, twelveOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, threeOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.5) < FLOAT_TOLERANCE,
+    );
+
+    traceRightBezelSweep(nowPlayingController, threeOClock, lowerRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, lowerRightDiagonal, sixOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.0) < FLOAT_TOLERANCE,
+    );
+    nowPlayingController.handlePointerUp(sixOClock.pointX, sixOClock.pointY);
+
+    // Fresh press at 12 o'clock (1.0) traces downward cleanly to 0.5 at 3 o'clock and 0.0 at 6 o'clock
+    audioEngine.setVolume(1.0);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.handlePointerDown(twelveOClock.pointX, twelveOClock.pointY);
+    traceRightBezelSweep(nowPlayingController, twelveOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, threeOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.5) < FLOAT_TOLERANCE,
+    );
+    traceRightBezelSweep(nowPlayingController, threeOClock, lowerRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, lowerRightDiagonal, sixOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.0) < FLOAT_TOLERANCE,
+    );
+    nowPlayingController.handlePointerUp(sixOClock.pointX, sixOClock.pointY);
+
+    // Push past 1.0 (staying clamped at 1.0), then trace backward 45° for immediate drop to 0.75
+    audioEngine.setVolume(0.75);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.handlePointerDown(threeOClock.pointX, threeOClock.pointY);
+    traceRightBezelSweep(nowPlayingController, threeOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, twelveOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 1.0) < FLOAT_TOLERANCE,
+    );
+
+    traceRightBezelSweep(nowPlayingController, twelveOClock, upperRightDiagonal);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.75) < FLOAT_TOLERANCE,
+    );
+    nowPlayingController.handlePointerUp(upperRightDiagonal.pointX, upperRightDiagonal.pointY);
   });
 });
 

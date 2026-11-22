@@ -102,10 +102,9 @@ const SEEK_SPINDLE_SENSITIVITY = 0.35;
 const SEEK_SPINDLE_SPIN_FACTOR = 0.012;
 const SEEK_END_GUARD_SECONDS = 0.5;
 
-const VOLUME_BEZEL_MIN_X_PX = 254;
+const VOLUME_BEZEL_MIN_X_PX = DISPLAY_CENTER_PX;
 const VOLUME_BEZEL_MIN_RADIUS_PX = 114;
 const VOLUME_BEZEL_START_MOVE_PX = 8;
-const VOLUME_DRAG_RANGE_PX = 165;
 const VOLUME_HUD_ATTACK_RATE = 20;
 const VOLUME_HUD_DECAY_RATE = 3.2;
 const WHEEL_VOLUME_STEP = 0.04;
@@ -174,6 +173,7 @@ export const NOW_PLAYING_CONSTANTS = Object.freeze({
   SEEK_HOLD_RADIUS_PX: 124,
   SEEK_HOLD_DURATION_SECONDS: 0.42,
   VOLUME_LIMIT_RATIO: 0.85,
+  VOLUME_FULL_ARC_RADIANS: Math.PI,
   DOUBLE_TAP_WINDOW_SECONDS: 0.25,
   QUEUE_ROW_PITCH_PX: 58,
   QUEUE_ROW_HEIGHT_PX: 48,
@@ -786,8 +786,8 @@ export function createNowPlayingController({
   let pointerLastX = 0;
   let pointerLastY = 0;
   let pointerStartDistFromCenter = 0;
-  let pointerStartVolume = DEFAULT_VOLUME_LEVEL;
   let pointerMovedDistance = 0;
+  let volumeLastAngle = 0;
 
   function clearPendingSingleTap() {
     pendingSingleTapActive = false;
@@ -802,8 +802,8 @@ export function createNowPlayingController({
     pointerLastX = 0;
     pointerLastY = 0;
     pointerStartDistFromCenter = 0;
-    pointerStartVolume = volumeLevel;
     pointerMovedDistance = 0;
+    volumeLastAngle = 0;
     seekHoldSeconds = 0;
     seekHoldTriggered = false;
     isSeeking = false;
@@ -1788,8 +1788,8 @@ export function createNowPlayingController({
     pointerLastX = pointX;
     pointerLastY = pointY;
     pointerStartDistFromCenter = distanceFromCenter;
-    pointerStartVolume = volumeLevel;
     pointerMovedDistance = 0;
+    volumeLastAngle = Math.atan2(pointY - DISPLAY_CENTER_PX, pointX - DISPLAY_CENTER_PX);
     seekHoldSeconds = 0;
     seekHoldProgress = 0;
     seekHoldTriggered = false;
@@ -1990,17 +1990,19 @@ export function createNowPlayingController({
     }
 
     if (pointerMode === "volume-pending") {
-      if (pointerMovedDistance >= VOLUME_BEZEL_START_MOVE_PX) {
-        pointerMode = "volume";
-        isAdjustingVolume = true;
-        volumeHudAlpha = 1;
-        adjustVolume(pointerStartVolume - deltaY / VOLUME_DRAG_RANGE_PX);
+      if (pointerMovedDistance < VOLUME_BEZEL_START_MOVE_PX) {
+        return;
       }
-      return;
+      pointerMode = "volume";
+      isAdjustingVolume = true;
+      volumeHudAlpha = 1;
     }
 
     if (pointerMode === "volume") {
-      adjustVolume(pointerStartVolume - deltaY / VOLUME_DRAG_RANGE_PX);
+      const currentAngle = Math.atan2(pointY - DISPLAY_CENTER_PX, pointX - DISPLAY_CENTER_PX);
+      const deltaAngle = normalizeAngleDelta(currentAngle, volumeLastAngle);
+      volumeLastAngle = currentAngle;
+      adjustVolume(volumeLevel - deltaAngle / NOW_PLAYING_CONSTANTS.VOLUME_FULL_ARC_RADIANS);
       return;
     }
 
