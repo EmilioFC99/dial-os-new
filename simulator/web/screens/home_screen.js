@@ -28,6 +28,7 @@ import {
 } from "../core/home_controller.js";
 import { drawDialOsEmblem } from "../core/primitives.js";
 import { APPEARANCE_PALETTES, FONT_DISPLAY, FONT_MONO } from "../core/tokens.js";
+import { drawLibraryVinylDisc } from "./library_screen.js";
 
 const ALPHA_VISIBILITY_THRESHOLD = 0.005;
 const PERCENT_SCALE = 100;
@@ -139,6 +140,12 @@ function resolveRenderContext(renderContext) {
       ? sourceContext.trackDurationSeconds
       : DEFAULT_TRACK_DURATION_SECONDS;
 
+  const activeAlbum =
+    sourceContext.activeAlbum && typeof sourceContext.activeAlbum === "object"
+      ? sourceContext.activeAlbum
+      : null;
+  const coverCache = sourceContext.coverCache || null;
+
   return {
     appearance,
     palette,
@@ -146,6 +153,8 @@ function resolveRenderContext(renderContext) {
     trackTitle,
     trackElapsedSeconds,
     trackDurationSeconds,
+    activeAlbum,
+    coverCache,
   };
 }
 
@@ -212,6 +221,8 @@ function traceFacePolygon(drawingContext, verticesList, indices) {
  * @param {object} palette Semantic Dark/Light appearance palette.
  * @param {string} appearance Semantic appearance ("dark" | "light").
  * @param {number} alpha Layer opacity.
+ * @param {object | null} [activeAlbum=null] Optional active album spec for real cover art.
+ * @param {object | null} [coverCache=null] Optional cover image cache.
  */
 function drawAlbumArtworkDisc(
   drawingContext,
@@ -222,8 +233,26 @@ function drawAlbumArtworkDisc(
   palette,
   appearance,
   alpha,
+  activeAlbum = null,
+  coverCache = null,
 ) {
   if (alpha <= ALPHA_VISIBILITY_THRESHOLD || radius <= 2) {
+    return;
+  }
+
+  if (activeAlbum) {
+    drawLibraryVinylDisc(
+      drawingContext,
+      activeAlbum,
+      centerX,
+      centerY,
+      radius,
+      rotationRadians,
+      palette,
+      appearance,
+      alpha,
+      coverCache,
+    );
     return;
   }
 
@@ -538,6 +567,8 @@ function drawAliveCubeIcon(
   vinylRotationRadians,
   appearance,
   palette,
+  activeAlbum = null,
+  coverCache = null,
 ) {
   const cubeScale = halfSize / CUBE_ICON_BASE_HALF_SIZE_PX;
   const highlightActive = focusWeight > 0.38;
@@ -588,6 +619,8 @@ function drawAliveCubeIcon(
         palette,
         appearance,
         1.0,
+        activeAlbum,
+        coverCache,
       );
 
       drawingContext.strokeStyle = highlightActive ? palette.signalHighlight : palette.hairlineStrong;
@@ -1051,6 +1084,8 @@ function drawGlassAppCube(drawingContext, options) {
     vinylRotationRadians,
     appearance,
     palette,
+    activeAlbum = null,
+    coverCache = null,
   } = options;
 
   if (alpha <= ALPHA_VISIBILITY_THRESHOLD || halfSize <= 3) {
@@ -1184,6 +1219,8 @@ function drawGlassAppCube(drawingContext, options) {
     vinylRotationRadians,
     appearance,
     palette,
+    activeAlbum,
+    coverCache,
   );
 
   /* Layer 4: Front translucent crystal facets, specular refraction glare & corner brackets */
@@ -1647,7 +1684,14 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
   }
 
   const resolvedContext = resolveRenderContext(renderContext);
-  const { appearance, palette, trackElapsedSeconds, trackDurationSeconds } = resolvedContext;
+  const {
+    appearance,
+    palette,
+    trackElapsedSeconds,
+    trackDurationSeconds,
+    activeAlbum,
+    coverCache,
+  } = resolvedContext;
 
   const entryProgress = clamp(Number(homeState.entryProgress ?? 1), 0, 1);
   const launchProgress = clamp(Number(homeState.launchProgress ?? 0), 0, 1);
@@ -1741,6 +1785,8 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
             vinylRotationRadians,
             appearance,
             palette,
+            activeAlbum,
+            coverCache,
           });
         }
 
@@ -1753,6 +1799,8 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
           palette,
           appearance,
           easeOutCubic(normalizeRange(launchProgress, 0.06, 0.24)),
+          activeAlbum,
+          coverCache,
         );
 
         if (launchProgress > 0.14 && launchProgress < 0.96) {
@@ -1800,6 +1848,8 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
       vinylRotationRadians,
       appearance,
       palette,
+      activeAlbum,
+      coverCache,
     });
 
     /* Boot -> Home morph: cross-dissolve Boot emblem cleanly into the settling crystal cube */

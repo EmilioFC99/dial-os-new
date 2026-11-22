@@ -136,6 +136,18 @@ export function createShellController(callbacks = {}) {
       return;
     }
 
+    if (pressedKey === "ArrowUp") {
+      keyboardEvent.preventDefault();
+      callbacks.onNavigateUp?.();
+      return;
+    }
+
+    if (pressedKey === "ArrowDown") {
+      keyboardEvent.preventDefault();
+      callbacks.onNavigateDown?.();
+      return;
+    }
+
     if (pressedKey === "Enter" || pressedKey === " ") {
       if (
         !isEditableEventTarget(keyboardEvent.target) &&

@@ -1,16 +1,20 @@
 /**
  * Main entrypoint for the DialOS simulator web application: manages the
  * 60fps Canvas render loop, backend boot polling, Home 3D carousel interaction,
- * pointer/wheel/keyboard hit-testing, and shell controls.
+ * Library navigation & playback orchestration, pointer/wheel/keyboard hit-testing,
+ * and shell controls.
  */
 
 import {
   fetchBootStatus,
   fetchLibraryCatalog,
+  savePlaylists,
   triggerBootScan,
   triggerLibraryRescan,
 } from "./core/api_client.js";
+import { createAudioEngine } from "./core/audio_engine.js";
 import { createBootController } from "./core/boot_controller.js";
+import { createCoverCache } from "./core/cover_cache.js";
 import {
   DISPLAY_CENTER_PX,
   DISPLAY_DIAMETER_PX,
@@ -18,11 +22,13 @@ import {
   MILLISECONDS_PER_SECOND,
 } from "./core/geometry.js";
 import { HOME_APPS, createHomeController, wrapAppIndex } from "./core/home_controller.js";
+import { createLibraryController } from "./core/library_controller.js";
 import { drawSafeAreaGuides } from "./core/primitives.js";
 import { createRouter } from "./core/router.js";
 import { APPEARANCE_PALETTES } from "./core/tokens.js";
 import { hitTestBootScreen, renderBootScreen } from "./screens/boot_screen.js";
 import { hitTestHomeInteractive, renderHomeScreen } from "./screens/home_screen.js";
+import { hitTestLibraryInteractive, renderLibraryScreen } from "./screens/library_screen.js";
 import { createShellController } from "./shell/shell_controller.js";
 
 const MAX_PIXEL_RATIO = 2;
@@ -32,12 +38,20 @@ const WARNING_POLL_INTERVAL_MS = 1000;
 const TAP_MAX_DRIFT_PX = 14;
 const WHEEL_COOLDOWN_MS = 130;
 const WHEEL_MIN_DELTA_PX = 8;
+const LIBRARY_HANDOFF_MIN_LAUNCH_PROGRESS = 0.98;
 
 const displayCanvas = document.getElementById("display-canvas");
 const drawingContext = displayCanvas.getContext("2d");
 
 let bootController = createBootController();
+const audioEngine = createAudioEngine();
+const coverCache = createCoverCache();
 const homeController = createHomeController();
+const libraryController = createLibraryController({
+  onLaunchTrack: handleLaunchLibraryTrack,
+  onExitToHome: handleExitLibraryToHome,
+  onPersistPlaylists: handlePersistPlaylists,
+});
 const router = createRouter({ initialScreen: "boot" });
 
 const shellState = {
@@ -87,6 +101,57 @@ function clearScheduledPoll() {
   }
 }
 
+function releaseActivePointerCapture(pointerId) {
+  if (typeof displayCanvas.releasePointerCapture === "function" && pointerId !== null) {
+    try {
+      displayCanvas.releasePointerCapture(pointerId);
+    } catch (releaseError) {
+      /* Pointer capture already ended. */
+    }
+  }
+}
+
+function handleLaunchLibraryTrack(selectionSpec) {
+  const activeCatalog = latestCatalog || libraryController.getRenderSnapshot().catalog;
+  audioEngine.playTrackFromSource(selectionSpec, activeCatalog);
+  const audioState = audioEngine.getState();
+  libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
+  homeController.syncPlaybackState({
+    playbackState: audioState.isPlaying ? "playing" : "idle",
+    volumeLevel: audioState.volumeLevel,
+  });
+  syncShellIfNeeded(true);
+}
+
+function handleExitLibraryToHome() {
+  if (activePointerId !== null) {
+    const releasedPointerId = activePointerId;
+    activePointerId = null;
+    pointerDownPoint = null;
+    releaseActivePointerCapture(releasedPointerId);
+  }
+  router.navigateTo("home");
+  homeController.returnFromScreen("library");
+  syncDisplayCanvasCursorClasses(lastHoverPoint);
+  syncShellIfNeeded(true);
+}
+
+function handlePersistPlaylists(updatedPlaylists) {
+  void savePlaylists(updatedPlaylists);
+  if (latestCatalog && typeof latestCatalog === "object") {
+    const nextPlaylists = Array.isArray(updatedPlaylists) ? updatedPlaylists.slice() : [];
+    latestCatalog = {
+      ...latestCatalog,
+      playlists: nextPlaylists,
+      counts: {
+        ...(latestCatalog.counts || {}),
+        playlists: nextPlaylists.length,
+      },
+    };
+  }
+  syncShellIfNeeded(true);
+}
+
 function resolveFocusedHomeApp(homeState) {
   if (homeState?.focusedApp) {
     return homeState.focusedApp;
@@ -104,7 +169,13 @@ function resolveLaunchedHomeAppTitle(homeState) {
   return resolveFocusedHomeApp(homeState).title;
 }
 
-function formatTelemetryPhaseLabel(activeScreen, bootSnapshot, homeState) {
+function formatTelemetryPhaseLabel(
+  activeScreen,
+  bootSnapshot,
+  homeState,
+  libraryState,
+  audioState,
+) {
   if (activeScreen === "boot") {
     if (bootSnapshot.phase === "warning") {
       return "WARNING";
@@ -116,6 +187,30 @@ function formatTelemetryPhaseLabel(activeScreen, bootSnapshot, homeState) {
     return `BOOT: ${bootPhase}`;
   }
 
+  if (activeScreen === "library") {
+    if (
+      libraryState?.vinylLaunchTarget === 1 ||
+      Number(libraryState?.vinylLaunchProgress ?? 0) > 0.5
+    ) {
+      const trackTitle = audioState?.activeTrack?.title;
+      if (typeof trackTitle === "string" && trackTitle.trim().length > 0) {
+        return `PLAY \u00b7 ${trackTitle.trim().toUpperCase()}`;
+      }
+      return "LIB \u00b7 VINYL LAUNCH";
+    }
+    if (libraryState?.playlistSheetOpen) {
+      return "LIB \u00b7 PLAYLIST SHEET";
+    }
+    const currentView = libraryState?.currentView;
+    if (currentView?.kind === "hub") {
+      return "LIB \u00b7 MAIN HUB";
+    }
+    if (typeof currentView?.title === "string" && currentView.title.length > 0) {
+      return `LIB \u00b7 ${currentView.title.toUpperCase()}`;
+    }
+    return "LIB \u00b7 COLLECTION";
+  }
+
   if (homeState?.launchTarget === 1) {
     const launchedAppTitle = resolveLaunchedHomeAppTitle(homeState);
     return `OPEN \u00b7 ${launchedAppTitle.toUpperCase()}`;
@@ -125,10 +220,22 @@ function formatTelemetryPhaseLabel(activeScreen, bootSnapshot, homeState) {
   return `HOME \u00b7 ${focusedApp.title.toUpperCase()}`;
 }
 
-function buildTelemetrySnapshot(bootSnapshot, routerState, homeState) {
+function buildTelemetrySnapshot(
+  bootSnapshot,
+  routerState,
+  homeState,
+  libraryState,
+  audioState,
+) {
   const counts = latestCatalog?.counts || bootSnapshot.backendCounts;
   const activeScreen = routerState?.activeScreen || "boot";
-  const phaseLabel = formatTelemetryPhaseLabel(activeScreen, bootSnapshot, homeState);
+  const phaseLabel = formatTelemetryPhaseLabel(
+    activeScreen,
+    bootSnapshot,
+    homeState,
+    libraryState,
+    audioState,
+  );
 
   return {
     phase: activeScreen === "boot" ? bootSnapshot.phase : activeScreen,
@@ -140,8 +247,20 @@ function buildTelemetrySnapshot(bootSnapshot, routerState, homeState) {
   };
 }
 
-function buildTelemetrySignature(bootSnapshot, routerState, homeState) {
-  const telemetry = buildTelemetrySnapshot(bootSnapshot, routerState, homeState);
+function buildTelemetrySignature(
+  bootSnapshot,
+  routerState,
+  homeState,
+  libraryState,
+  audioState,
+) {
+  const telemetry = buildTelemetrySnapshot(
+    bootSnapshot,
+    routerState,
+    homeState,
+    libraryState,
+    audioState,
+  );
   const counts = telemetry.counts || {};
   return [
     shellState.appearance,
@@ -158,11 +277,18 @@ function buildTelemetrySignature(bootSnapshot, routerState, homeState) {
     homeState?.launchTarget || 0,
     homeState?.launchedAppId || "",
     homeState?.focusedApp?.id || "",
+    libraryState?.currentView?.kind || "",
+    libraryState?.currentView?.title || "",
+    libraryState?.vinylLaunchTarget || 0,
+    libraryState?.playlistSheetOpen ? 1 : 0,
+    audioState?.activeTrack?.id || "",
+    audioState?.isPlaying ? 1 : 0,
     counts.tracks || 0,
     counts.albums || 0,
     counts.artists || 0,
     counts.genres || 0,
     counts.favorites || 0,
+    counts.playlists || 0,
   ].join("|");
 }
 
@@ -170,14 +296,28 @@ function syncShellIfNeeded(forceSync = false) {
   const bootSnapshot = bootController.getRenderSnapshot();
   const routerState = router.getState();
   const homeState = homeController.getRenderSnapshot();
-  const nextSignature = buildTelemetrySignature(bootSnapshot, routerState, homeState);
+  const libraryState = libraryController.getRenderSnapshot();
+  const audioState = audioEngine.getState();
+  const nextSignature = buildTelemetrySignature(
+    bootSnapshot,
+    routerState,
+    homeState,
+    libraryState,
+    audioState,
+  );
   if (!forceSync && nextSignature === lastTelemetrySignature) {
     return;
   }
   lastTelemetrySignature = nextSignature;
   shellController.syncView({
     ...shellState,
-    telemetry: buildTelemetrySnapshot(bootSnapshot, routerState, homeState),
+    telemetry: buildTelemetrySnapshot(
+      bootSnapshot,
+      routerState,
+      homeState,
+      libraryState,
+      audioState,
+    ),
   });
 }
 
@@ -194,6 +334,7 @@ async function loadCatalogWhenReady(sessionId) {
     if (catalogResponse.ok && catalogResponse.payload) {
       latestCatalog = catalogResponse.payload;
       catalogLoaded = true;
+      libraryController.hydrateCatalog(latestCatalog);
       if (typeof catalogResponse.payload.musicRoot === "string") {
         musicRootPath = catalogResponse.payload.musicRoot;
       }
@@ -292,6 +433,7 @@ function syncDisplayCanvasCursorClasses(
   routerState = router.getState(),
   bootSnapshot = bootController.getRenderSnapshot(),
   homeState = homeController.getRenderSnapshot(),
+  libraryState = libraryController.getRenderSnapshot(),
 ) {
   if (routerState.activeScreen === "boot") {
     displayCanvas.classList.remove("is-interactive");
@@ -300,6 +442,32 @@ function syncDisplayCanvasCursorClasses(
       hoverPoint && hitTestBootScreen(hoverPoint.pointX, hoverPoint.pointY, bootSnapshot) !== null,
     );
     displayCanvas.classList.toggle("is-clickable", hoveringRetry);
+    return;
+  }
+
+  if (routerState.activeScreen === "library") {
+    const currentKind = libraryState?.currentView?.kind;
+    const isScrollableView =
+      libraryState?.vinylLaunchTarget !== 1 &&
+      !libraryState?.playlistSheetOpen &&
+      currentKind !== "empty";
+    const isPointerDragging = Boolean(
+      libraryState?.pointerActive &&
+        (libraryState?.pointerMode === "arc-scroll" ||
+          libraryState?.pointerMode === "back-swipe" ||
+          libraryState?.pointerMode === "crate" ||
+          (libraryState?.pointerMode === "list" && libraryState?.pressedRowIndex === null)),
+    );
+    const isHoveringTarget =
+      !isPointerDragging &&
+      Boolean(
+        hoverPoint &&
+          hitTestLibraryInteractive(hoverPoint.pointX, hoverPoint.pointY, libraryState),
+      );
+
+    displayCanvas.classList.toggle("is-interactive", isScrollableView);
+    displayCanvas.classList.toggle("is-dragging", isPointerDragging);
+    displayCanvas.classList.toggle("is-clickable", isHoveringTarget);
     return;
   }
 
@@ -331,6 +499,7 @@ function reboot({ rescan = true, keepDelayFault = false } = {}) {
   catalogFetchInFlight = false;
   if (rescan) {
     latestCatalog = null;
+    coverCache.clear();
   }
 
   activePointerId = null;
@@ -419,6 +588,8 @@ async function handleRescanLibrary() {
     if (rescanResponse.ok && rescanResponse.payload) {
       latestCatalog = rescanResponse.payload;
       catalogLoaded = true;
+      coverCache.clear();
+      libraryController.hydrateCatalog(latestCatalog);
       if (typeof rescanResponse.payload.musicRoot === "string") {
         musicRootPath = rescanResponse.payload.musicRoot;
       }
@@ -451,6 +622,11 @@ async function handleRescanLibrary() {
 
 function handleNavigateLeft() {
   const routerState = router.getState();
+  if (routerState.activeScreen === "library") {
+    libraryController.stepDetent(-1);
+    syncShellIfNeeded(false);
+    return;
+  }
   const homeState = homeController.getRenderSnapshot();
   if (routerState.activeScreen === "home" && homeState.launchTarget === 0) {
     homeController.stepDetent(-1);
@@ -460,6 +636,11 @@ function handleNavigateLeft() {
 
 function handleNavigateRight() {
   const routerState = router.getState();
+  if (routerState.activeScreen === "library") {
+    libraryController.stepDetent(1);
+    syncShellIfNeeded(false);
+    return;
+  }
   const homeState = homeController.getRenderSnapshot();
   if (routerState.activeScreen === "home" && homeState.launchTarget === 0) {
     homeController.stepDetent(1);
@@ -467,8 +648,28 @@ function handleNavigateRight() {
   }
 }
 
+function handleNavigateUp() {
+  if (router.getState().activeScreen === "library") {
+    libraryController.stepDetent(-1);
+    syncShellIfNeeded(false);
+  }
+}
+
+function handleNavigateDown() {
+  if (router.getState().activeScreen === "library") {
+    libraryController.stepDetent(1);
+    syncShellIfNeeded(false);
+  }
+}
+
 function handleActivate() {
   const routerState = router.getState();
+  if (routerState.activeScreen === "library") {
+    libraryController.activateFocused();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
   if (routerState.activeScreen !== "home") {
     return;
   }
@@ -484,6 +685,12 @@ function handleActivate() {
 
 function handleNavigateBack() {
   const routerState = router.getState();
+  if (routerState.activeScreen === "library") {
+    libraryController.stepBack();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
   const homeState = homeController.getRenderSnapshot();
   if (routerState.activeScreen === "home" && homeState.launchTarget === 1) {
     homeController.closeLaunchedApp();
@@ -504,6 +711,8 @@ const shellController = createShellController({
   },
   onNavigateLeft: handleNavigateLeft,
   onNavigateRight: handleNavigateRight,
+  onNavigateUp: handleNavigateUp,
+  onNavigateDown: handleNavigateDown,
   onActivate: handleActivate,
   onNavigateBack: handleNavigateBack,
 });
@@ -517,16 +726,6 @@ function clientPointToDisplayPoint(clientX, clientY) {
     pointX: ((clientX - canvasRect.left) / canvasRect.width) * DISPLAY_DIAMETER_PX,
     pointY: ((clientY - canvasRect.top) / canvasRect.height) * DISPLAY_DIAMETER_PX,
   };
-}
-
-function releaseActivePointerCapture(pointerId) {
-  if (typeof displayCanvas.releasePointerCapture === "function" && pointerId !== null) {
-    try {
-      displayCanvas.releasePointerCapture(pointerId);
-    } catch (releaseError) {
-      /* Pointer capture already ended. */
-    }
-  }
 }
 
 displayCanvas.addEventListener("pointerdown", (pointerEvent) => {
@@ -549,8 +748,11 @@ displayCanvas.addEventListener("pointerdown", (pointerEvent) => {
     }
   }
 
-  if (router.getState().activeScreen === "home") {
+  const activeScreen = router.getState().activeScreen;
+  if (activeScreen === "home") {
     homeController.handlePointerDown(displayPoint.pointX, displayPoint.pointY);
+  } else if (activeScreen === "library") {
+    libraryController.handlePointerDown(displayPoint.pointX, displayPoint.pointY);
   }
   syncDisplayCanvasCursorClasses(displayPoint);
 });
@@ -559,12 +761,13 @@ displayCanvas.addEventListener("pointermove", (pointerEvent) => {
   const hoverPoint = clientPointToDisplayPoint(pointerEvent.clientX, pointerEvent.clientY);
   lastHoverPoint = hoverPoint;
 
-  if (
-    router.getState().activeScreen === "home" &&
-    activePointerId === pointerEvent.pointerId &&
-    hoverPoint
-  ) {
-    homeController.handlePointerMove(hoverPoint.pointX, hoverPoint.pointY);
+  if (activePointerId === pointerEvent.pointerId && hoverPoint) {
+    const activeScreen = router.getState().activeScreen;
+    if (activeScreen === "home") {
+      homeController.handlePointerMove(hoverPoint.pointX, hoverPoint.pointY);
+    } else if (activeScreen === "library") {
+      libraryController.handlePointerMove(hoverPoint.pointX, hoverPoint.pointY);
+    }
   }
   syncDisplayCanvasCursorClasses(hoverPoint);
 });
@@ -587,6 +790,18 @@ displayCanvas.addEventListener("pointerup", (pointerEvent) => {
       lastHoverPoint = releasePoint;
     } else {
       homeController.handlePointerCancel();
+    }
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
+
+  if (routerState.activeScreen === "library") {
+    if (releasePoint) {
+      libraryController.handlePointerUp(releasePoint.pointX, releasePoint.pointY);
+      lastHoverPoint = releasePoint;
+    } else {
+      libraryController.handlePointerCancel();
     }
     syncDisplayCanvasCursorClasses(lastHoverPoint);
     syncShellIfNeeded(false);
@@ -624,8 +839,11 @@ displayCanvas.addEventListener("pointercancel", (pointerEvent) => {
   pointerDownPoint = null;
   releaseActivePointerCapture(cancelledPointerId);
 
-  if (router.getState().activeScreen === "home") {
+  const activeScreen = router.getState().activeScreen;
+  if (activeScreen === "home") {
     homeController.handlePointerCancel();
+  } else if (activeScreen === "library") {
+    libraryController.handlePointerCancel();
   }
   syncDisplayCanvasCursorClasses(lastHoverPoint);
 });
@@ -640,7 +858,9 @@ displayCanvas.addEventListener(
   (wheelEvent) => {
     const routerState = router.getState();
     const homeState = homeController.getRenderSnapshot();
-    if (routerState.activeScreen !== "home" || homeState.launchTarget !== 0) {
+    const canWheelHome = routerState.activeScreen === "home" && homeState.launchTarget === 0;
+    const canWheelLibrary = routerState.activeScreen === "library";
+    if (!canWheelHome && !canWheelLibrary) {
       return;
     }
     wheelEvent.preventDefault();
@@ -656,13 +876,24 @@ displayCanvas.addEventListener(
       return;
     }
     lastWheelDetentTimestampMs = currentTimestampMs;
-    homeController.stepDetent(dominantDelta > 0 ? 1 : -1);
+    const stepDirection = dominantDelta > 0 ? 1 : -1;
+    if (canWheelLibrary) {
+      libraryController.stepDetent(stepDirection);
+    } else {
+      homeController.stepDetent(stepDirection);
+    }
     syncShellIfNeeded(false);
   },
   { passive: false },
 );
 
-function renderDisplayFrame(bootSnapshot, routerState, homeState) {
+function renderDisplayFrame(
+  bootSnapshot,
+  routerState,
+  homeState,
+  libraryState,
+  audioState,
+) {
   const pixelRatio = syncCanvasBackingResolution();
   const palette = APPEARANCE_PALETTES[shellState.appearance];
 
@@ -683,12 +914,29 @@ function renderDisplayFrame(bootSnapshot, routerState, homeState) {
 
   if (routerState.activeScreen === "boot") {
     renderBootScreen(drawingContext, bootSnapshot, palette);
+  } else if (routerState.activeScreen === "library") {
+    renderLibraryScreen(drawingContext, libraryState, {
+      appearance: shellState.appearance,
+      palette,
+      coverCache,
+      playback: {
+        elapsedSeconds: audioState.elapsedSeconds,
+        durationSeconds: audioState.durationSeconds,
+        volumeLevel: audioState.volumeLevel,
+      },
+    });
   } else {
     const counts = latestCatalog?.counts || bootSnapshot.backendCounts;
     renderHomeScreen(drawingContext, homeState, {
       appearance: shellState.appearance,
       palette,
       counts,
+      activeAlbum: audioState.activeAlbum,
+      activeTrack: audioState.activeTrack,
+      trackTitle: audioState.activeTrack?.title,
+      trackElapsedSeconds: audioState.elapsedSeconds,
+      trackDurationSeconds: audioState.durationSeconds,
+      coverCache,
     });
   }
 
@@ -715,16 +963,49 @@ function animationTick(timestampMs) {
     router.completeBootToHome();
   }
 
+  audioEngine.step(frameDeltaSeconds);
+  const audioState = audioEngine.getState();
+  libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
+  homeController.syncPlaybackState({
+    playbackState: audioState.isPlaying ? "playing" : "idle",
+    volumeLevel: audioState.volumeLevel,
+  });
+
   router.stepTransition(frameDeltaSeconds);
-  const routerState = router.getState();
+  let routerState = router.getState();
 
   if (routerState.activeScreen === "home") {
     homeController.step(frameDeltaSeconds);
+    const launchedHomeState = homeController.getRenderSnapshot();
+    if (
+      launchedHomeState.launchTarget === 1 &&
+      launchedHomeState.launchedAppId === "library" &&
+      launchedHomeState.launchProgress >= LIBRARY_HANDOFF_MIN_LAUNCH_PROGRESS
+    ) {
+      if (activePointerId !== null) {
+        const releasedPointerId = activePointerId;
+        activePointerId = null;
+        pointerDownPoint = null;
+        releaseActivePointerCapture(releasedPointerId);
+      }
+      libraryController.enterFromHome();
+      router.navigateTo("library");
+      routerState = router.getState();
+    }
+  } else if (routerState.activeScreen === "library") {
+    libraryController.step(frameDeltaSeconds);
   }
 
   const homeState = homeController.getRenderSnapshot();
-  renderDisplayFrame(bootSnapshot, routerState, homeState);
-  syncDisplayCanvasCursorClasses(lastHoverPoint, routerState, bootSnapshot, homeState);
+  const libraryState = libraryController.getRenderSnapshot();
+  renderDisplayFrame(bootSnapshot, routerState, homeState, libraryState, audioState);
+  syncDisplayCanvasCursorClasses(
+    lastHoverPoint,
+    routerState,
+    bootSnapshot,
+    homeState,
+    libraryState,
+  );
   syncShellIfNeeded(false);
 
   window.requestAnimationFrame(animationTick);

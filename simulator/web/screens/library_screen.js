@@ -1,0 +1,2612 @@
+/**
+ * Pure Canvas 2D renderer and hit-tester for the DialOS 03 LIBRARY screen:
+ * 2-up Crystal Hub with living sculptural icons, curved circular-chord lists,
+ * non-deforming Vinyl Crate with real cover art + geometric motif fallbacks,
+ * Crystal-Slab bezel Letter Seek, Playlist Action Sheet / Hold-to-Delete, and
+ * seamless Vinyl Launch transition into Now Playing chrome.
+ */
+
+import {
+  DISPLAY_CENTER_PX,
+  DISPLAY_DIAMETER_PX,
+  FULL_CIRCLE_RADIANS,
+  TOP_ANGLE_RADIANS,
+  clamp,
+  easeInOutCubic,
+  easeOutCubic,
+  easeOutExpo,
+  formatClockTime,
+  formatIntegerCount,
+  lerp,
+  normalizeRange,
+} from "../core/geometry.js";
+import {
+  LIBRARY_CONSTANTS,
+  LIBRARY_HUB_SECTIONS,
+  buildAlphabeticalLetterIndex,
+  computeLibraryCurvedRowLayout,
+  computeLibraryHubTileRect,
+  computeWindowedCrateBars,
+  resolveLibraryRimSliceIndex,
+  shortestSliceDistance,
+  sortAlphabeticallyBy,
+} from "../core/library_controller.js";
+import {
+  drawCrosshairMark,
+  drawDiagonalMark,
+  drawHazardStripeBand,
+} from "../core/primitives.js";
+import { APPEARANCE_PALETTES, FONT_DISPLAY, FONT_MONO } from "../core/tokens.js";
+
+const ALPHA_VISIBILITY_THRESHOLD = 0.005;
+const CONTENT_VISIBILITY_THRESHOLD = 0.01;
+const PERCENT_SCALE = 100;
+const DEFAULT_TRACK_DURATION_SECONDS = 248;
+const DEFAULT_VOLUME_LEVEL = 0.62;
+const MIN_ALPHABETICAL_INDEX_COUNT = 3;
+const MIN_LETTER_GROUPS_FOR_SEEK = 2;
+
+const HEADER_CLIP_TOP_Y = 76;
+const RIM_SHEEN_RADIUS_PX = 175;
+const SCROLL_ARC_RADIUS_PX = 166;
+const SCROLL_ARC_START_RADIANS = -0.44;
+const SCROLL_ARC_END_RADIANS = 0.44;
+const VOLUME_ARC_START_RADIANS = -0.46;
+const VOLUME_ARC_END_RADIANS = 0.46;
+const BACK_SWIPE_ARC_RADIUS_PX = 168;
+const BACK_SWIPE_ARC_SPAN_RADIANS = 0.34;
+const TOP_HANDLE_HALF_WIDTH_PX = 14;
+const TOP_HANDLE_HEIGHT_PX = 3;
+
+const CRATE_BAR_LIMIT = 7;
+const CRATE_BAR_HEIGHT_PX = 5;
+const CRATE_BAR_GAP_PX = 6;
+const CRATE_BAR_Y = 292;
+const CRATE_MIN_SLEEVE_PX = 86;
+const CRATE_MAX_SLEEVE_PX = 120;
+const CRATE_MIN_OPACITY = 0.32;
+const CRATE_DISC_PEEK_THRESHOLD = 0.42;
+
+const SHEET_CARD_WIDTH_PX = 224;
+const SHEET_CARD_HEIGHT_PX = 194;
+const SHEET_BUTTON_LEFT_X = 82;
+const SHEET_BUTTON_RIGHT_X = 278;
+const SHEET_PLAY_TOP_Y = 146;
+const SHEET_PLAY_BOTTOM_Y = 184;
+const SHEET_SHUFFLE_TOP_Y = 188;
+const SHEET_SHUFFLE_BOTTOM_Y = 226;
+const SHEET_DELETE_TOP_Y = 232;
+const SHEET_DELETE_BOTTOM_Y = 268;
+
+const EMPTY_BACK_CTA_TOP_Y = 236;
+const EMPTY_BACK_CTA_BOTTOM_Y = 284;
+const EMPTY_BACK_CTA_HALF_WIDTH_PX = 88;
+
+const CRATE_PEEK_LEFT_X = 224;
+const CRATE_PEEK_RIGHT_X = 272;
+const CRATE_PEEK_TOP_Y = 96;
+const CRATE_PEEK_BOTTOM_Y = 212;
+const CRATE_SLEEVE_LEFT_X = 108;
+const CRATE_SLEEVE_TOP_Y = 90;
+const CRATE_SLEEVE_BOTTOM_Y = 216;
+
+function resolvePalette(appearance, palette) {
+  if (palette && typeof palette === "object") {
+    return palette;
+  }
+  return APPEARANCE_PALETTES[appearance === "light" ? "light" : "dark"];
+}
+
+function resolveAppearance(appearance) {
+  return appearance === "light" ? "light" : "dark";
+}
+
+function truncateCanvasText(drawingContext, labelText, maxWidthPx) {
+  const safeLabel = String(labelText ?? "");
+  if (drawingContext.measureText(safeLabel).width <= maxWidthPx) {
+    return safeLabel;
+  }
+  let clipped = safeLabel;
+  while (
+    clipped.length > 2 &&
+    drawingContext.measureText(`${clipped}\u2026`).width > maxWidthPx
+  ) {
+    clipped = clipped.slice(0, -1);
+  }
+  return `${clipped.trimEnd()}\u2026`;
+}
+
+function traceChamferRect(drawingContext, leftX, topY, width, height, chamfer) {
+  const cut = Math.min(chamfer, width * 0.4, height * 0.4);
+  const rightX = leftX + width;
+  const bottomY = topY + height;
+  drawingContext.beginPath();
+  drawingContext.moveTo(leftX + cut, topY);
+  drawingContext.lineTo(rightX - cut, topY);
+  drawingContext.lineTo(rightX, topY + cut);
+  drawingContext.lineTo(rightX, bottomY - cut);
+  drawingContext.lineTo(rightX - cut, bottomY);
+  drawingContext.lineTo(leftX + cut, bottomY);
+  drawingContext.lineTo(leftX, bottomY - cut);
+  drawingContext.lineTo(leftX, topY + cut);
+  drawingContext.closePath();
+}
+
+function drawLibraryCornerBrackets(
+  drawingContext,
+  leftX,
+  topY,
+  width,
+  height,
+  armLength,
+  lineWidth,
+  color,
+  alpha,
+) {
+  if (alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const rightX = leftX + width;
+  const bottomY = topY + height;
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+  drawingContext.strokeStyle = color;
+  drawingContext.lineWidth = lineWidth;
+  drawingContext.lineCap = "butt";
+  drawingContext.beginPath();
+  drawingContext.moveTo(leftX, topY + armLength);
+  drawingContext.lineTo(leftX, topY);
+  drawingContext.lineTo(leftX + armLength, topY);
+  drawingContext.moveTo(rightX - armLength, bottomY);
+  drawingContext.lineTo(rightX, bottomY);
+  drawingContext.lineTo(rightX, bottomY - armLength);
+  drawingContext.stroke();
+  drawingContext.restore();
+}
+
+function traceCurvedSlabWedge(drawingContext, innerRadius, outerRadius, startAngle, endAngle) {
+  drawingContext.beginPath();
+  drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, outerRadius, startAngle, endAngle, false);
+  drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, innerRadius, endAngle, startAngle, true);
+  drawingContext.closePath();
+}
+
+/**
+ * Draw a living sculptural 2D icon corresponding to a Library hub section or row type.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {string} iconId Canonical section or row identifier.
+ * @param {number} centerX Center X coordinate.
+ * @param {number} centerY Center Y coordinate.
+ * @param {number} radius Icon nominal radius in pixels.
+ * @param {number} clockSeconds Idle animation clock in seconds.
+ * @param {boolean} isEmphasized True while pressed or playing.
+ * @param {object} [palette] Semantic Dark/Light appearance palette.
+ * @param {string} [appearance="dark"] Semantic appearance ("dark" | "light").
+ */
+export function drawLibraryLivingIcon(
+  drawingContext,
+  iconId,
+  centerX,
+  centerY,
+  radius,
+  clockSeconds,
+  isEmphasized,
+  palette,
+  appearance = "dark",
+) {
+  if (!drawingContext || radius <= 0) {
+    return;
+  }
+  const resolvedAppearance = resolveAppearance(appearance);
+  const resolvedPalette = resolvePalette(resolvedAppearance, palette);
+  const safeClock = Number.isFinite(clockSeconds) ? clockSeconds : 0;
+  const inkColor = isEmphasized ? resolvedPalette.signalHighlight : resolvedPalette.inkPrimary;
+  const accentColor = resolvedPalette.signalHighlight;
+  const mutedColor = resolvedPalette.hairlineStrong;
+  const isDark = resolvedAppearance === "dark";
+
+  drawingContext.save();
+  drawingContext.translate(centerX, centerY);
+  drawingContext.lineCap = "butt";
+  drawingContext.lineJoin = "miter";
+
+  if (iconId === "favorites") {
+    const spinWidth = 0.68 + 0.32 * Math.abs(Math.cos(safeClock * 1.4));
+    drawingContext.scale(spinWidth, 1);
+    drawingContext.beginPath();
+    drawingContext.moveTo(0, radius * 0.78);
+    drawingContext.lineTo(-radius * 0.86, -radius * 0.08);
+    drawingContext.lineTo(-radius * 0.82, -radius * 0.58);
+    drawingContext.lineTo(-radius * 0.34, -radius * 0.80);
+    drawingContext.lineTo(0, -radius * 0.40);
+    drawingContext.lineTo(radius * 0.34, -radius * 0.80);
+    drawingContext.lineTo(radius * 0.82, -radius * 0.58);
+    drawingContext.lineTo(radius * 0.86, -radius * 0.08);
+    drawingContext.closePath();
+    drawingContext.fillStyle = isEmphasized
+      ? accentColor
+      : isDark
+        ? "rgba(245, 246, 248, 0.16)"
+        : "rgba(46, 50, 56, 0.14)";
+    drawingContext.fill();
+    drawingContext.strokeStyle = inkColor;
+    drawingContext.lineWidth = 1.6;
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.moveTo(0, -radius * 0.40);
+    drawingContext.lineTo(0, radius * 0.72);
+    drawingContext.strokeStyle = isEmphasized ? resolvedPalette.signalHighlightInk : accentColor;
+    drawingContext.lineWidth = 1.3;
+    drawingContext.stroke();
+  } else if (iconId === "playlists") {
+    const plateTiers = [
+      { baseY: radius * 0.46, widthRadius: radius * 0.72, phase: 0.0, isHot: false },
+      { baseY: 0, widthRadius: radius * 0.84, phase: 2.0, isHot: true },
+      { baseY: -radius * 0.46, widthRadius: radius * 0.68, phase: 4.0, isHot: false },
+    ];
+    for (let tierIndex = 0; tierIndex < plateTiers.length; tierIndex += 1) {
+      const tier = plateTiers[tierIndex];
+      const driftY = tier.baseY + Math.sin(safeClock * 2.2 + tier.phase) * 1.6;
+      drawingContext.beginPath();
+      drawingContext.ellipse(0, driftY, tier.widthRadius, radius * 0.24, 0, 0, FULL_CIRCLE_RADIANS);
+      drawingContext.fillStyle =
+        tier.isHot && isEmphasized
+          ? accentColor
+          : isDark
+            ? "rgba(245, 246, 248, 0.12)"
+            : "rgba(46, 50, 56, 0.12)";
+      drawingContext.fill();
+      drawingContext.strokeStyle = tier.isHot
+        ? isEmphasized
+          ? accentColor
+          : inkColor
+        : mutedColor;
+      drawingContext.lineWidth = tier.isHot ? 1.6 : 1.15;
+      drawingContext.stroke();
+    }
+  } else if (iconId === "artists") {
+    const swayX = Math.sin(safeClock * 1.5) * 1.4;
+    drawingContext.beginPath();
+    drawingContext.arc(swayX, -radius * 0.34, radius * 0.33, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = isEmphasized
+      ? accentColor
+      : isDark
+        ? "rgba(245, 246, 248, 0.16)"
+        : "rgba(46, 50, 56, 0.14)";
+    drawingContext.fill();
+    drawingContext.strokeStyle = inkColor;
+    drawingContext.lineWidth = 1.5;
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.moveTo(-radius * 0.74, radius * 0.72);
+    drawingContext.lineTo(-radius * 0.56, radius * 0.20);
+    drawingContext.lineTo(radius * 0.56, radius * 0.20);
+    drawingContext.lineTo(radius * 0.74, radius * 0.72);
+    drawingContext.strokeStyle = inkColor;
+    drawingContext.lineWidth = 1.65;
+    drawingContext.stroke();
+  } else if (iconId === "albums") {
+    const spin = safeClock * 1.25;
+    const sleeveHalf = radius * 0.70;
+    const sleeveCenterX = -radius * 0.24;
+    const discPeekShift = Math.sin(safeClock * 1.8) * radius * 0.05;
+    const discCenterX = sleeveCenterX + sleeveHalf * 0.88 + discPeekShift;
+    const discRadius = sleeveHalf * 0.88;
+
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.arc(discCenterX, 0, discRadius, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = isDark ? "#13171F" : "#242830";
+    drawingContext.fill();
+    drawingContext.strokeStyle = isDark
+      ? "rgba(245, 246, 248, 0.34)"
+      : "rgba(46, 50, 56, 0.55)";
+    drawingContext.lineWidth = 1.1;
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.arc(discCenterX, 0, discRadius * 0.66, spin, spin + Math.PI * 0.75);
+    drawingContext.strokeStyle = isDark
+      ? "rgba(245, 246, 248, 0.36)"
+      : "rgba(245, 246, 248, 0.48)";
+    drawingContext.lineWidth = 1.1;
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.arc(discCenterX, 0, discRadius * 0.30, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = accentColor;
+    drawingContext.fill();
+    drawingContext.beginPath();
+    drawingContext.arc(discCenterX, 0, discRadius * 0.11, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = "#060709";
+    drawingContext.fill();
+
+    drawingContext.beginPath();
+    drawingContext.arc(discCenterX, 0, discRadius + 0.8, -Math.PI * 0.42, Math.PI * 0.42);
+    drawingContext.strokeStyle = accentColor;
+    drawingContext.lineWidth = 1.4;
+    drawingContext.stroke();
+    drawingContext.restore();
+
+    const sleeveLeft = sleeveCenterX - sleeveHalf;
+    const sleeveTop = -sleeveHalf;
+    const sleeveSize = sleeveHalf * 2;
+
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.rect(sleeveLeft, sleeveTop, sleeveSize, sleeveSize);
+    drawingContext.clip();
+
+    drawingContext.fillStyle = isDark ? "#141923" : "#272C35";
+    drawingContext.fillRect(sleeveLeft, sleeveTop, sleeveSize, sleeveSize);
+
+    drawingContext.fillStyle = accentColor;
+    drawingContext.beginPath();
+    drawingContext.moveTo(sleeveCenterX - sleeveHalf * 0.14, sleeveTop);
+    drawingContext.lineTo(sleeveCenterX + sleeveHalf * 0.56, sleeveTop);
+    drawingContext.lineTo(sleeveCenterX - sleeveHalf * 0.24, sleeveTop + sleeveSize);
+    drawingContext.lineTo(sleeveCenterX - sleeveHalf * 0.68, sleeveTop + sleeveSize);
+    drawingContext.closePath();
+    drawingContext.fill();
+
+    drawingContext.strokeStyle = "#F5F6F8";
+    drawingContext.lineWidth = Math.max(1.5, sleeveHalf * 0.18);
+    drawingContext.beginPath();
+    drawingContext.arc(sleeveCenterX, 0, sleeveHalf * 0.54, -Math.PI * 0.22, Math.PI * 0.50);
+    drawingContext.stroke();
+
+    drawingContext.fillStyle = "rgba(255, 255, 255, 0.16)";
+    drawingContext.beginPath();
+    drawingContext.moveTo(sleeveLeft, sleeveTop);
+    drawingContext.lineTo(sleeveLeft + sleeveSize * 0.45, sleeveTop);
+    drawingContext.lineTo(sleeveLeft + sleeveSize * 0.08, sleeveTop + sleeveSize);
+    drawingContext.lineTo(sleeveLeft - sleeveSize * 0.35, sleeveTop + sleeveSize);
+    drawingContext.closePath();
+    drawingContext.fill();
+    drawingContext.restore();
+
+    drawingContext.strokeStyle = isEmphasized ? accentColor : inkColor;
+    drawingContext.lineWidth = isEmphasized ? 1.5 : 1.25;
+    drawingContext.strokeRect(sleeveLeft + 0.5, sleeveTop + 0.5, sleeveSize - 1, sleeveSize - 1);
+
+    const cornerArm = Math.max(4, sleeveHalf * 0.36);
+    drawingContext.strokeStyle = accentColor;
+    drawingContext.lineWidth = 1.7;
+    drawingContext.beginPath();
+    drawingContext.moveTo(sleeveLeft, sleeveTop + cornerArm);
+    drawingContext.lineTo(sleeveLeft, sleeveTop);
+    drawingContext.lineTo(sleeveLeft + cornerArm, sleeveTop);
+    drawingContext.stroke();
+  } else if (iconId === "genres") {
+    const barCount = 4;
+    const barWidth = radius * 0.26;
+    const barGap = radius * 0.16;
+    const totalWidth = barCount * barWidth + (barCount - 1) * barGap;
+    for (let barIndex = 0; barIndex < barCount; barIndex += 1) {
+      const level =
+        0.28 +
+        0.72 * (0.5 + 0.5 * Math.sin(safeClock * (3.2 + barIndex * 0.9) + barIndex * 1.4));
+      const barHeight = radius * (0.45 + level * 0.95);
+      const barX = -totalWidth / 2 + barIndex * (barWidth + barGap);
+      drawingContext.fillStyle =
+        barIndex === 1 && isEmphasized
+          ? accentColor
+          : barIndex % 2 === 0
+            ? inkColor
+            : mutedColor;
+      drawingContext.fillRect(barX, radius * 0.68 - barHeight, barWidth, barHeight);
+    }
+  } else if (iconId === "track") {
+    const spin = safeClock * (isEmphasized ? 2.4 : 0.9);
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, radius * 0.78, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.strokeStyle = inkColor;
+    drawingContext.lineWidth = 1.4;
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, radius * 0.44, spin, spin + Math.PI * 0.65);
+    drawingContext.strokeStyle = isEmphasized ? accentColor : mutedColor;
+    drawingContext.lineWidth = 1.8;
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, radius * 0.16, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = inkColor;
+    drawingContext.fill();
+  } else {
+    const orbit = safeClock * 1.2;
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, radius * 0.78, orbit, orbit + Math.PI * 1.45);
+    drawingContext.strokeStyle = inkColor;
+    drawingContext.lineWidth = 1.7;
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, radius * 0.44, -orbit * 1.3, -orbit * 1.3 + Math.PI * 1.1);
+    drawingContext.strokeStyle = isEmphasized ? accentColor : mutedColor;
+    drawingContext.lineWidth = 1.4;
+    drawingContext.stroke();
+
+    const dotX = Math.cos(orbit + Math.PI * 1.65) * radius * 0.78;
+    const dotY = Math.sin(orbit + Math.PI * 1.65) * radius * 0.78;
+    drawingContext.fillStyle = accentColor;
+    drawingContext.fillRect(dotX - 2.2, dotY - 2.2, 4.4, 4.4);
+  }
+
+  drawingContext.restore();
+}
+
+/**
+ * Draw real center-cropped album cover art when cached and loaded, or fall back cleanly
+ * to one of the six DialOS pure-2D geometric artwork motifs (`prism` by default).
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context centered on artwork origin.
+ * @param {object | null | undefined} albumSpec Album descriptor with optional `coverUrl` and `motif`.
+ * @param {number} spanHalf Half side length of the square artwork region.
+ * @param {object} [palette] Semantic Dark/Light appearance palette.
+ * @param {string} [appearance="dark"] Semantic appearance ("dark" | "light").
+ * @param {{ getOrLoadAlbumCover?: (albumSpec: object) => object | null } | null} [coverCache] LRU cover cache.
+ */
+export function drawLibraryAlbumArtworkMotif(
+  drawingContext,
+  albumSpec,
+  spanHalf,
+  palette,
+  appearance = "dark",
+  coverCache = null,
+) {
+  if (!drawingContext || spanHalf <= 0) {
+    return;
+  }
+  const resolvedAppearance = resolveAppearance(appearance);
+  const resolvedPalette = resolvePalette(resolvedAppearance, palette);
+  const isDark = resolvedAppearance === "dark";
+  const baseInk = isDark ? "#11151C" : "#22262E";
+  const slateSurface = isDark ? "#1D2330" : "#343A46";
+  const starkLight = "#F5F6F8";
+  const accentColor = resolvedPalette.signalHighlight;
+
+  drawingContext.fillStyle = baseInk;
+  drawingContext.fillRect(-spanHalf, -spanHalf, spanHalf * 2, spanHalf * 2);
+
+  const coverEntry =
+    coverCache && typeof coverCache.getOrLoadAlbumCover === "function"
+      ? coverCache.getOrLoadAlbumCover(albumSpec)
+      : null;
+  if (
+    coverEntry &&
+    coverEntry.status === "loaded" &&
+    coverEntry.image &&
+    coverEntry.image.naturalWidth > 0 &&
+    coverEntry.image.naturalHeight > 0
+  ) {
+    const imageWidth = coverEntry.image.naturalWidth;
+    const imageHeight = coverEntry.image.naturalHeight;
+    const cropSide = Math.min(imageWidth, imageHeight);
+    const cropX = (imageWidth - cropSide) / 2;
+    const cropY = (imageHeight - cropSide) / 2;
+    drawingContext.drawImage(
+      coverEntry.image,
+      cropX,
+      cropY,
+      cropSide,
+      cropSide,
+      -spanHalf,
+      -spanHalf,
+      spanHalf * 2,
+      spanHalf * 2,
+    );
+    return;
+  }
+
+  const motif =
+    typeof albumSpec?.motif === "string" && albumSpec.motif.length > 0
+      ? albumSpec.motif
+      : "prism";
+
+  if (motif === "prism") {
+    drawingContext.fillStyle = slateSurface;
+    drawingContext.beginPath();
+    drawingContext.moveTo(-spanHalf, -spanHalf * 0.18);
+    drawingContext.lineTo(spanHalf * 0.35, -spanHalf);
+    drawingContext.lineTo(spanHalf, -spanHalf);
+    drawingContext.lineTo(spanHalf, spanHalf * 0.25);
+    drawingContext.lineTo(-spanHalf * 0.42, spanHalf);
+    drawingContext.lineTo(-spanHalf, spanHalf);
+    drawingContext.closePath();
+    drawingContext.fill();
+
+    drawingContext.fillStyle = accentColor;
+    drawingContext.beginPath();
+    drawingContext.moveTo(-spanHalf * 0.14, -spanHalf);
+    drawingContext.lineTo(spanHalf * 0.56, -spanHalf);
+    drawingContext.lineTo(-spanHalf * 0.24, spanHalf);
+    drawingContext.lineTo(-spanHalf * 0.68, spanHalf);
+    drawingContext.closePath();
+    drawingContext.fill();
+
+    drawingContext.strokeStyle = starkLight;
+    drawingContext.lineWidth = Math.max(3, spanHalf * 0.14);
+    drawingContext.lineCap = "butt";
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, spanHalf * 0.62, -Math.PI * 0.22, Math.PI * 0.48);
+    drawingContext.stroke();
+
+    drawingContext.fillStyle = starkLight;
+    const barHeight = Math.max(2, spanHalf * 0.05);
+    const barPitch = Math.max(4, spanHalf * 0.105);
+    for (let barIndex = 0; barIndex < 4; barIndex += 1) {
+      drawingContext.fillRect(
+        -spanHalf * 0.78,
+        -spanHalf * 0.58 + barIndex * barPitch,
+        spanHalf * (0.48 - barIndex * 0.08),
+        barHeight,
+      );
+    }
+  } else if (motif === "grid") {
+    drawingContext.fillStyle = "#0F1D2B";
+    drawingContext.fillRect(-spanHalf, -spanHalf, spanHalf * 2, spanHalf * 2);
+
+    drawingContext.strokeStyle = "rgba(94, 220, 230, 0.36)";
+    drawingContext.lineWidth = 1;
+    const gridStep = spanHalf * 0.34;
+    for (let gridOffset = -spanHalf * 1.4; gridOffset <= spanHalf * 1.4; gridOffset += gridStep) {
+      drawingContext.beginPath();
+      drawingContext.moveTo(gridOffset, -spanHalf);
+      drawingContext.lineTo(gridOffset + spanHalf * 0.6, spanHalf);
+      drawingContext.moveTo(-spanHalf, gridOffset);
+      drawingContext.lineTo(spanHalf, gridOffset - spanHalf * 0.35);
+      drawingContext.stroke();
+    }
+
+    drawingContext.fillStyle = "#5EDCE6";
+    drawingContext.beginPath();
+    drawingContext.moveTo(-spanHalf * 0.48, -spanHalf * 0.12);
+    drawingContext.lineTo(spanHalf * 0.16, -spanHalf * 0.52);
+    drawingContext.lineTo(spanHalf * 0.58, -spanHalf * 0.14);
+    drawingContext.lineTo(-spanHalf * 0.06, spanHalf * 0.26);
+    drawingContext.closePath();
+    drawingContext.fill();
+
+    drawingContext.fillStyle = starkLight;
+    drawingContext.fillRect(-spanHalf * 0.56, spanHalf * 0.34, spanHalf * 1.12, spanHalf * 0.14);
+    drawCrosshairMark(
+      drawingContext,
+      -spanHalf * 0.52,
+      -spanHalf * 0.54,
+      spanHalf * 0.12,
+      1.4,
+      starkLight,
+      0.9,
+    );
+    drawCrosshairMark(
+      drawingContext,
+      spanHalf * 0.52,
+      spanHalf * 0.64,
+      spanHalf * 0.12,
+      1.4,
+      accentColor,
+      0.95,
+    );
+  } else if (motif === "monolith") {
+    drawingContext.fillStyle = starkLight;
+    drawingContext.fillRect(-spanHalf, -spanHalf, spanHalf * 2, spanHalf * 1.12);
+    drawingContext.fillStyle = baseInk;
+    drawingContext.fillRect(-spanHalf, spanHalf * 0.12, spanHalf * 2, spanHalf * 0.88);
+
+    drawingContext.strokeStyle = baseInk;
+    drawingContext.lineWidth = Math.max(3, spanHalf * 0.14);
+    drawingContext.lineCap = "butt";
+    for (let chevronIndex = 0; chevronIndex < 2; chevronIndex += 1) {
+      const offsetX = -spanHalf * 0.36 + chevronIndex * spanHalf * 0.36;
+      drawingContext.beginPath();
+      drawingContext.moveTo(offsetX - spanHalf * 0.18, -spanHalf * 0.58);
+      drawingContext.lineTo(offsetX + spanHalf * 0.18, -spanHalf * 0.26);
+      drawingContext.lineTo(offsetX - spanHalf * 0.18, spanHalf * 0.04);
+      drawingContext.stroke();
+    }
+
+    drawingContext.fillStyle = accentColor;
+    drawingContext.fillRect(spanHalf * 0.28, spanHalf * 0.32, spanHalf * 0.42, spanHalf * 0.42);
+    drawingContext.fillStyle = starkLight;
+    drawingContext.fillRect(-spanHalf * 0.72, spanHalf * 0.48, spanHalf * 0.74, spanHalf * 0.08);
+  } else if (motif === "tape") {
+    drawingContext.fillStyle = "#191B20";
+    drawingContext.fillRect(-spanHalf, -spanHalf, spanHalf * 2, spanHalf * 2);
+
+    drawingContext.fillStyle = "#F5B841";
+    drawingContext.beginPath();
+    drawingContext.moveTo(-spanHalf, spanHalf * 0.18);
+    drawingContext.lineTo(spanHalf, -spanHalf * 0.54);
+    drawingContext.lineTo(spanHalf, -spanHalf * 0.14);
+    drawingContext.lineTo(-spanHalf, spanHalf * 0.58);
+    drawingContext.closePath();
+    drawingContext.fill();
+
+    const reelOffsets = [-spanHalf * 0.36, spanHalf * 0.36];
+    for (let reelIndex = 0; reelIndex < reelOffsets.length; reelIndex += 1) {
+      const reelX = reelOffsets[reelIndex];
+      drawingContext.beginPath();
+      drawingContext.arc(reelX, 0, spanHalf * 0.28, 0, FULL_CIRCLE_RADIANS);
+      drawingContext.fillStyle = baseInk;
+      drawingContext.fill();
+      drawingContext.strokeStyle = starkLight;
+      drawingContext.lineWidth = Math.max(1.5, spanHalf * 0.045);
+      drawingContext.stroke();
+
+      drawingContext.beginPath();
+      drawingContext.arc(reelX, 0, spanHalf * 0.09, 0, FULL_CIRCLE_RADIANS);
+      drawingContext.fillStyle = starkLight;
+      drawingContext.fill();
+    }
+
+    drawingContext.fillStyle = starkLight;
+    drawingContext.fillRect(-spanHalf * 0.64, spanHalf * 0.62, spanHalf * 1.28, spanHalf * 0.07);
+  } else if (motif === "optical") {
+    drawingContext.fillStyle = "#161224";
+    drawingContext.fillRect(-spanHalf, -spanHalf, spanHalf * 2, spanHalf * 2);
+
+    drawingContext.strokeStyle = "#B296F5";
+    drawingContext.lineWidth = Math.max(2.5, spanHalf * 0.11);
+    drawingContext.lineCap = "butt";
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, spanHalf * 0.68, -Math.PI * 0.85, Math.PI * 0.15);
+    drawingContext.stroke();
+
+    drawingContext.strokeStyle = starkLight;
+    drawingContext.lineWidth = Math.max(1.5, spanHalf * 0.045);
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, spanHalf * 0.42, Math.PI * 0.10, Math.PI * 1.25);
+    drawingContext.stroke();
+
+    drawingContext.fillStyle = accentColor;
+    drawingContext.fillRect(spanHalf * 0.24, -spanHalf * 0.68, spanHalf * 0.42, spanHalf * 0.42);
+    drawDiagonalMark(
+      drawingContext,
+      spanHalf * 0.45,
+      -spanHalf * 0.47,
+      spanHalf * 0.11,
+      1.5,
+      resolvedPalette.signalHighlightInk,
+      1,
+    );
+    drawDiagonalMark(
+      drawingContext,
+      -spanHalf * 0.52,
+      spanHalf * 0.54,
+      spanHalf * 0.11,
+      1.4,
+      starkLight,
+      0.85,
+    );
+  } else {
+    drawingContext.fillStyle = "#D4D7DC";
+    drawingContext.fillRect(-spanHalf, -spanHalf, spanHalf * 2, spanHalf * 2);
+
+    drawingContext.fillStyle = "#262A31";
+    drawingContext.fillRect(-spanHalf * 0.78, -spanHalf * 0.72, spanHalf * 0.68, spanHalf * 1.44);
+    drawingContext.fillRect(spanHalf * 0.08, -spanHalf * 0.28, spanHalf * 0.70, spanHalf * 1.00);
+
+    drawHazardStripeBand(
+      drawingContext,
+      spanHalf * 0.08,
+      -spanHalf * 0.72,
+      spanHalf * 0.70,
+      spanHalf * 0.30,
+      0,
+      resolvedPalette.signalActive,
+    );
+
+    drawingContext.fillStyle = accentColor;
+    drawingContext.beginPath();
+    drawingContext.arc(-spanHalf * 0.44, -spanHalf * 0.34, spanHalf * 0.16, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fill();
+  }
+}
+
+/**
+ * Draw a spinning circular vinyl disc displaying album artwork, optical grooves,
+ * and center record label plate.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {object | null | undefined} albumSpec Album descriptor.
+ * @param {number} centerX Disc center X coordinate.
+ * @param {number} centerY Disc center Y coordinate.
+ * @param {number} radius Disc outer radius in pixels.
+ * @param {number} rotationRadians Spin angle in radians.
+ * @param {object} [palette] Semantic Dark/Light appearance palette.
+ * @param {string} [appearance="dark"] Semantic appearance ("dark" | "light").
+ * @param {number} [alpha=1] Layer opacity.
+ * @param {{ getOrLoadAlbumCover?: (albumSpec: object) => object | null } | null} [coverCache] LRU cover cache.
+ */
+export function drawLibraryVinylDisc(
+  drawingContext,
+  albumSpec,
+  centerX,
+  centerY,
+  radius,
+  rotationRadians,
+  palette,
+  appearance = "dark",
+  alpha = 1,
+  coverCache = null,
+) {
+  if (!drawingContext || alpha <= ALPHA_VISIBILITY_THRESHOLD || radius <= 2) {
+    return;
+  }
+  const resolvedAppearance = resolveAppearance(appearance);
+  const resolvedPalette = resolvePalette(resolvedAppearance, palette);
+  const safeRotation = Number.isFinite(rotationRadians) ? rotationRadians : 0;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+  drawingContext.translate(centerX, centerY);
+
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, radius, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.clip();
+
+  drawingContext.rotate(safeRotation);
+  drawLibraryAlbumArtworkMotif(
+    drawingContext,
+    albumSpec,
+    radius,
+    resolvedPalette,
+    resolvedAppearance,
+    coverCache,
+  );
+
+  const grooveColor =
+    resolvedAppearance === "dark" ? "rgba(245, 246, 248, 0.10)" : "rgba(245, 246, 248, 0.13)";
+  drawingContext.strokeStyle = grooveColor;
+  drawingContext.lineWidth = Math.max(0.8, radius * 0.008);
+  const grooveRatios = [0.88, 0.78, 0.68, 0.48];
+  for (let grooveIndex = 0; grooveIndex < grooveRatios.length; grooveIndex += 1) {
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, radius * grooveRatios[grooveIndex], 0, FULL_CIRCLE_RADIANS);
+    drawingContext.stroke();
+  }
+
+  const labelRadius = radius * 0.28;
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, labelRadius, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = "#11151C";
+  drawingContext.fill();
+  drawingContext.strokeStyle = "#F5F6F8";
+  drawingContext.lineWidth = Math.max(1.2, radius * 0.018);
+  drawingContext.stroke();
+
+  const labelBlockSize = Math.max(3, radius * 0.075);
+  drawingContext.fillStyle = resolvedPalette.signalHighlight;
+  drawingContext.fillRect(labelRadius * 0.22, -labelBlockSize / 2, labelBlockSize, labelBlockSize);
+
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, Math.max(2.5, radius * 0.075), 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = "#060709";
+  drawingContext.fill();
+
+  drawingContext.restore();
+}
+
+function drawLibraryPeripheralChrome(
+  drawingContext,
+  title,
+  subtitle,
+  headerOffsetY,
+  chromeAlpha,
+  palette,
+  appearance,
+) {
+  if (chromeAlpha <= ALPHA_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  drawingContext.save();
+  drawingContext.globalAlpha = chromeAlpha;
+
+  drawingContext.lineCap = "round";
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    RIM_SHEEN_RADIUS_PX,
+    -Math.PI * 0.84,
+    -Math.PI * 0.30,
+  );
+  drawingContext.strokeStyle = isDark
+    ? "rgba(235, 244, 255, 0.14)"
+    : "rgba(255, 255, 255, 0.72)";
+  drawingContext.lineWidth = 2;
+  drawingContext.stroke();
+
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    RIM_SHEEN_RADIUS_PX,
+    Math.PI * 0.14,
+    Math.PI * 0.44,
+  );
+  drawingContext.strokeStyle = isDark
+    ? "rgba(192, 254, 5, 0.18)"
+    : "rgba(232, 90, 36, 0.22)";
+  drawingContext.lineWidth = 1.5;
+  drawingContext.stroke();
+
+  drawingContext.translate(0, headerOffsetY);
+
+  drawingContext.fillStyle = palette.hairlineStrong;
+  drawingContext.globalAlpha = chromeAlpha * 0.65;
+  drawingContext.fillRect(
+    DISPLAY_CENTER_PX - TOP_HANDLE_HALF_WIDTH_PX,
+    20,
+    TOP_HANDLE_HALF_WIDTH_PX * 2,
+    TOP_HANDLE_HEIGHT_PX,
+  );
+
+  drawingContext.globalAlpha = chromeAlpha;
+  drawingContext.font = `700 16px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = palette.inkPrimary;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  const fittedTitle = truncateCanvasText(drawingContext, title, 184);
+  drawingContext.fillText(fittedTitle, DISPLAY_CENTER_PX, 44);
+
+  if (subtitle) {
+    drawingContext.font = `600 9px ${FONT_MONO}`;
+    drawingContext.fillStyle = palette.inkSecondary;
+    const fittedSubtitle = truncateCanvasText(drawingContext, subtitle, 196);
+    drawingContext.fillText(fittedSubtitle, DISPLAY_CENTER_PX, 60);
+  }
+
+  drawingContext.strokeStyle = palette.hairline;
+  drawingContext.lineWidth = 1;
+  drawingContext.beginPath();
+  drawingContext.moveTo(DISPLAY_CENTER_PX - 52, 72);
+  drawingContext.lineTo(DISPLAY_CENTER_PX + 52, 72);
+  drawingContext.stroke();
+
+  drawingContext.restore();
+}
+
+function drawLibraryScrollArc(drawingContext, scrollPosition, totalRows, alpha, palette) {
+  if (totalRows <= LIBRARY_CONSTANTS.LIST_FULL_SLOTS || alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const arcSpan = SCROLL_ARC_END_RADIANS - SCROLL_ARC_START_RADIANS;
+  const visibleRatio = clamp(LIBRARY_CONSTANTS.LIST_FULL_SLOTS / totalRows, 0.22, 0.72);
+  const thumbSpan = arcSpan * visibleRatio;
+  const maxScroll = Math.max(1, totalRows - LIBRARY_CONSTANTS.LIST_FULL_SLOTS);
+  const normalizedScroll = clamp(scrollPosition / maxScroll, 0, 1);
+  const thumbStart = lerp(
+    SCROLL_ARC_START_RADIANS,
+    SCROLL_ARC_END_RADIANS - thumbSpan,
+    normalizedScroll,
+  );
+
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+  drawingContext.lineCap = "butt";
+
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    SCROLL_ARC_RADIUS_PX,
+    SCROLL_ARC_START_RADIANS,
+    SCROLL_ARC_END_RADIANS,
+  );
+  drawingContext.strokeStyle = palette.hairline;
+  drawingContext.lineWidth = 2.5;
+  drawingContext.stroke();
+
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    SCROLL_ARC_RADIUS_PX,
+    thumbStart,
+    thumbStart + thumbSpan,
+  );
+  drawingContext.strokeStyle = palette.signalHighlight;
+  drawingContext.lineWidth = 3.2;
+  drawingContext.stroke();
+
+  drawingContext.restore();
+}
+
+function drawLibraryPerspectiveFloor(drawingContext, scrollPosition, alpha, palette, appearance) {
+  if (alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+
+  const floorTopY = 266;
+  const floorBottomY = 326;
+  drawingContext.strokeStyle = isDark
+    ? "rgba(196, 218, 250, 0.10)"
+    : "rgba(46, 52, 62, 0.10)";
+  drawingContext.lineWidth = 1;
+  const rowRatios = [0, 0.5, 1];
+  for (let rowIndex = 0; rowIndex < rowRatios.length; rowIndex += 1) {
+    const lineY = lerp(floorTopY, floorBottomY, rowRatios[rowIndex]);
+    const span = lerp(112, 74, rowRatios[rowIndex]);
+    drawingContext.beginPath();
+    drawingContext.moveTo(DISPLAY_CENTER_PX - span, lineY);
+    drawingContext.lineTo(DISPLAY_CENTER_PX + span, lineY);
+    drawingContext.stroke();
+  }
+  const fractional = ((scrollPosition % 1) + 1) % 1;
+  for (let columnIndex = -3; columnIndex <= 3; columnIndex += 1) {
+    const topX = DISPLAY_CENTER_PX + (columnIndex - fractional * 0.5) * 34;
+    const bottomX = DISPLAY_CENTER_PX + (columnIndex - fractional * 0.5) * 52;
+    drawingContext.beginPath();
+    drawingContext.moveTo(topX, floorTopY);
+    drawingContext.lineTo(bottomX, floorBottomY);
+    drawingContext.stroke();
+  }
+
+  drawDiagonalMark(
+    drawingContext,
+    DISPLAY_CENTER_PX - 102,
+    74,
+    3.5,
+    1.2,
+    palette.hairlineStrong,
+    alpha * 0.55,
+  );
+  drawDiagonalMark(
+    drawingContext,
+    DISPLAY_CENTER_PX + 102,
+    294,
+    3.5,
+    1.2,
+    palette.hairlineStrong,
+    alpha * 0.55,
+  );
+  drawingContext.restore();
+}
+
+function drawLiveMiniEqualizer(drawingContext, centerX, centerY, clockSeconds, palette) {
+  const barWidth = 2.6;
+  const barGap = 2.2;
+  const totalWidth = barWidth * 3 + barGap * 2;
+  const startX = centerX - totalWidth / 2;
+  drawingContext.save();
+  drawingContext.fillStyle = palette.signalHighlight;
+  for (let barIndex = 0; barIndex < 3; barIndex += 1) {
+    const wave =
+      0.25 +
+      0.75 * (0.5 + 0.5 * Math.sin(clockSeconds * (5.2 + barIndex * 1.4) + barIndex * 1.7));
+    const barHeight = 3.5 + wave * 9.5;
+    drawingContext.fillRect(
+      startX + barIndex * (barWidth + barGap),
+      centerY + 6 - barHeight,
+      barWidth,
+      barHeight,
+    );
+  }
+  drawingContext.restore();
+}
+
+function resolveLibraryRowPressIntensity(rowIndex, libraryState) {
+  let activeLevel = 0;
+  if (libraryState.pressedRowIndex === rowIndex) {
+    activeLevel = Math.max(activeLevel, Number(libraryState.pressHighlightLevel ?? 0));
+  }
+  if (libraryState.pressFlashRowIndex === rowIndex) {
+    activeLevel = Math.max(activeLevel, Number(libraryState.pressFlashLevel ?? 0));
+  }
+  return clamp(activeLevel, 0, 1);
+}
+
+function resolveCrateAlbumsFromState(libraryState, currentView) {
+  if (
+    Array.isArray(libraryState?.currentCrateAlbums) &&
+    (libraryState.currentCrateAlbums.length > 0 || !libraryState?.catalog?.albums?.length)
+  ) {
+    return libraryState.currentCrateAlbums;
+  }
+  const catalogAlbums = Array.isArray(libraryState?.catalog?.albums)
+    ? libraryState.catalog.albums
+    : [];
+  if (Array.isArray(currentView?.albumIds) && currentView.albumIds.length > 0) {
+    const albumByIdMap = new Map(catalogAlbums.map((albumEntry) => [albumEntry.id, albumEntry]));
+    return sortAlphabeticallyBy(
+      currentView.albumIds.map((albumId) => albumByIdMap.get(albumId)).filter(Boolean),
+      (albumEntry) => albumEntry.title,
+    );
+  }
+  return catalogAlbums;
+}
+
+function resolveRowsFromState(libraryState, currentView) {
+  if (Array.isArray(libraryState?.currentRows)) {
+    return libraryState.currentRows;
+  }
+  if (currentView?.kind === "hub") {
+    const counts = libraryState?.counts || {};
+    return LIBRARY_HUB_SECTIONS.map((sectionSpec) => {
+      const countValue =
+        sectionSpec.id === "all-songs" ? counts.tracks : counts[sectionSpec.id];
+      const countLabel = formatIntegerCount(countValue ?? 0);
+      return {
+        id: sectionSpec.id,
+        rowType: "hub",
+        title: sectionSpec.title,
+        countLabel,
+        countText: countLabel,
+        sectionSpec,
+      };
+    });
+  }
+  return [];
+}
+
+function resolveLetterEntriesFromState(currentView, libraryState) {
+  if (Array.isArray(libraryState?.letterEntries)) {
+    return libraryState.letterEntries;
+  }
+  const isAlphabeticalView =
+    currentView.kind === "albums" ||
+    currentView.kind === "artists" ||
+    currentView.kind === "genres" ||
+    currentView.kind === "playlists" ||
+    (currentView.kind === "tracks" && currentView.sourceType !== "album");
+
+  if (!isAlphabeticalView) {
+    return [];
+  }
+
+  const entries =
+    currentView.kind === "albums"
+      ? resolveCrateAlbumsFromState(libraryState, currentView)
+      : resolveRowsFromState(libraryState, currentView);
+
+  if (entries.length < MIN_ALPHABETICAL_INDEX_COUNT) {
+    return [];
+  }
+
+  const letters = buildAlphabeticalLetterIndex(
+    entries,
+    (entry) => entry?.title ?? entry?.name ?? entry,
+  );
+  return letters.length >= MIN_LETTER_GROUPS_FOR_SEEK ? letters : [];
+}
+
+function renderLibraryHubGrid(
+  drawingContext,
+  viewEntry,
+  rows,
+  libraryState,
+  contentAlpha,
+  palette,
+  appearance,
+) {
+  const scrollPairPosition = Number.isFinite(viewEntry.scrollPosition) ? viewEntry.scrollPosition : 0;
+  const clockSeconds = Number.isFinite(libraryState.idleClockSeconds)
+    ? libraryState.idleClockSeconds
+    : 0;
+  const isDark = appearance === "dark";
+
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(
+    0,
+    HEADER_CLIP_TOP_Y,
+    DISPLAY_DIAMETER_PX,
+    DISPLAY_DIAMETER_PX - HEADER_CLIP_TOP_Y,
+  );
+  drawingContext.clip();
+
+  for (let tileIndex = 0; tileIndex < rows.length; tileIndex += 1) {
+    const tileRect = computeLibraryHubTileRect(tileIndex, scrollPairPosition);
+    if (tileRect.alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+      continue;
+    }
+    const row = rows[tileIndex];
+    const tileAlpha = tileRect.alpha * contentAlpha;
+    const pressIntensity = resolveLibraryRowPressIntensity(tileIndex, libraryState);
+    const isPressed = pressIntensity > 0.10;
+    const scale = lerp(1.0, 0.96, pressIntensity);
+    const width = tileRect.width * scale;
+    const height = tileRect.height * scale;
+    const leftX = tileRect.centerX - width / 2;
+    const topY = tileRect.centerY - height / 2;
+
+    drawingContext.save();
+    drawingContext.globalAlpha = tileAlpha;
+
+    traceChamferRect(drawingContext, leftX, topY, width, height, 12);
+    drawingContext.fillStyle = isDark
+      ? "rgba(210, 230, 255, 0.065)"
+      : "rgba(255, 255, 255, 0.54)";
+    drawingContext.fill();
+
+    traceChamferRect(drawingContext, leftX + 4, topY + 4, width - 8, height - 8, 9);
+    drawingContext.strokeStyle = isDark
+      ? "rgba(225, 240, 255, 0.09)"
+      : "rgba(255, 255, 255, 0.65)";
+    drawingContext.lineWidth = 0.85;
+    drawingContext.stroke();
+
+    drawingContext.save();
+    traceChamferRect(drawingContext, leftX, topY, width, height, 12);
+    drawingContext.clip();
+    if (pressIntensity > CONTENT_VISIBILITY_THRESHOLD) {
+      drawingContext.fillStyle = palette.signalHighlightSoft;
+      drawingContext.globalAlpha = tileAlpha * pressIntensity;
+      drawingContext.fillRect(leftX, topY, width, height);
+    }
+    drawingContext.globalAlpha = tileAlpha * (isPressed ? 0.22 : 0.085);
+    drawingContext.fillStyle = "#FFFFFF";
+    drawingContext.beginPath();
+    drawingContext.moveTo(leftX + width * 0.25, topY);
+    drawingContext.lineTo(leftX + width * 0.52, topY);
+    drawingContext.lineTo(leftX + width * 0.12, topY + height);
+    drawingContext.lineTo(leftX - width * 0.15, topY + height);
+    drawingContext.closePath();
+    drawingContext.fill();
+    drawingContext.restore();
+
+    traceChamferRect(drawingContext, leftX + 0.5, topY + 0.5, width - 1, height - 1, 12);
+    drawingContext.strokeStyle = isPressed
+      ? palette.signalHighlight
+      : isDark
+        ? "rgba(235, 245, 255, 0.24)"
+        : "rgba(46, 50, 56, 0.22)";
+    drawingContext.lineWidth = isPressed ? 1.6 : 1.1;
+    drawingContext.stroke();
+
+    if (pressIntensity > 0.04) {
+      drawLibraryCornerBrackets(
+        drawingContext,
+        leftX,
+        topY,
+        width,
+        height,
+        12,
+        2.3,
+        palette.signalHighlight,
+        tileAlpha * pressIntensity,
+      );
+    }
+
+    drawLibraryLivingIcon(
+      drawingContext,
+      row.id,
+      tileRect.centerX,
+      tileRect.centerY - 14,
+      tileRect.isPeeking ? 15 : 19,
+      clockSeconds,
+      isPressed,
+      palette,
+      appearance,
+    );
+
+    drawingContext.textAlign = "center";
+    drawingContext.textBaseline = "middle";
+    drawingContext.font = `${tileRect.isPeeking ? "600 11.5px" : "700 13px"} ${FONT_DISPLAY}`;
+    drawingContext.fillStyle = isPressed ? palette.signalHighlight : palette.inkPrimary;
+    drawingContext.fillText(row.title, tileRect.centerX, tileRect.centerY + 25);
+
+    drawingContext.font = `600 9px ${FONT_MONO}`;
+    drawingContext.fillStyle = palette.inkSecondary;
+    drawingContext.fillText(
+      row.countText ?? row.countLabel ?? "0",
+      tileRect.centerX,
+      tileRect.centerY + 41,
+    );
+
+    drawingContext.restore();
+  }
+
+  drawingContext.restore();
+
+  const hideDefaultThumb =
+    (libraryState.arcFeedbackAlpha ?? 0) > 0.05 ||
+    (libraryState.letterSearchHudAlpha ?? 0) > 0.05;
+  if (!hideDefaultThumb) {
+    const hubScrollRowSpan = Math.ceil(rows.length / 2) + 1;
+    drawLibraryScrollArc(
+      drawingContext,
+      scrollPairPosition,
+      hubScrollRowSpan,
+      contentAlpha * 0.85,
+      palette,
+    );
+  }
+}
+
+function renderLibraryCurvedList(
+  drawingContext,
+  viewEntry,
+  rows,
+  libraryState,
+  contentAlpha,
+  palette,
+  appearance,
+) {
+  const scrollPosition = Number.isFinite(viewEntry.scrollPosition) ? viewEntry.scrollPosition : 0;
+  const clockSeconds = Number.isFinite(libraryState.idleClockSeconds)
+    ? libraryState.idleClockSeconds
+    : 0;
+
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(
+    0,
+    HEADER_CLIP_TOP_Y,
+    DISPLAY_DIAMETER_PX,
+    DISPLAY_DIAMETER_PX - HEADER_CLIP_TOP_Y,
+  );
+  drawingContext.clip();
+
+  const visibleStartIndex = Math.max(0, Math.floor(scrollPosition) - 2);
+  const visibleEndIndex = Math.min(rows.length - 1, Math.ceil(scrollPosition) + 4);
+  for (let rowIndex = visibleStartIndex; rowIndex <= visibleEndIndex; rowIndex += 1) {
+    const layout = computeLibraryCurvedRowLayout(rowIndex, scrollPosition);
+    if (layout.alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+      continue;
+    }
+    const row = rows[rowIndex];
+    const rowAlpha = layout.alpha * contentAlpha;
+    const isPreview = layout.previewWeight > 0.45;
+    const pressIntensity = resolveLibraryRowPressIntensity(rowIndex, libraryState);
+    const isPressed = pressIntensity > 0.10;
+    const leftEdgeX = DISPLAY_CENTER_PX - layout.rowHalfWidth;
+    const rightEdgeX = DISPLAY_CENTER_PX + layout.rowHalfWidth;
+
+    drawingContext.save();
+    drawingContext.globalAlpha = rowAlpha;
+
+    if (pressIntensity > CONTENT_VISIBILITY_THRESHOLD) {
+      traceChamferRect(
+        drawingContext,
+        leftEdgeX,
+        layout.rowY - layout.rowHeight / 2,
+        layout.rowHalfWidth * 2,
+        layout.rowHeight,
+        8,
+      );
+      drawingContext.fillStyle = palette.signalHighlightSoft;
+      drawingContext.fill();
+      drawLibraryCornerBrackets(
+        drawingContext,
+        leftEdgeX,
+        layout.rowY - layout.rowHeight / 2,
+        layout.rowHalfWidth * 2,
+        layout.rowHeight,
+        10,
+        2.1,
+        palette.signalHighlight,
+        rowAlpha * pressIntensity,
+      );
+    } else {
+      drawingContext.strokeStyle = palette.hairline;
+      drawingContext.lineWidth = 1;
+      drawingContext.beginPath();
+      drawingContext.moveTo(leftEdgeX + 12, layout.rowY + layout.rowHeight / 2);
+      drawingContext.lineTo(rightEdgeX - 12, layout.rowY + layout.rowHeight / 2);
+      drawingContext.stroke();
+    }
+
+    let textOriginX = leftEdgeX + 40;
+    const rightPaddingX = rightEdgeX - 10;
+
+    if (row.rowType === "artist" || row.rowType === "genre" || row.rowType === "playlist") {
+      const iconKind =
+        row.rowType === "artist"
+          ? "artists"
+          : row.rowType === "genre"
+            ? "genres"
+            : "playlists";
+      drawLibraryLivingIcon(
+        drawingContext,
+        iconKind,
+        leftEdgeX + 22,
+        layout.rowY,
+        isPreview ? 9 : 11,
+        clockSeconds,
+        isPressed,
+        palette,
+        appearance,
+      );
+      textOriginX = leftEdgeX + 44;
+
+      const countText = String(row.countText ?? row.countLabel ?? "0");
+      drawingContext.font = `${isPressed ? "700" : "600"} 10.5px ${FONT_MONO}`;
+      drawingContext.fillStyle = isPressed ? palette.signalHighlight : palette.inkSecondary;
+      drawingContext.textAlign = "right";
+      drawingContext.textBaseline = "middle";
+      drawingContext.fillText(countText, rightPaddingX, layout.rowY + 0.5);
+
+      const countWidth = drawingContext.measureText(countText).width;
+      const maxTitleWidth = Math.max(44, rightPaddingX - textOriginX - countWidth - 10);
+      drawingContext.font = `${isPreview ? "600 13.5px" : "700 15.5px"} ${FONT_DISPLAY}`;
+      drawingContext.fillStyle = isPreview ? palette.inkSecondary : palette.inkPrimary;
+      drawingContext.textAlign = "left";
+      drawingContext.fillText(
+        truncateCanvasText(drawingContext, row.title, maxTitleWidth),
+        textOriginX,
+        layout.rowY + 0.5,
+      );
+    } else if (row.rowType === "track") {
+      const isPlayingTrack = Boolean(
+        libraryState.activeTrackId && row.id === libraryState.activeTrackId,
+      );
+
+      if (row.showTrackNumbers) {
+        drawingContext.font = `700 10.5px ${FONT_MONO}`;
+        drawingContext.fillStyle =
+          isPlayingTrack || isPressed ? palette.signalHighlight : palette.inkSecondary;
+        drawingContext.textAlign = "left";
+        drawingContext.textBaseline = "middle";
+        drawingContext.fillText(String(row.trackNumber || "01"), leftEdgeX + 12, layout.rowY + 0.5);
+        textOriginX = leftEdgeX + 36;
+      } else {
+        drawLibraryLivingIcon(
+          drawingContext,
+          "track",
+          leftEdgeX + 20,
+          layout.rowY,
+          isPreview ? 8 : 10,
+          clockSeconds,
+          isPressed || isPlayingTrack,
+          palette,
+          appearance,
+        );
+        textOriginX = leftEdgeX + 40;
+      }
+
+      let rightReserved = 42;
+      if (isPlayingTrack) {
+        drawLiveMiniEqualizer(drawingContext, rightPaddingX - 10, layout.rowY, clockSeconds, palette);
+        rightReserved = 28;
+      } else {
+        const durationLabel =
+          typeof row.duration === "string" && row.duration.length > 0
+            ? row.duration
+            : formatClockTime(row.durationSeconds);
+        drawingContext.font = `600 10px ${FONT_MONO}`;
+        drawingContext.fillStyle = isPressed ? palette.signalHighlight : palette.inkSecondary;
+        drawingContext.textAlign = "right";
+        drawingContext.textBaseline = "middle";
+        drawingContext.fillText(durationLabel, rightPaddingX, layout.rowY + 0.5);
+        rightReserved = drawingContext.measureText(durationLabel).width + 10;
+      }
+
+      const maxTitleWidth = Math.max(48, rightPaddingX - textOriginX - rightReserved);
+      drawingContext.textAlign = "left";
+      drawingContext.textBaseline = "middle";
+
+      if (!isPreview && !row.showTrackNumbers) {
+        drawingContext.font = `700 15px ${FONT_DISPLAY}`;
+        drawingContext.fillStyle = isPlayingTrack ? palette.signalHighlight : palette.inkPrimary;
+        drawingContext.fillText(
+          truncateCanvasText(drawingContext, row.title, maxTitleWidth),
+          textOriginX,
+          layout.rowY - 8,
+        );
+
+        drawingContext.font = `600 9px ${FONT_MONO}`;
+        drawingContext.fillStyle = palette.inkSecondary;
+        drawingContext.fillText(
+          truncateCanvasText(drawingContext, String(row.artist || "").toUpperCase(), maxTitleWidth),
+          textOriginX,
+          layout.rowY + 9,
+        );
+      } else {
+        drawingContext.font = `${isPreview ? "600 13.5px" : "700 15px"} ${FONT_DISPLAY}`;
+        drawingContext.fillStyle = isPlayingTrack
+          ? palette.signalHighlight
+          : isPreview
+            ? palette.inkSecondary
+            : palette.inkPrimary;
+        drawingContext.fillText(
+          truncateCanvasText(drawingContext, row.title, maxTitleWidth),
+          textOriginX,
+          layout.rowY + 0.5,
+        );
+      }
+    }
+
+    drawingContext.restore();
+  }
+
+  drawingContext.restore();
+
+  const hideDefaultThumb =
+    (libraryState.arcFeedbackAlpha ?? 0) > 0.05 ||
+    (libraryState.letterSearchHudAlpha ?? 0) > 0.05;
+  if (!hideDefaultThumb) {
+    drawLibraryScrollArc(drawingContext, scrollPosition, rows.length, contentAlpha * 0.85, palette);
+  }
+}
+
+function renderLibraryAlbumCrate(
+  drawingContext,
+  viewEntry,
+  albums,
+  libraryState,
+  contentAlpha,
+  vinylLaunchProgress,
+  palette,
+  appearance,
+  coverCache,
+) {
+  const scrollPosition = Number.isFinite(viewEntry.scrollPosition) ? viewEntry.scrollPosition : 0;
+  const clockSeconds = Number.isFinite(libraryState.idleClockSeconds)
+    ? libraryState.idleClockSeconds
+    : 0;
+  const isDark = appearance === "dark";
+  const launchPartEase = easeInOutCubic(normalizeRange(vinylLaunchProgress, 0.0, 0.50));
+  const focusedIndex = clamp(Math.round(scrollPosition), 0, Math.max(0, albums.length - 1));
+
+  const shelfAlpha = contentAlpha * (1 - launchPartEase);
+  if (shelfAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+    drawingContext.save();
+    drawingContext.globalAlpha = shelfAlpha * 0.45;
+    drawingContext.strokeStyle = palette.hairlineStrong;
+    drawingContext.lineWidth = 1;
+    drawingContext.beginPath();
+    drawingContext.moveTo(DISPLAY_CENTER_PX - 118, 224);
+    drawingContext.lineTo(DISPLAY_CENTER_PX + 118, 224);
+    drawingContext.stroke();
+    drawingContext.restore();
+  }
+
+  const drawOrder = [];
+  const crateStartIndex = Math.max(0, Math.floor(scrollPosition) - 3);
+  const crateEndIndex = Math.min(albums.length - 1, Math.ceil(scrollPosition) + 3);
+  for (let albumIndex = crateStartIndex; albumIndex <= crateEndIndex; albumIndex += 1) {
+    drawOrder.push({ albumIndex, absDelta: Math.abs(albumIndex - scrollPosition) });
+  }
+  drawOrder.sort((firstEntry, secondEntry) => secondEntry.absDelta - firstEntry.absDelta);
+
+  for (let orderIndex = 0; orderIndex < drawOrder.length; orderIndex += 1) {
+    const albumIndex = drawOrder[orderIndex].albumIndex;
+    const album = albums[albumIndex];
+    const delta = albumIndex - scrollPosition;
+    const absDelta = Math.abs(delta);
+    if (absDelta > 1.85) {
+      continue;
+    }
+    const focusWeight = clamp(1 - absDelta, 0, 1);
+    const isFocusedTarget = albumIndex === focusedIndex;
+
+    const launchSideSpread = !isFocusedTarget
+      ? Math.sign(delta || 1) * 145 * launchPartEase
+      : 0;
+    const neighborFade = isFocusedTarget ? 1 : 1 - launchPartEase;
+    const focusOpacity = lerp(CRATE_MIN_OPACITY, 1.0, easeInOutCubic(focusWeight));
+    const outerEdgeFade = 1 - normalizeRange(absDelta, 1.15, 1.85);
+    const baseAlpha = outerEdgeFade * focusOpacity * contentAlpha * neighborFade;
+    if (baseAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+      continue;
+    }
+
+    const sleeveSize = lerp(CRATE_MIN_SLEEVE_PX, CRATE_MAX_SLEEVE_PX, easeInOutCubic(focusWeight));
+    const sleeveHalf = sleeveSize / 2;
+    const focusShiftLeft = focusWeight * 8;
+    const centerX =
+      DISPLAY_CENTER_PX -
+      focusShiftLeft +
+      delta * LIBRARY_CONSTANTS.CRATE_SPACING_PX +
+      launchSideSpread;
+    const bobY =
+      Math.sin(clockSeconds * 1.7 + albumIndex * 1.4) *
+      lerp(0.8, 2.2, focusWeight) *
+      (1 - launchPartEase);
+    const centerY =
+      LIBRARY_CONSTANTS.CRATE_CENTER_Y + Math.min(absDelta, 1.5) * 6 + bobY;
+
+    const sleeveDissolve = isFocusedTarget
+      ? 1 - easeOutCubic(normalizeRange(vinylLaunchProgress, 0.0, 0.34))
+      : 1;
+    if (sleeveDissolve <= CONTENT_VISIBILITY_THRESHOLD) {
+      continue;
+    }
+
+    drawingContext.save();
+    drawingContext.globalAlpha = baseAlpha * sleeveDissolve;
+
+    if (focusWeight > CRATE_DISC_PEEK_THRESHOLD) {
+      const peekWeight = easeOutCubic(
+        normalizeRange(focusWeight, CRATE_DISC_PEEK_THRESHOLD, 1.0),
+      );
+      const discPeekX = centerX + lerp(sleeveHalf * 0.12, sleeveHalf * 0.42 + 22, peekWeight);
+      const discRadius = sleeveHalf * 0.88;
+      const discAlpha = baseAlpha * sleeveDissolve * peekWeight * 0.96;
+      drawLibraryVinylDisc(
+        drawingContext,
+        album,
+        discPeekX,
+        centerY,
+        discRadius,
+        libraryState.vinylRotationRadians,
+        palette,
+        appearance,
+        discAlpha,
+        coverCache,
+      );
+
+      drawingContext.save();
+      drawingContext.strokeStyle = palette.signalHighlight;
+      drawingContext.lineWidth = 1.4;
+      drawingContext.globalAlpha = baseAlpha * sleeveDissolve * peekWeight * 0.85;
+      drawingContext.beginPath();
+      drawingContext.arc(discPeekX, centerY, discRadius + 0.8, -Math.PI * 0.44, Math.PI * 0.44);
+      drawingContext.stroke();
+      drawingContext.restore();
+    }
+
+    drawingContext.save();
+    drawingContext.translate(centerX, centerY);
+
+    drawingContext.save();
+    drawingContext.beginPath();
+    drawingContext.rect(-sleeveHalf, -sleeveHalf, sleeveSize, sleeveSize);
+    drawingContext.clip();
+
+    drawLibraryAlbumArtworkMotif(
+      drawingContext,
+      album,
+      sleeveHalf,
+      palette,
+      appearance,
+      coverCache,
+    );
+
+    const glareShift = delta * 26;
+    drawingContext.fillStyle = isDark ? "rgba(255, 255, 255, 0.11)" : "rgba(255, 255, 255, 0.30)";
+    drawingContext.beginPath();
+    drawingContext.moveTo(-sleeveHalf * 0.95 + glareShift, -sleeveHalf);
+    drawingContext.lineTo(-sleeveHalf * 0.38 + glareShift, -sleeveHalf);
+    drawingContext.lineTo(-sleeveHalf * 1.12 + glareShift, sleeveHalf);
+    drawingContext.lineTo(-sleeveHalf * 1.68 + glareShift, sleeveHalf);
+    drawingContext.closePath();
+    drawingContext.fill();
+    drawingContext.restore();
+
+    drawingContext.strokeStyle = isDark
+      ? focusWeight > 0.5
+        ? "rgba(245, 250, 255, 0.78)"
+        : "rgba(215, 228, 246, 0.52)"
+      : focusWeight > 0.5
+        ? "rgba(46, 50, 56, 0.68)"
+        : "rgba(46, 50, 56, 0.42)";
+    drawingContext.lineWidth = focusWeight > 0.5 ? 1.6 : 1.15;
+    drawingContext.strokeRect(-sleeveHalf + 0.5, -sleeveHalf + 0.5, sleeveSize - 1, sleeveSize - 1);
+
+    if (focusWeight > 0.5) {
+      const armLength = 12;
+      drawingContext.strokeStyle = palette.signalHighlight;
+      drawingContext.lineWidth = 2.3;
+      drawingContext.globalAlpha = baseAlpha * sleeveDissolve * focusWeight;
+
+      drawingContext.beginPath();
+      drawingContext.moveTo(-sleeveHalf, -sleeveHalf + armLength);
+      drawingContext.lineTo(-sleeveHalf, -sleeveHalf);
+      drawingContext.lineTo(-sleeveHalf + armLength, -sleeveHalf);
+      drawingContext.moveTo(sleeveHalf - armLength, sleeveHalf);
+      drawingContext.lineTo(sleeveHalf, sleeveHalf);
+      drawingContext.lineTo(sleeveHalf, sleeveHalf - armLength);
+      drawingContext.stroke();
+    }
+
+    drawingContext.restore();
+    drawingContext.restore();
+  }
+
+  const bottomExit = easeInOutCubic(normalizeRange(vinylLaunchProgress, 0.0, 0.42));
+  const bottomAlpha = contentAlpha * (1 - bottomExit);
+  if (bottomAlpha > CONTENT_VISIBILITY_THRESHOLD && albums.length > 0) {
+    const focusedAlbum = albums[focusedIndex];
+    const offsetFromFocused = scrollPosition - focusedIndex;
+    const textCrossfade = clamp(1 - Math.abs(offsetFromFocused) * 1.8, 0, 1);
+    const trackCount = Array.isArray(focusedAlbum.tracks) ? focusedAlbum.tracks.length : 0;
+
+    drawingContext.save();
+    drawingContext.translate(0, lerp(0, 24, bottomExit));
+
+    drawingContext.save();
+    drawingContext.globalAlpha = bottomAlpha * textCrossfade;
+    drawingContext.translate(-offsetFromFocused * 24, 0);
+
+    drawingContext.font = `700 19px ${FONT_DISPLAY}`;
+    drawingContext.fillStyle = palette.inkPrimary;
+    drawingContext.textAlign = "center";
+    drawingContext.textBaseline = "middle";
+    drawingContext.fillText(
+      truncateCanvasText(drawingContext, focusedAlbum.title, 224),
+      DISPLAY_CENTER_PX,
+      246,
+    );
+
+    drawingContext.font = `600 9.5px ${FONT_MONO}`;
+    drawingContext.fillStyle = palette.inkSecondary;
+    const metaLine = `${String(focusedAlbum.artist || "").toUpperCase()} \u00b7 ${formatIntegerCount(trackCount)} TRACKS`;
+    drawingContext.fillText(
+      truncateCanvasText(drawingContext, metaLine, 214),
+      DISPLAY_CENTER_PX,
+      268,
+    );
+    drawingContext.restore();
+
+    const crateBars = computeWindowedCrateBars(scrollPosition, albums.length, CRATE_BAR_LIMIT);
+    let totalStripWidth = 0;
+    for (let barIndex = 0; barIndex < crateBars.length; barIndex += 1) {
+      totalStripWidth += crateBars[barIndex].width;
+      if (barIndex < crateBars.length - 1) {
+        totalStripWidth += CRATE_BAR_GAP_PX;
+      }
+    }
+
+    let cursorX = DISPLAY_CENTER_PX - totalStripWidth / 2;
+    for (let barIndex = 0; barIndex < crateBars.length; barIndex += 1) {
+      const bar = crateBars[barIndex];
+      drawingContext.fillStyle =
+        bar.focus > 0.5 ? palette.signalHighlight : palette.hairlineStrong;
+      drawingContext.globalAlpha = bottomAlpha * lerp(0.55, 1.0, bar.focus);
+      drawingContext.fillRect(cursorX, CRATE_BAR_Y, bar.width, CRATE_BAR_HEIGHT_PX);
+      cursorX += bar.width + CRATE_BAR_GAP_PX;
+    }
+
+    drawingContext.restore();
+  }
+}
+
+function renderLibraryEmptyState(
+  drawingContext,
+  viewEntry,
+  clockSeconds,
+  contentAlpha,
+  palette,
+  appearance,
+) {
+  if (contentAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const iconId = viewEntry.emptyIcon || "favorites";
+  const safeClock = Number.isFinite(clockSeconds) ? clockSeconds : 0;
+  const breatheScale = 1 + Math.sin(safeClock * 2.1) * 0.045;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = contentAlpha;
+
+  const emblemCenterY = 128;
+  drawingContext.save();
+  drawingContext.translate(DISPLAY_CENTER_PX, emblemCenterY);
+  drawingContext.scale(breatheScale, breatheScale);
+
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, 34, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = isDark
+    ? "rgba(210, 230, 255, 0.06)"
+    : "rgba(255, 255, 255, 0.56)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = isDark
+    ? "rgba(235, 245, 255, 0.22)"
+    : "rgba(46, 50, 56, 0.22)";
+  drawingContext.lineWidth = 1.25;
+  drawingContext.stroke();
+
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, 42, -Math.PI * 0.68, Math.PI * 0.12);
+  drawingContext.strokeStyle = palette.signalHighlight;
+  drawingContext.lineWidth = 1.6;
+  drawingContext.lineCap = "round";
+  drawingContext.stroke();
+  drawingContext.restore();
+
+  drawLibraryLivingIcon(
+    drawingContext,
+    iconId,
+    DISPLAY_CENTER_PX,
+    emblemCenterY,
+    17,
+    safeClock,
+    false,
+    palette,
+    appearance,
+  );
+
+  drawingContext.font = `700 20px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = palette.inkPrimary;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillText(viewEntry.emptyTitle || "No Favorites Yet", DISPLAY_CENTER_PX, 192);
+
+  drawingContext.font = `600 9.5px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.inkSecondary;
+  drawingContext.fillText(
+    viewEntry.emptyMessage || "HEART A TRACK WHILE LISTENING",
+    DISPLAY_CENTER_PX,
+    214,
+  );
+
+  const buttonWidth = 166;
+  const buttonHeight = 36;
+  const buttonX = DISPLAY_CENTER_PX - buttonWidth / 2;
+  const buttonY = 242;
+
+  traceChamferRect(drawingContext, buttonX, buttonY, buttonWidth, buttonHeight, 8);
+  drawingContext.fillStyle = palette.signalHighlight;
+  drawingContext.fill();
+
+  drawingContext.font = `800 10.5px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.signalHighlightInk;
+  drawingContext.fillText("BACK TO LIBRARY", DISPLAY_CENTER_PX, buttonY + buttonHeight / 2 + 0.5);
+
+  drawingContext.restore();
+}
+
+function drawLibraryRimArcFeedback(
+  drawingContext,
+  libraryState,
+  currentView,
+  palette,
+  appearance,
+) {
+  const arcAlpha = Math.max(
+    Number(libraryState.arcFeedbackAlpha ?? 0),
+    Number(libraryState.letterSearchHudAlpha ?? 0),
+  );
+  if (arcAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const letterIndex = resolveLetterEntriesFromState(currentView, libraryState);
+  const supportsLetterSearch = letterIndex.length > 0;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = arcAlpha;
+
+  if (libraryState.letterSearchActive || (libraryState.letterSearchHudAlpha ?? 0) > 0.15) {
+    const sliceCount = LIBRARY_CONSTANTS.RIM_SLICE_COUNT;
+    const slicePitch = FULL_CIRCLE_RADIANS / sliceCount;
+    const pullLevels = Array.isArray(libraryState.rimSlabPullLevels)
+      ? libraryState.rimSlabPullLevels
+      : [];
+    const drawOrder = [];
+    for (let sliceIndex = 0; sliceIndex < sliceCount; sliceIndex += 1) {
+      drawOrder.push({ sliceIndex, pull: pullLevels[sliceIndex] || 0 });
+    }
+    drawOrder.sort((firstSlice, secondSlice) => firstSlice.pull - secondSlice.pull);
+
+    for (let orderIndex = 0; orderIndex < drawOrder.length; orderIndex += 1) {
+      const sliceIndex = drawOrder[orderIndex].sliceIndex;
+      const pull = easeOutCubic(drawOrder[orderIndex].pull);
+      const sliceCenter = TOP_ANGLE_RADIANS + (sliceIndex + 0.5) * slicePitch;
+      const angularSpan = slicePitch * lerp(0.60, 0.76, pull);
+      const startAngle = sliceCenter - angularSpan / 2;
+      const endAngle = sliceCenter + angularSpan / 2;
+
+      const outerRadius = lerp(171, 173, pull);
+      const innerRadius = lerp(168, 149, pull);
+
+      if (pull < 0.04) {
+        drawingContext.beginPath();
+        drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, 169.5, startAngle, endAngle);
+        drawingContext.strokeStyle = palette.hairlineStrong;
+        drawingContext.lineWidth = 2.8;
+        drawingContext.lineCap = "butt";
+        drawingContext.stroke();
+      } else {
+        traceCurvedSlabWedge(drawingContext, innerRadius, outerRadius, startAngle, endAngle);
+        drawingContext.fillStyle = isDark
+          ? `rgba(216, 234, 255, ${lerp(0.10, 0.24, pull).toFixed(3)})`
+          : `rgba(255, 255, 255, ${lerp(0.45, 0.88, pull).toFixed(3)})`;
+        drawingContext.fill();
+
+        drawingContext.save();
+        drawingContext.globalAlpha = arcAlpha * pull * 0.55;
+        drawingContext.fillStyle = palette.signalHighlightSoft;
+        drawingContext.fill();
+        drawingContext.restore();
+
+        drawingContext.save();
+        traceCurvedSlabWedge(drawingContext, innerRadius, outerRadius, startAngle, endAngle);
+        drawingContext.clip();
+        const midpointRadius = (innerRadius + outerRadius) / 2;
+        const glintX = DISPLAY_CENTER_PX + Math.cos(sliceCenter) * midpointRadius;
+        const glintY = DISPLAY_CENTER_PX + Math.sin(sliceCenter) * midpointRadius;
+        drawingContext.translate(glintX, glintY);
+        drawingContext.rotate(sliceCenter + 0.55);
+        drawingContext.fillStyle = isDark
+          ? "rgba(255, 255, 255, 0.24)"
+          : "rgba(255, 255, 255, 0.72)";
+        drawingContext.fillRect(-16, -2.5, 32, 4.5);
+        drawingContext.restore();
+
+        if (outerRadius - innerRadius > 9) {
+          traceCurvedSlabWedge(
+            drawingContext,
+            innerRadius + 3,
+            outerRadius - 3,
+            startAngle + 0.03,
+            endAngle - 0.03,
+          );
+          drawingContext.strokeStyle = isDark
+            ? "rgba(240, 248, 255, 0.22)"
+            : "rgba(255, 255, 255, 0.78)";
+          drawingContext.lineWidth = 0.85;
+          drawingContext.stroke();
+        }
+
+        traceCurvedSlabWedge(drawingContext, innerRadius, outerRadius, startAngle, endAngle);
+        drawingContext.strokeStyle =
+          pull > 0.55
+            ? palette.signalHighlight
+            : isDark
+              ? "rgba(235, 245, 255, 0.58)"
+              : "rgba(46, 50, 56, 0.45)";
+        drawingContext.lineWidth = pull > 0.55 ? 1.55 : 1.1;
+        drawingContext.stroke();
+
+        drawingContext.beginPath();
+        drawingContext.arc(
+          DISPLAY_CENTER_PX,
+          DISPLAY_CENTER_PX,
+          innerRadius + 0.8,
+          startAngle + 0.02,
+          endAngle - 0.02,
+        );
+        drawingContext.strokeStyle = palette.signalHighlight;
+        drawingContext.lineWidth = lerp(1.5, 3.0, pull);
+        drawingContext.lineCap = "butt";
+        drawingContext.stroke();
+      }
+    }
+
+    drawingContext.restore();
+    return;
+  }
+
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    SCROLL_ARC_RADIUS_PX,
+    0,
+    FULL_CIRCLE_RADIANS,
+  );
+  drawingContext.strokeStyle = palette.hairline;
+  drawingContext.lineWidth = 2;
+  drawingContext.stroke();
+
+  const clampedSweep = clamp(
+    Number(libraryState.arcSignedSweepRadians ?? 0),
+    -LIBRARY_CONSTANTS.LETTER_SEARCH_THRESHOLD_RADIANS,
+    LIBRARY_CONSTANTS.LETTER_SEARCH_THRESHOLD_RADIANS,
+  );
+  const startAngle = Number(libraryState.arcStartAngle ?? 0);
+  const endAngle = startAngle + clampedSweep;
+  const counterClockwise = clampedSweep < 0;
+
+  if (Math.abs(clampedSweep) > 0.02) {
+    drawingContext.beginPath();
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      DISPLAY_CENTER_PX,
+      SCROLL_ARC_RADIUS_PX,
+      startAngle,
+      endAngle,
+      counterClockwise,
+    );
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = 3.5;
+    drawingContext.lineCap = "round";
+    drawingContext.stroke();
+  }
+
+  if (supportsLetterSearch) {
+    const targetAngle = startAngle + (clampedSweep >= 0 ? Math.PI : -Math.PI);
+    const markerX = DISPLAY_CENTER_PX + Math.cos(targetAngle) * SCROLL_ARC_RADIUS_PX;
+    const markerY = DISPLAY_CENTER_PX + Math.sin(targetAngle) * SCROLL_ARC_RADIUS_PX;
+    drawingContext.beginPath();
+    drawingContext.arc(markerX, markerY, 3, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = palette.inkSecondary;
+    drawingContext.fill();
+  }
+
+  const currentAngle = Number(libraryState.arcCurrentAngle ?? startAngle);
+  const beadX = DISPLAY_CENTER_PX + Math.cos(currentAngle) * SCROLL_ARC_RADIUS_PX;
+  const beadY = DISPLAY_CENTER_PX + Math.sin(currentAngle) * SCROLL_ARC_RADIUS_PX;
+  drawingContext.beginPath();
+  drawingContext.arc(beadX, beadY, 4.5, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = palette.signalHighlight;
+  drawingContext.fill();
+
+  drawingContext.restore();
+}
+
+function renderLibraryLetterSearchHud(
+  drawingContext,
+  libraryState,
+  currentView,
+  palette,
+  appearance,
+) {
+  const hudAlpha = Number(libraryState.letterSearchHudAlpha ?? 0);
+  if (hudAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const letters = resolveLetterEntriesFromState(currentView, libraryState);
+  if (letters.length === 0) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const activeIndex = clamp(Number(libraryState.letterSearchIndex ?? 0), 0, letters.length - 1);
+  const activeEntry = letters[activeIndex];
+  const prevEntry = activeIndex > 0 ? letters[activeIndex - 1] : null;
+  const nextEntry = activeIndex < letters.length - 1 ? letters[activeIndex + 1] : null;
+  const ease = easeOutExpo(hudAlpha);
+
+  drawingContext.save();
+
+  drawingContext.fillStyle = isDark ? "rgba(6, 7, 9, 0.64)" : "rgba(230, 232, 235, 0.70)";
+  drawingContext.globalAlpha = hudAlpha;
+  drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
+
+  const lensRadius = lerp(50, 62, ease);
+  drawingContext.save();
+  drawingContext.globalAlpha = ease;
+  drawingContext.beginPath();
+  drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX - 6, lensRadius, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = isDark ? "rgba(18, 21, 27, 0.92)" : "rgba(248, 249, 251, 0.94)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = palette.signalHighlight;
+  drawingContext.lineWidth = 1.6;
+  drawingContext.stroke();
+
+  drawingContext.font = `700 8.5px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.inkSecondary;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillText("LETTER SEEK", DISPLAY_CENTER_PX, DISPLAY_CENTER_PX - 40);
+
+  drawingContext.font = `700 14px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = palette.inkSecondary;
+  if (prevEntry) {
+    drawingContext.globalAlpha = ease * 0.65;
+    drawingContext.fillText(prevEntry.letter, DISPLAY_CENTER_PX - 40, DISPLAY_CENTER_PX - 6);
+  }
+  if (nextEntry) {
+    drawingContext.globalAlpha = ease * 0.65;
+    drawingContext.fillText(nextEntry.letter, DISPLAY_CENTER_PX + 40, DISPLAY_CENTER_PX - 6);
+  }
+
+  drawingContext.globalAlpha = ease;
+  drawingContext.font = `800 46px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = palette.signalHighlight;
+  drawingContext.fillText(activeEntry.letter, DISPLAY_CENTER_PX, DISPLAY_CENTER_PX - 4);
+
+  drawingContext.font = `700 10px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.inkPrimary;
+  drawingContext.fillText(
+    truncateCanvasText(drawingContext, String(activeEntry.label || "").toUpperCase(), 196),
+    DISPLAY_CENTER_PX,
+    266,
+  );
+
+  drawingContext.font = `600 8.5px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.inkSecondary;
+  drawingContext.fillText("6% ARC STEP \u00b7 CW NEXT \u00b7 CCW PREV", DISPLAY_CENTER_PX, 286);
+
+  drawingContext.restore();
+  drawingContext.restore();
+}
+
+function renderLibraryPlaylistSheet(drawingContext, libraryState, palette, appearance) {
+  const sheetProgress = Number(libraryState.playlistSheetProgress ?? 0);
+  if (sheetProgress <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const sheetPlaylists = Array.isArray(libraryState.playlists) ? libraryState.playlists : [];
+  const targetPlaylist = sheetPlaylists[libraryState.playlistSheetIndex] || sheetPlaylists[0];
+  if (!targetPlaylist) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const ease = easeOutExpo(sheetProgress);
+
+  drawingContext.save();
+
+  drawingContext.fillStyle = isDark ? "rgba(6, 7, 9, 0.78)" : "rgba(230, 232, 235, 0.82)";
+  drawingContext.globalAlpha = sheetProgress;
+  drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
+
+  const cardX = DISPLAY_CENTER_PX - SHEET_CARD_WIDTH_PX / 2;
+  const cardY = lerp(112, 86, ease);
+
+  drawingContext.globalAlpha = ease;
+  drawingContext.fillStyle = isDark ? "rgba(18, 21, 27, 0.96)" : "rgba(246, 247, 249, 0.96)";
+  drawingContext.fillRect(cardX, cardY, SHEET_CARD_WIDTH_PX, SHEET_CARD_HEIGHT_PX);
+  drawingContext.strokeStyle = isDark
+    ? "rgba(245, 250, 255, 0.34)"
+    : "rgba(46, 50, 56, 0.36)";
+  drawingContext.lineWidth = 1.25;
+  drawingContext.strokeRect(
+    cardX + 0.5,
+    cardY + 0.5,
+    SHEET_CARD_WIDTH_PX - 1,
+    SHEET_CARD_HEIGHT_PX - 1,
+  );
+
+  drawingContext.font = `700 9px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.inkSecondary;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillText("PLAYLIST ACTIONS", DISPLAY_CENTER_PX, cardY + 18);
+
+  drawingContext.font = `700 15.5px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = palette.inkPrimary;
+  drawingContext.fillText(
+    truncateCanvasText(drawingContext, targetPlaylist.name, SHEET_CARD_WIDTH_PX - 28),
+    DISPLAY_CENTER_PX,
+    cardY + 40,
+  );
+
+  const buttonX = cardX + 14;
+  const buttonWidth = SHEET_CARD_WIDTH_PX - 28;
+  const buttonHeight = 34;
+
+  const playY = cardY + 62;
+  drawingContext.fillStyle = palette.signalHighlight;
+  drawingContext.fillRect(buttonX, playY, buttonWidth, buttonHeight);
+  drawingContext.font = `800 10.5px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.signalHighlightInk;
+  drawingContext.fillText("PLAY MIX", DISPLAY_CENTER_PX, playY + buttonHeight / 2 + 0.5);
+
+  const shuffleY = cardY + 104;
+  drawingContext.fillStyle = palette.surface;
+  drawingContext.fillRect(buttonX, shuffleY, buttonWidth, buttonHeight);
+  drawingContext.strokeStyle = palette.hairlineStrong;
+  drawingContext.lineWidth = 1.1;
+  drawingContext.strokeRect(buttonX + 0.5, shuffleY + 0.5, buttonWidth - 1, buttonHeight - 1);
+  drawingContext.fillStyle = palette.inkPrimary;
+  drawingContext.fillText("SHUFFLE MIX", DISPLAY_CENTER_PX, shuffleY + buttonHeight / 2 + 0.5);
+
+  const deleteY = cardY + 146;
+  const holdProgress = clamp(Number(libraryState.deleteHoldProgress ?? 0), 0, 1);
+
+  drawingContext.fillStyle = palette.signalActiveSoft;
+  drawingContext.fillRect(buttonX, deleteY, buttonWidth, buttonHeight);
+
+  if (holdProgress > ALPHA_VISIBILITY_THRESHOLD) {
+    drawingContext.fillStyle = palette.signalActive;
+    drawingContext.fillRect(buttonX, deleteY, buttonWidth * holdProgress, buttonHeight);
+  }
+
+  drawingContext.strokeStyle = palette.signalActive;
+  drawingContext.lineWidth = 1.3;
+  drawingContext.strokeRect(buttonX + 0.5, deleteY + 0.5, buttonWidth - 1, buttonHeight - 1);
+
+  drawingContext.fillStyle = holdProgress > 0.48 ? "#FFFFFF" : palette.signalActive;
+  const deleteLabel =
+    holdProgress > 0.04
+      ? `HOLDING \u00b7 ${Math.round(holdProgress * PERCENT_SCALE)}%`
+      : "HOLD TO DELETE";
+  drawingContext.fillText(deleteLabel, DISPLAY_CENTER_PX, deleteY + buttonHeight / 2 + 0.5);
+
+  if (holdProgress > CONTENT_VISIBILITY_THRESHOLD) {
+    drawingContext.strokeStyle = palette.signalActive;
+    drawingContext.lineWidth = 4;
+    drawingContext.lineCap = "butt";
+    drawingContext.beginPath();
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      DISPLAY_CENTER_PX,
+      BACK_SWIPE_ARC_RADIUS_PX,
+      TOP_ANGLE_RADIANS,
+      TOP_ANGLE_RADIANS + holdProgress * FULL_CIRCLE_RADIANS,
+    );
+    drawingContext.stroke();
+  }
+
+  drawingContext.font = `600 9px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.inkSecondary;
+  drawingContext.fillText(
+    "SWIPE LEFT EDGE TO CANCEL",
+    DISPLAY_CENTER_PX,
+    cardY + SHEET_CARD_HEIGHT_PX + 20,
+  );
+
+  drawingContext.restore();
+}
+
+function drawNowPlayingExpandedChrome(
+  drawingContext,
+  launchProgress,
+  elapsedSeconds,
+  durationSeconds,
+  volumeLevel,
+  palette,
+) {
+  const waveOne = easeOutExpo(normalizeRange(launchProgress, 0.52, 0.86));
+  if (waveOne > CONTENT_VISIBILITY_THRESHOLD) {
+    const spindleRadius = lerp(12, 27, waveOne);
+    const activeDuration = Math.max(1, durationSeconds);
+    const trackRatio = clamp(elapsedSeconds / activeDuration, 0, 1);
+
+    drawingContext.save();
+    drawingContext.globalAlpha = waveOne;
+
+    drawingContext.beginPath();
+    drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, spindleRadius, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = "rgba(6, 7, 9, 0.88)";
+    drawingContext.fill();
+
+    drawingContext.beginPath();
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      DISPLAY_CENTER_PX,
+      spindleRadius - 4,
+      0,
+      FULL_CIRCLE_RADIANS,
+    );
+    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.22)";
+    drawingContext.lineWidth = 3;
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      DISPLAY_CENTER_PX,
+      spindleRadius - 4,
+      TOP_ANGLE_RADIANS,
+      TOP_ANGLE_RADIANS + trackRatio * FULL_CIRCLE_RADIANS,
+    );
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = 3.2;
+    drawingContext.lineCap = "butt";
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, 5, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = "#F5F6F8";
+    drawingContext.fill();
+    drawingContext.restore();
+  }
+
+  const waveTwo = easeOutCubic(normalizeRange(launchProgress, 0.68, 1.0));
+  if (waveTwo > CONTENT_VISIBILITY_THRESHOLD) {
+    drawingContext.save();
+    drawingContext.globalAlpha = waveTwo;
+
+    const clampedVolume = clamp(volumeLevel, 0, 1);
+    drawingContext.beginPath();
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      DISPLAY_CENTER_PX,
+      SCROLL_ARC_RADIUS_PX,
+      VOLUME_ARC_START_RADIANS,
+      VOLUME_ARC_END_RADIANS,
+    );
+    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.26)";
+    drawingContext.lineWidth = 4;
+    drawingContext.lineCap = "butt";
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      DISPLAY_CENTER_PX,
+      SCROLL_ARC_RADIUS_PX,
+      lerp(VOLUME_ARC_END_RADIANS, VOLUME_ARC_START_RADIANS, clampedVolume),
+      VOLUME_ARC_END_RADIANS,
+    );
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = 4.2;
+    drawingContext.stroke();
+
+    drawingContext.fillStyle = "rgba(245, 246, 248, 0.72)";
+    drawingContext.fillRect(
+      DISPLAY_CENTER_PX - TOP_HANDLE_HALF_WIDTH_PX,
+      24,
+      TOP_HANDLE_HALF_WIDTH_PX * 2,
+      TOP_HANDLE_HEIGHT_PX,
+    );
+
+    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.82)";
+    drawingContext.lineWidth = 2;
+    drawingContext.beginPath();
+    drawingContext.moveTo(DISPLAY_CENTER_PX - 6, 332);
+    drawingContext.lineTo(DISPLAY_CENTER_PX, 326);
+    drawingContext.lineTo(DISPLAY_CENTER_PX + 6, 332);
+    drawingContext.stroke();
+
+    drawingContext.restore();
+  }
+}
+
+/**
+ * Render the DialOS 03 LIBRARY screen from deterministic Library controller state,
+ * live playback progress, and cover image cache.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {object} libraryState Snapshot from createLibraryController().getRenderSnapshot().
+ * @param {object} [renderContext={}] Theme, palette, coverCache, and playback telemetry.
+ */
+export function renderLibraryScreen(drawingContext, libraryState, renderContext = {}) {
+  if (!drawingContext || !libraryState) {
+    return;
+  }
+
+  const appearance = resolveAppearance(renderContext?.appearance);
+  const palette = resolvePalette(appearance, renderContext?.palette);
+  const coverCache = renderContext?.coverCache || null;
+  const playback = renderContext?.playback || {};
+  const elapsedSeconds =
+    Number.isFinite(playback.elapsedSeconds) && playback.elapsedSeconds >= 0
+      ? playback.elapsedSeconds
+      : 0;
+  const durationSeconds =
+    Number.isFinite(playback.durationSeconds) && playback.durationSeconds > 0
+      ? playback.durationSeconds
+      : DEFAULT_TRACK_DURATION_SECONDS;
+  const volumeLevel = Number.isFinite(playback.volumeLevel)
+    ? clamp(playback.volumeLevel, 0, 1)
+    : DEFAULT_VOLUME_LEVEL;
+
+  const viewStack = Array.isArray(libraryState.viewStack) ? libraryState.viewStack : [];
+  const currentView = libraryState.currentView || viewStack[viewStack.length - 1];
+  if (!currentView) {
+    return;
+  }
+
+  const scrollPosition = Number.isFinite(currentView.scrollPosition) ? currentView.scrollPosition : 0;
+  const transitionProgress = clamp(Number(libraryState.transitionProgress ?? 1), 0, 1);
+  const transitionDirection = Number.isFinite(libraryState.transitionDirection)
+    ? libraryState.transitionDirection
+    : 1;
+  const transitionEase = easeOutExpo(transitionProgress);
+  const slideOffsetX = (1 - transitionEase) * 28 * transitionDirection;
+  const launchProgress = clamp(Number(libraryState.vinylLaunchProgress ?? 0), 0, 1);
+
+  const headerLaunchExit = easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.44));
+  const headerOffsetY = lerp(0, -34, headerLaunchExit);
+  const chromeAlpha =
+    (1 - headerLaunchExit) * easeOutCubic(normalizeRange(transitionProgress, 0.0, 0.85));
+
+  const crateAlbums =
+    currentView.kind === "albums" ? resolveCrateAlbumsFromState(libraryState, currentView) : [];
+
+  let dynamicSubtitle = currentView.subtitle || "";
+  if (currentView.kind === "hub") {
+    const totalTrackCount = Number(
+      libraryState.counts?.tracks ?? libraryState.catalog?.allTracks?.length ?? 0,
+    );
+    dynamicSubtitle =
+      totalTrackCount === 0
+        ? "0 TRACKS \u00b7 EMPTY COLLECTION"
+        : `2-UP CRYSTAL HUB \u00b7 ${formatIntegerCount(totalTrackCount)} TRACKS`;
+  } else if (currentView.kind === "albums") {
+    if (crateAlbums.length === 0) {
+      dynamicSubtitle = "VINYL CRATE \u00b7 00 / 00";
+    } else {
+      const focusedIndex = clamp(Math.round(scrollPosition), 0, crateAlbums.length - 1);
+      const currentLabel = String(focusedIndex + 1).padStart(2, "0");
+      const totalLabel = String(crateAlbums.length).padStart(2, "0");
+      dynamicSubtitle = `VINYL CRATE \u00b7 ${currentLabel} / ${totalLabel}`;
+    }
+  } else if (currentView.kind === "playlists") {
+    const playlistCount = Array.isArray(libraryState.playlists)
+      ? libraryState.playlists.length
+      : 0;
+    dynamicSubtitle = `${formatIntegerCount(playlistCount)} MIXES \u00b7 HOLD ROW TO MANAGE`;
+  }
+
+  drawLibraryPerspectiveFloor(drawingContext, scrollPosition, chromeAlpha, palette, appearance);
+  drawLibraryPeripheralChrome(
+    drawingContext,
+    currentView.title || "Library",
+    dynamicSubtitle,
+    headerOffsetY,
+    chromeAlpha,
+    palette,
+    appearance,
+  );
+
+  drawingContext.save();
+  drawingContext.translate(slideOffsetX, 0);
+
+  if (currentView.kind === "hub") {
+    const rows = resolveRowsFromState(libraryState, currentView);
+    const hubFade =
+      easeOutCubic(transitionProgress) *
+      (1 - easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.40)));
+    if (hubFade > CONTENT_VISIBILITY_THRESHOLD) {
+      renderLibraryHubGrid(
+        drawingContext,
+        currentView,
+        rows,
+        libraryState,
+        hubFade,
+        palette,
+        appearance,
+      );
+    }
+  } else if (currentView.kind === "albums") {
+    renderLibraryAlbumCrate(
+      drawingContext,
+      currentView,
+      crateAlbums,
+      libraryState,
+      easeOutCubic(transitionProgress),
+      launchProgress,
+      palette,
+      appearance,
+      coverCache,
+    );
+  } else if (currentView.kind === "empty") {
+    renderLibraryEmptyState(
+      drawingContext,
+      currentView,
+      libraryState.idleClockSeconds,
+      easeOutCubic(transitionProgress) * (1 - headerLaunchExit),
+      palette,
+      appearance,
+    );
+  } else {
+    const rows = resolveRowsFromState(libraryState, currentView);
+    const listFade =
+      easeOutCubic(transitionProgress) *
+      (1 - easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.40)));
+    if (listFade > CONTENT_VISIBILITY_THRESHOLD) {
+      renderLibraryCurvedList(
+        drawingContext,
+        currentView,
+        rows,
+        libraryState,
+        listFade,
+        palette,
+        appearance,
+      );
+    }
+  }
+  drawingContext.restore();
+
+  if (launchProgress > CONTENT_VISIBILITY_THRESHOLD) {
+    const catalogAlbums = Array.isArray(libraryState.catalog?.albums)
+      ? libraryState.catalog.albums
+      : [];
+    const vinylLaunchAlbum =
+      catalogAlbums.find((albumEntry) => albumEntry.id === libraryState.vinylLaunchAlbumId) ||
+      catalogAlbums[0] || { motif: "prism" };
+    const launchEase = easeInOutCubic(launchProgress);
+    const fromAlbumsCrate = libraryState.vinylLaunchSource === "albums";
+    const startCenterX = fromAlbumsCrate ? DISPLAY_CENTER_PX - 6 : DISPLAY_CENTER_PX;
+    const startCenterY = fromAlbumsCrate ? LIBRARY_CONSTANTS.CRATE_CENTER_Y : DISPLAY_CENTER_PX;
+    const startRadius = fromAlbumsCrate ? 56 : 36;
+    const discCenterX = lerp(startCenterX, DISPLAY_CENTER_PX, launchEase);
+    const discCenterY = lerp(startCenterY, DISPLAY_CENTER_PX, launchEase);
+    const discRadius = lerp(startRadius, DISPLAY_CENTER_PX, launchEase);
+    const discAlpha = easeOutCubic(normalizeRange(launchProgress, 0.04, 0.24));
+    const totalRotation =
+      (Number.isFinite(libraryState.vinylRotationRadians) ? libraryState.vinylRotationRadians : 0) +
+      (Number.isFinite(libraryState.vinylNudgeRadians) ? libraryState.vinylNudgeRadians : 0);
+
+    drawLibraryVinylDisc(
+      drawingContext,
+      vinylLaunchAlbum,
+      discCenterX,
+      discCenterY,
+      discRadius,
+      totalRotation,
+      palette,
+      appearance,
+      discAlpha,
+      coverCache,
+    );
+
+    if (launchProgress > 0.12 && launchProgress < 0.96) {
+      const haloAlpha = (1 - normalizeRange(launchProgress, 0.52, 0.96)) * 0.72;
+      drawingContext.save();
+      drawingContext.globalAlpha = haloAlpha;
+      drawingContext.strokeStyle = palette.signalHighlight;
+      drawingContext.lineWidth = 1.4;
+      drawingContext.beginPath();
+      drawingContext.arc(discCenterX, discCenterY, discRadius + 1.5, 0, FULL_CIRCLE_RADIANS);
+      drawingContext.stroke();
+      drawingContext.restore();
+    }
+
+    if (launchProgress > 0.35) {
+      drawNowPlayingExpandedChrome(
+        drawingContext,
+        launchProgress,
+        elapsedSeconds,
+        durationSeconds,
+        volumeLevel,
+        palette,
+      );
+    }
+  }
+
+  if (Number(libraryState.playlistSheetProgress ?? 0) > CONTENT_VISIBILITY_THRESHOLD) {
+    renderLibraryPlaylistSheet(drawingContext, libraryState, palette, appearance);
+  }
+
+  if (
+    launchProgress < 0.05 &&
+    Number(libraryState.playlistSheetProgress ?? 0) < 0.05
+  ) {
+    renderLibraryLetterSearchHud(drawingContext, libraryState, currentView, palette, appearance);
+    drawLibraryRimArcFeedback(drawingContext, libraryState, currentView, palette, appearance);
+  }
+
+  const deleteCompletedFlash = Number(libraryState.deleteCompletedFlash ?? 0);
+  if (deleteCompletedFlash > CONTENT_VISIBILITY_THRESHOLD) {
+    drawingContext.save();
+    drawingContext.globalAlpha = deleteCompletedFlash * 0.28;
+    drawingContext.fillStyle = palette.signalActive;
+    drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
+    drawingContext.restore();
+  }
+
+  const backSwipeProgress = Number(libraryState.backSwipeProgress ?? 0);
+  if (backSwipeProgress > 0.02) {
+    const swipeAlpha = clamp(backSwipeProgress, 0, 1);
+    drawingContext.save();
+    drawingContext.globalAlpha = swipeAlpha * 0.92;
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = 4;
+    drawingContext.lineCap = "butt";
+    drawingContext.beginPath();
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      DISPLAY_CENTER_PX,
+      BACK_SWIPE_ARC_RADIUS_PX,
+      Math.PI - BACK_SWIPE_ARC_SPAN_RADIANS * swipeAlpha,
+      Math.PI + BACK_SWIPE_ARC_SPAN_RADIANS * swipeAlpha,
+    );
+    drawingContext.stroke();
+    drawingContext.restore();
+  }
+}
+
+/**
+ * Determine whether display coordinates (pointX, pointY) hover an actionable Library
+ * target (Hub crystal tile, curved list row, album crate sleeve/peeking disc,
+ * empty BACK TO LIBRARY plate, or Playlist Action Sheet buttons).
+ *
+ * @param {number} pointX Display coordinate X in [0, 360].
+ * @param {number} pointY Display coordinate Y in [0, 360].
+ * @param {object} libraryState Snapshot from createLibraryController().getRenderSnapshot().
+ * @returns {boolean} True when hovering a clickable Library element.
+ */
+export function hitTestLibraryInteractive(pointX, pointY, libraryState) {
+  if (!libraryState || !Number.isFinite(pointX) || !Number.isFinite(pointY)) {
+    return false;
+  }
+
+  if (libraryState.vinylLaunchTarget === 1 || Number(libraryState.vinylLaunchProgress ?? 0) > 0.15) {
+    return false;
+  }
+
+  if (libraryState.playlistSheetOpen || Number(libraryState.playlistSheetProgress ?? 0) > 0.5) {
+    if (pointX < SHEET_BUTTON_LEFT_X || pointX > SHEET_BUTTON_RIGHT_X) {
+      return false;
+    }
+    const hitPlayButton = pointY >= SHEET_PLAY_TOP_Y && pointY <= SHEET_PLAY_BOTTOM_Y;
+    const hitShuffleButton = pointY >= SHEET_SHUFFLE_TOP_Y && pointY <= SHEET_SHUFFLE_BOTTOM_Y;
+    const hitDeleteButton = pointY >= SHEET_DELETE_TOP_Y && pointY <= SHEET_DELETE_BOTTOM_Y;
+    return hitPlayButton || hitShuffleButton || hitDeleteButton;
+  }
+
+  const viewStack = Array.isArray(libraryState.viewStack) ? libraryState.viewStack : [];
+  const currentView = libraryState.currentView || viewStack[viewStack.length - 1];
+  if (!currentView) {
+    return false;
+  }
+
+  if (currentView.kind === "empty") {
+    return (
+      Math.abs(pointX - DISPLAY_CENTER_PX) <= EMPTY_BACK_CTA_HALF_WIDTH_PX &&
+      pointY >= EMPTY_BACK_CTA_TOP_Y &&
+      pointY <= EMPTY_BACK_CTA_BOTTOM_Y
+    );
+  }
+
+  const scrollPosition = Number.isFinite(currentView.scrollPosition) ? currentView.scrollPosition : 0;
+
+  if (currentView.kind === "albums") {
+    const crateAlbums = resolveCrateAlbumsFromState(libraryState, currentView);
+    if (crateAlbums.length === 0) {
+      return false;
+    }
+    const hitCenterSleeve =
+      pointX >= CRATE_SLEEVE_LEFT_X &&
+      pointX < CRATE_PEEK_LEFT_X &&
+      pointY >= CRATE_SLEEVE_TOP_Y &&
+      pointY <= CRATE_SLEEVE_BOTTOM_Y;
+    const hitPeekingDisc =
+      pointX >= CRATE_PEEK_LEFT_X &&
+      pointX <= CRATE_PEEK_RIGHT_X &&
+      pointY >= CRATE_PEEK_TOP_Y &&
+      pointY <= CRATE_PEEK_BOTTOM_Y;
+    if (hitCenterSleeve || hitPeekingDisc) {
+      return true;
+    }
+
+    const startIndex = Math.max(0, Math.floor(scrollPosition) - 1);
+    const endIndex = Math.min(crateAlbums.length - 1, Math.ceil(scrollPosition) + 1);
+    for (let albumIndex = startIndex; albumIndex <= endIndex; albumIndex += 1) {
+      const delta = albumIndex - scrollPosition;
+      const absDelta = Math.abs(delta);
+      if (absDelta > 1.5) {
+        continue;
+      }
+      const focusWeight = clamp(1 - absDelta, 0, 1);
+      const sleeveSize = lerp(
+        CRATE_MIN_SLEEVE_PX,
+        CRATE_MAX_SLEEVE_PX,
+        easeInOutCubic(focusWeight),
+      );
+      const sleeveHalf = sleeveSize / 2;
+      const sleeveCenterX =
+        DISPLAY_CENTER_PX - focusWeight * 8 + delta * LIBRARY_CONSTANTS.CRATE_SPACING_PX;
+      const sleeveCenterY = LIBRARY_CONSTANTS.CRATE_CENTER_Y + Math.min(absDelta, 1.5) * 6;
+      if (
+        Math.abs(pointX - sleeveCenterX) <= sleeveHalf &&
+        Math.abs(pointY - sleeveCenterY) <= sleeveHalf
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (pointY < HEADER_CLIP_TOP_Y) {
+    return false;
+  }
+
+  const rows = resolveRowsFromState(libraryState, currentView);
+  if (currentView.kind === "hub") {
+    for (let tileIndex = 0; tileIndex < rows.length; tileIndex += 1) {
+      const tileRect = computeLibraryHubTileRect(tileIndex, scrollPosition);
+      if (tileRect.alpha < 0.25) {
+        continue;
+      }
+      if (
+        Math.abs(pointX - tileRect.centerX) <= tileRect.width / 2 &&
+        Math.abs(pointY - tileRect.centerY) <= tileRect.height / 2
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const startRow = Math.max(0, Math.floor(scrollPosition) - 2);
+  const endRow = Math.min(rows.length - 1, Math.ceil(scrollPosition) + 4);
+  for (let rowIndex = startRow; rowIndex <= endRow; rowIndex += 1) {
+    const rowLayout = computeLibraryCurvedRowLayout(rowIndex, scrollPosition);
+    if (rowLayout.alpha < 0.22) {
+      continue;
+    }
+    if (
+      Math.abs(pointX - DISPLAY_CENTER_PX) <= rowLayout.rowHalfWidth &&
+      Math.abs(pointY - rowLayout.rowY) <= rowLayout.rowHeight / 2 + 3
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export {
+  resolveLibraryRimSliceIndex,
+  shortestSliceDistance,
+};
