@@ -107,8 +107,16 @@ body {
   -webkit-user-select: none;
 }
 
+#display-canvas.is-interactive {
+  cursor: grab;
+}
+
 #display-canvas.is-clickable {
   cursor: pointer;
+}
+
+#display-canvas.is-dragging {
+  cursor: grabbing;
 }
 
 .glass-sheen {

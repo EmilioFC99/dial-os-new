@@ -1,6 +1,7 @@
 /**
- * Main entrypoint for the DialOS Step 1 simulator web application: manages the
- * 60fps Canvas render loop, backend boot polling, pointer hit-testing, and shell controls.
+ * Main entrypoint for the DialOS simulator web application: manages the
+ * 60fps Canvas render loop, backend boot polling, Home 3D carousel interaction,
+ * pointer/wheel/keyboard hit-testing, and shell controls.
  */
 
 import {
@@ -16,14 +17,12 @@ import {
   FULL_CIRCLE_RADIANS,
   MILLISECONDS_PER_SECOND,
 } from "./core/geometry.js";
+import { HOME_APPS, createHomeController, wrapAppIndex } from "./core/home_controller.js";
 import { drawSafeAreaGuides } from "./core/primitives.js";
 import { createRouter } from "./core/router.js";
 import { APPEARANCE_PALETTES } from "./core/tokens.js";
 import { hitTestBootScreen, renderBootScreen } from "./screens/boot_screen.js";
-import {
-  hitTestHomeHandoffPlaceholder,
-  renderHomeHandoffPlaceholder,
-} from "./screens/home_handoff_placeholder.js";
+import { hitTestHomeInteractive, renderHomeScreen } from "./screens/home_screen.js";
 import { createShellController } from "./shell/shell_controller.js";
 
 const MAX_PIXEL_RATIO = 2;
@@ -31,11 +30,14 @@ const MAX_FRAME_DELTA_SECONDS = 0.05;
 const SCAN_POLL_INTERVAL_MS = 90;
 const WARNING_POLL_INTERVAL_MS = 1000;
 const TAP_MAX_DRIFT_PX = 14;
+const WHEEL_COOLDOWN_MS = 130;
+const WHEEL_MIN_DELTA_PX = 8;
 
 const displayCanvas = document.getElementById("display-canvas");
 const drawingContext = displayCanvas.getContext("2d");
 
 let bootController = createBootController();
+const homeController = createHomeController();
 const router = createRouter({ initialScreen: "boot" });
 
 const shellState = {
@@ -58,6 +60,8 @@ let musicRootPath = "";
 
 let activePointerId = null;
 let pointerDownPoint = null;
+let lastHoverPoint = null;
+let lastWheelDetentTimestampMs = 0;
 let lastRenderedTimestampMs = null;
 let lastTelemetrySignature = "";
 
@@ -83,18 +87,61 @@ function clearScheduledPoll() {
   }
 }
 
-function buildTelemetrySnapshot(bootSnapshot) {
+function resolveFocusedHomeApp(homeState) {
+  if (homeState?.focusedApp) {
+    return homeState.focusedApp;
+  }
+  return HOME_APPS[wrapAppIndex(homeState?.targetSlot ?? 0)];
+}
+
+function resolveLaunchedHomeAppTitle(homeState) {
+  if (homeState?.launchedAppId) {
+    const matchedApp = HOME_APPS.find((appEntry) => appEntry.id === homeState.launchedAppId);
+    if (matchedApp) {
+      return matchedApp.title;
+    }
+  }
+  return resolveFocusedHomeApp(homeState).title;
+}
+
+function formatTelemetryPhaseLabel(activeScreen, bootSnapshot, homeState) {
+  if (activeScreen === "boot") {
+    if (bootSnapshot.phase === "warning") {
+      return "WARNING";
+    }
+    const bootPhase =
+      typeof bootSnapshot.phase === "string" && bootSnapshot.phase.length > 0
+        ? bootSnapshot.phase.toUpperCase()
+        : "WAKE";
+    return `BOOT: ${bootPhase}`;
+  }
+
+  if (homeState?.launchTarget === 1) {
+    const launchedAppTitle = resolveLaunchedHomeAppTitle(homeState);
+    return `OPEN \u00b7 ${launchedAppTitle.toUpperCase()}`;
+  }
+
+  const focusedApp = resolveFocusedHomeApp(homeState);
+  return `HOME \u00b7 ${focusedApp.title.toUpperCase()}`;
+}
+
+function buildTelemetrySnapshot(bootSnapshot, routerState, homeState) {
   const counts = latestCatalog?.counts || bootSnapshot.backendCounts;
+  const activeScreen = routerState?.activeScreen || "boot";
+  const phaseLabel = formatTelemetryPhaseLabel(activeScreen, bootSnapshot, homeState);
+
   return {
-    phase: bootSnapshot.phase,
+    phase: activeScreen === "boot" ? bootSnapshot.phase : activeScreen,
+    phaseLabel,
+    activeScreen,
     musicRoot: musicRootPath,
     musicRootExists: bootSnapshot.musicRootExists,
     counts,
   };
 }
 
-function buildTelemetrySignature(bootSnapshot) {
-  const telemetry = buildTelemetrySnapshot(bootSnapshot);
+function buildTelemetrySignature(bootSnapshot, routerState, homeState) {
+  const telemetry = buildTelemetrySnapshot(bootSnapshot, routerState, homeState);
   const counts = telemetry.counts || {};
   return [
     shellState.appearance,
@@ -103,25 +150,34 @@ function buildTelemetrySignature(bootSnapshot) {
     shellState.opticalGlass,
     shellState.engineDelayFault,
     shellState.rescanning,
+    telemetry.activeScreen,
     telemetry.phase,
+    telemetry.phaseLabel,
     telemetry.musicRoot,
     telemetry.musicRootExists,
+    homeState?.launchTarget || 0,
+    homeState?.launchedAppId || "",
+    homeState?.focusedApp?.id || "",
     counts.tracks || 0,
     counts.albums || 0,
     counts.artists || 0,
+    counts.genres || 0,
+    counts.favorites || 0,
   ].join("|");
 }
 
 function syncShellIfNeeded(forceSync = false) {
   const bootSnapshot = bootController.getRenderSnapshot();
-  const nextSignature = buildTelemetrySignature(bootSnapshot);
+  const routerState = router.getState();
+  const homeState = homeController.getRenderSnapshot();
+  const nextSignature = buildTelemetrySignature(bootSnapshot, routerState, homeState);
   if (!forceSync && nextSignature === lastTelemetrySignature) {
     return;
   }
   lastTelemetrySignature = nextSignature;
   shellController.syncView({
     ...shellState,
-    telemetry: buildTelemetrySnapshot(bootSnapshot),
+    telemetry: buildTelemetrySnapshot(bootSnapshot, routerState, homeState),
   });
 }
 
@@ -231,6 +287,33 @@ async function startBootScan(sessionId, { rescan }) {
   scheduleNextPoll(sessionId);
 }
 
+function syncDisplayCanvasCursorClasses(
+  hoverPoint = lastHoverPoint,
+  routerState = router.getState(),
+  bootSnapshot = bootController.getRenderSnapshot(),
+  homeState = homeController.getRenderSnapshot(),
+) {
+  if (routerState.activeScreen === "boot") {
+    displayCanvas.classList.remove("is-interactive");
+    displayCanvas.classList.remove("is-dragging");
+    const hoveringRetry = Boolean(
+      hoverPoint && hitTestBootScreen(hoverPoint.pointX, hoverPoint.pointY, bootSnapshot) !== null,
+    );
+    displayCanvas.classList.toggle("is-clickable", hoveringRetry);
+    return;
+  }
+
+  const isCarouselInteractive = homeState.launchTarget === 0;
+  const isPointerDragging = Boolean(homeState.pointerActive);
+  const isHoveringTarget =
+    !isPointerDragging &&
+    Boolean(hoverPoint && hitTestHomeInteractive(hoverPoint.pointX, hoverPoint.pointY, homeState));
+
+  displayCanvas.classList.toggle("is-interactive", isCarouselInteractive);
+  displayCanvas.classList.toggle("is-dragging", isPointerDragging);
+  displayCanvas.classList.toggle("is-clickable", isHoveringTarget);
+}
+
 /**
  * Reset the boot state machine, return to the Boot screen, and trigger a fresh backend scan.
  *
@@ -250,6 +333,8 @@ function reboot({ rescan = true, keepDelayFault = false } = {}) {
     latestCatalog = null;
   }
 
+  activePointerId = null;
+  pointerDownPoint = null;
   bootController = createBootController();
   router.reboot();
 
@@ -260,6 +345,7 @@ function reboot({ rescan = true, keepDelayFault = false } = {}) {
     shellState.engineDelayFault = false;
   }
 
+  syncDisplayCanvasCursorClasses(lastHoverPoint);
   syncShellIfNeeded(true);
   void startBootScan(currentSessionId, { rescan });
 }
@@ -363,6 +449,49 @@ async function handleRescanLibrary() {
   }
 }
 
+function handleNavigateLeft() {
+  const routerState = router.getState();
+  const homeState = homeController.getRenderSnapshot();
+  if (routerState.activeScreen === "home" && homeState.launchTarget === 0) {
+    homeController.stepDetent(-1);
+    syncShellIfNeeded(false);
+  }
+}
+
+function handleNavigateRight() {
+  const routerState = router.getState();
+  const homeState = homeController.getRenderSnapshot();
+  if (routerState.activeScreen === "home" && homeState.launchTarget === 0) {
+    homeController.stepDetent(1);
+    syncShellIfNeeded(false);
+  }
+}
+
+function handleActivate() {
+  const routerState = router.getState();
+  if (routerState.activeScreen !== "home") {
+    return;
+  }
+  const homeState = homeController.getRenderSnapshot();
+  if (homeState.launchTarget === 0) {
+    homeController.launchFocusedApp();
+  } else if (homeState.launchedAppId === "now-playing" && homeState.playbackState === "idle") {
+    homeController.jumpFromNotPlayingToLibrary();
+  }
+  syncDisplayCanvasCursorClasses(lastHoverPoint);
+  syncShellIfNeeded(false);
+}
+
+function handleNavigateBack() {
+  const routerState = router.getState();
+  const homeState = homeController.getRenderSnapshot();
+  if (routerState.activeScreen === "home" && homeState.launchTarget === 1) {
+    homeController.closeLaunchedApp();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+  }
+}
+
 const shellController = createShellController({
   onReboot: () => reboot({ rescan: true }),
   onToggleAppearance: handleToggleAppearance,
@@ -373,6 +502,10 @@ const shellController = createShellController({
   onRescanLibrary: () => {
     void handleRescanLibrary();
   },
+  onNavigateLeft: handleNavigateLeft,
+  onNavigateRight: handleNavigateRight,
+  onActivate: handleActivate,
+  onNavigateBack: handleNavigateBack,
 });
 
 function clientPointToDisplayPoint(clientX, clientY) {
@@ -386,16 +519,14 @@ function clientPointToDisplayPoint(clientX, clientY) {
   };
 }
 
-function resolveCanvasActionAtPoint(point) {
-  if (!point) {
-    return null;
+function releaseActivePointerCapture(pointerId) {
+  if (typeof displayCanvas.releasePointerCapture === "function" && pointerId !== null) {
+    try {
+      displayCanvas.releasePointerCapture(pointerId);
+    } catch (releaseError) {
+      /* Pointer capture already ended. */
+    }
   }
-  const routerState = router.getState();
-  const bootSnapshot = bootController.getRenderSnapshot();
-  if (routerState.activeScreen === "boot") {
-    return hitTestBootScreen(point.pointX, point.pointY, bootSnapshot);
-  }
-  return hitTestHomeHandoffPlaceholder(point.pointX, point.pointY);
 }
 
 displayCanvas.addEventListener("pointerdown", (pointerEvent) => {
@@ -408,52 +539,130 @@ displayCanvas.addEventListener("pointerdown", (pointerEvent) => {
   }
   activePointerId = pointerEvent.pointerId;
   pointerDownPoint = displayPoint;
-});
+  lastHoverPoint = displayPoint;
 
-displayCanvas.addEventListener("pointerup", (pointerEvent) => {
-  if (pointerEvent.pointerId !== activePointerId || !pointerDownPoint) {
-    return;
-  }
-  const releasePoint = clientPointToDisplayPoint(pointerEvent.clientX, pointerEvent.clientY);
-  const startPoint = pointerDownPoint;
-  activePointerId = null;
-  pointerDownPoint = null;
-
-  if (!releasePoint) {
-    return;
-  }
-  const driftDistance = Math.hypot(
-    releasePoint.pointX - startPoint.pointX,
-    releasePoint.pointY - startPoint.pointY,
-  );
-  if (driftDistance > TAP_MAX_DRIFT_PX) {
-    return;
+  if (typeof displayCanvas.setPointerCapture === "function") {
+    try {
+      displayCanvas.setPointerCapture(pointerEvent.pointerId);
+    } catch (captureError) {
+      /* Pointer capture unavailable for synthetic or detached events. */
+    }
   }
 
-  const hitAction = resolveCanvasActionAtPoint(releasePoint);
-  if (hitAction === "retry") {
-    handleRetryTap();
-  } else if (hitAction === "reboot") {
-    reboot({ rescan: true });
+  if (router.getState().activeScreen === "home") {
+    homeController.handlePointerDown(displayPoint.pointX, displayPoint.pointY);
   }
-});
-
-displayCanvas.addEventListener("pointercancel", () => {
-  activePointerId = null;
-  pointerDownPoint = null;
+  syncDisplayCanvasCursorClasses(displayPoint);
 });
 
 displayCanvas.addEventListener("pointermove", (pointerEvent) => {
   const hoverPoint = clientPointToDisplayPoint(pointerEvent.clientX, pointerEvent.clientY);
-  const hoverAction = resolveCanvasActionAtPoint(hoverPoint);
-  displayCanvas.classList.toggle("is-clickable", hoverAction !== null);
+  lastHoverPoint = hoverPoint;
+
+  if (
+    router.getState().activeScreen === "home" &&
+    activePointerId === pointerEvent.pointerId &&
+    hoverPoint
+  ) {
+    homeController.handlePointerMove(hoverPoint.pointX, hoverPoint.pointY);
+  }
+  syncDisplayCanvasCursorClasses(hoverPoint);
+});
+
+displayCanvas.addEventListener("pointerup", (pointerEvent) => {
+  if (pointerEvent.pointerId !== activePointerId) {
+    return;
+  }
+  const releasePoint = clientPointToDisplayPoint(pointerEvent.clientX, pointerEvent.clientY);
+  const startPoint = pointerDownPoint;
+  const releasedPointerId = activePointerId;
+  activePointerId = null;
+  pointerDownPoint = null;
+  releaseActivePointerCapture(releasedPointerId);
+
+  const routerState = router.getState();
+  if (routerState.activeScreen === "home") {
+    if (releasePoint) {
+      homeController.handlePointerUp(releasePoint.pointX, releasePoint.pointY);
+      lastHoverPoint = releasePoint;
+    } else {
+      homeController.handlePointerCancel();
+    }
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
+
+  if (!startPoint || !releasePoint) {
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    return;
+  }
+
+  const driftDistance = Math.hypot(
+    releasePoint.pointX - startPoint.pointX,
+    releasePoint.pointY - startPoint.pointY,
+  );
+  if (driftDistance <= TAP_MAX_DRIFT_PX) {
+    const hitAction = hitTestBootScreen(
+      releasePoint.pointX,
+      releasePoint.pointY,
+      bootController.getRenderSnapshot(),
+    );
+    if (hitAction === "retry") {
+      handleRetryTap();
+    }
+  }
+  syncDisplayCanvasCursorClasses(lastHoverPoint);
+});
+
+displayCanvas.addEventListener("pointercancel", (pointerEvent) => {
+  if (pointerEvent.pointerId !== activePointerId) {
+    return;
+  }
+  const cancelledPointerId = activePointerId;
+  activePointerId = null;
+  pointerDownPoint = null;
+  releaseActivePointerCapture(cancelledPointerId);
+
+  if (router.getState().activeScreen === "home") {
+    homeController.handlePointerCancel();
+  }
+  syncDisplayCanvasCursorClasses(lastHoverPoint);
 });
 
 displayCanvas.addEventListener("pointerleave", () => {
-  displayCanvas.classList.remove("is-clickable");
+  lastHoverPoint = null;
+  syncDisplayCanvasCursorClasses(null);
 });
 
-function renderDisplayFrame(bootSnapshot, routerState) {
+displayCanvas.addEventListener(
+  "wheel",
+  (wheelEvent) => {
+    const routerState = router.getState();
+    const homeState = homeController.getRenderSnapshot();
+    if (routerState.activeScreen !== "home" || homeState.launchTarget !== 0) {
+      return;
+    }
+    wheelEvent.preventDefault();
+    const currentTimestampMs = performance.now();
+    if (currentTimestampMs - lastWheelDetentTimestampMs < WHEEL_COOLDOWN_MS) {
+      return;
+    }
+    const dominantDelta =
+      Math.abs(wheelEvent.deltaX) > Math.abs(wheelEvent.deltaY)
+        ? wheelEvent.deltaX
+        : wheelEvent.deltaY;
+    if (Math.abs(dominantDelta) < WHEEL_MIN_DELTA_PX) {
+      return;
+    }
+    lastWheelDetentTimestampMs = currentTimestampMs;
+    homeController.stepDetent(dominantDelta > 0 ? 1 : -1);
+    syncShellIfNeeded(false);
+  },
+  { passive: false },
+);
+
+function renderDisplayFrame(bootSnapshot, routerState, homeState) {
   const pixelRatio = syncCanvasBackingResolution();
   const palette = APPEARANCE_PALETTES[shellState.appearance];
 
@@ -475,7 +684,12 @@ function renderDisplayFrame(bootSnapshot, routerState) {
   if (routerState.activeScreen === "boot") {
     renderBootScreen(drawingContext, bootSnapshot, palette);
   } else {
-    renderHomeHandoffPlaceholder(drawingContext, routerState, bootSnapshot, palette);
+    const counts = latestCatalog?.counts || bootSnapshot.backendCounts;
+    renderHomeScreen(drawingContext, homeState, {
+      appearance: shellState.appearance,
+      palette,
+      counts,
+    });
   }
 
   if (shellState.safeGuides) {
@@ -497,13 +711,20 @@ function animationTick(timestampMs) {
   const bootSnapshot = bootController.getRenderSnapshot();
 
   if (bootSnapshot.completed && router.getState().activeScreen === "boot") {
+    homeController.enterFromBoot();
     router.completeBootToHome();
   }
 
   router.stepTransition(frameDeltaSeconds);
   const routerState = router.getState();
 
-  renderDisplayFrame(bootSnapshot, routerState);
+  if (routerState.activeScreen === "home") {
+    homeController.step(frameDeltaSeconds);
+  }
+
+  const homeState = homeController.getRenderSnapshot();
+  renderDisplayFrame(bootSnapshot, routerState, homeState);
+  syncDisplayCanvasCursorClasses(lastHoverPoint, routerState, bootSnapshot, homeState);
   syncShellIfNeeded(false);
 
   window.requestAnimationFrame(animationTick);

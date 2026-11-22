@@ -18,12 +18,16 @@ function isEditableEventTarget(target) {
   );
 }
 
-function formatTelemetryPhase(phase, musicRootExists) {
+function formatTelemetryPhase(telemetry) {
+  if (typeof telemetry?.phaseLabel === "string" && telemetry.phaseLabel.length > 0) {
+    return telemetry.phaseLabel;
+  }
+  const phase = telemetry?.phase;
   if (phase === "warning") {
     return "WARNING";
   }
   if (phase === "completed") {
-    return musicRootExists ? "HOME READY" : "HOME (NO FOLDER)";
+    return telemetry?.musicRootExists !== false ? "HOME READY" : "HOME (NO FOLDER)";
   }
   return typeof phase === "string" && phase.length > 0 ? phase.toUpperCase() : "WAKE";
 }
@@ -113,7 +117,40 @@ export function createShellController(callbacks = {}) {
       if (devMenuOpen) {
         keyboardEvent.preventDefault();
         setDevMenuOpen(false);
+      } else if (callbacks.onNavigateBack) {
+        keyboardEvent.preventDefault();
+        callbacks.onNavigateBack();
       }
+      return;
+    }
+
+    if (pressedKey === "ArrowLeft") {
+      keyboardEvent.preventDefault();
+      callbacks.onNavigateLeft?.();
+      return;
+    }
+
+    if (pressedKey === "ArrowRight") {
+      keyboardEvent.preventDefault();
+      callbacks.onNavigateRight?.();
+      return;
+    }
+
+    if (pressedKey === "Enter" || pressedKey === " ") {
+      if (
+        !isEditableEventTarget(keyboardEvent.target) &&
+        !(keyboardEvent.target instanceof HTMLButtonElement) &&
+        !devMenuOpen
+      ) {
+        keyboardEvent.preventDefault();
+        callbacks.onActivate?.();
+      }
+      return;
+    }
+
+    if (pressedKey === "Backspace") {
+      keyboardEvent.preventDefault();
+      callbacks.onNavigateBack?.();
       return;
     }
 
@@ -234,7 +271,7 @@ export function createShellController(callbacks = {}) {
     }
 
     const telemetry = shellState.telemetry || {};
-    const phaseLabel = formatTelemetryPhase(telemetry.phase, telemetry.musicRootExists !== false);
+    const phaseLabel = formatTelemetryPhase(telemetry);
     if (telemetryPhase) {
       telemetryPhase.textContent = phaseLabel;
       telemetryPhase.classList.toggle("is-alert", telemetry.phase === "warning");
