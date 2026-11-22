@@ -542,6 +542,7 @@ export function resolveActiveLyricsFrame(
  * @param {object | null} album Owning album object.
  * @param {number} [queueTrackCount=1] Total tracks in the active queue.
  * @param {number} [queuePositionOneBased=1] One-based position in the active queue.
+ * @param {object | null} [albumTechSpec=null] Optional album-level technical spec fallback.
  * @returns {object} Enriched track detail payload.
  */
 export function enrichTrackDetails(
@@ -549,6 +550,7 @@ export function enrichTrackDetails(
   album,
   queueTrackCount = 1,
   queuePositionOneBased = 1,
+  albumTechSpec = null,
 ) {
   const durationSeconds =
     track &&
@@ -574,11 +576,30 @@ export function enrichTrackDetails(
       : 0;
   const trackIndexLabel = `${String(safeQueuePosition).padStart(2, "0")} / ${String(safeQueueTotal).padStart(2, "0")}`;
 
-  const estimatedMegabytes = ((durationSeconds / SECONDS_PER_MINUTE) * DEFAULT_TECH_SPEC.mbPerMin).toFixed(1);
+  const fallbackTechSpec =
+    albumTechSpec && typeof albumTechSpec === "object"
+      ? albumTechSpec
+      : album?.techSpec && typeof album.techSpec === "object"
+        ? album.techSpec
+        : null;
+  const effectiveMbPerMin =
+    typeof track?.mbPerMin === "number" && Number.isFinite(track.mbPerMin) && track.mbPerMin > 0
+      ? track.mbPerMin
+      : typeof fallbackTechSpec?.mbPerMin === "number" &&
+          Number.isFinite(fallbackTechSpec.mbPerMin) &&
+          fallbackTechSpec.mbPerMin > 0
+        ? fallbackTechSpec.mbPerMin
+        : DEFAULT_TECH_SPEC.mbPerMin;
+  const estimatedMegabytes = ((durationSeconds / SECONDS_PER_MINUTE) * effectiveMbPerMin).toFixed(1);
 
   return {
     id: typeof track?.id === "string" ? track.id : "",
-    albumId: typeof track?.albumId === "string" ? track.albumId : typeof album?.id === "string" ? album.id : "",
+    albumId:
+      typeof track?.albumId === "string"
+        ? track.albumId
+        : typeof album?.id === "string"
+          ? album.id
+          : "",
     title: typeof track?.title === "string" && track.title.length > 0 ? track.title : "No Track Loaded",
     artist:
       typeof track?.artist === "string" && track.artist.length > 0
@@ -603,19 +624,25 @@ export function enrichTrackDetails(
     durationSeconds,
     durationText,
     format:
-      typeof track?.format === "string" && track.format.length > 0
+      typeof track?.format === "string" && track.format.trim().length > 0
         ? track.format
-        : DEFAULT_TECH_SPEC.format,
+        : typeof fallbackTechSpec?.format === "string" && fallbackTechSpec.format.trim().length > 0
+          ? fallbackTechSpec.format
+          : DEFAULT_TECH_SPEC.format,
     sampleRate:
-      typeof track?.sampleRate === "string" && track.sampleRate.length > 0
+      typeof track?.sampleRate === "string" && track.sampleRate.trim().length > 0
         ? track.sampleRate
-        : DEFAULT_TECH_SPEC.sampleRate,
+        : typeof fallbackTechSpec?.sampleRate === "string" && fallbackTechSpec.sampleRate.trim().length > 0
+          ? fallbackTechSpec.sampleRate
+          : DEFAULT_TECH_SPEC.sampleRate,
     bitrate:
-      typeof track?.bitrate === "string" && track.bitrate.length > 0
+      typeof track?.bitrate === "string" && track.bitrate.trim().length > 0
         ? track.bitrate
-        : DEFAULT_TECH_SPEC.bitrate,
+        : typeof fallbackTechSpec?.bitrate === "string" && fallbackTechSpec.bitrate.trim().length > 0
+          ? fallbackTechSpec.bitrate
+          : DEFAULT_TECH_SPEC.bitrate,
     fileSize:
-      typeof track?.fileSize === "string" && track.fileSize.length > 0
+      typeof track?.fileSize === "string" && track.fileSize.trim().length > 0
         ? track.fileSize
         : `${estimatedMegabytes} MB`,
     isFavorite: Boolean(track?.isFavorite),
@@ -655,6 +682,7 @@ export function createNowPlayingController({
   onExit,
 } = {}) {
   let albumByIdMap = new Map();
+  let albumTechSpecsById = new Map();
   let trackByIdMap = new Map();
   let playlists = [];
   let lyricsCatalog = {};
@@ -1183,7 +1211,22 @@ export function createNowPlayingController({
       );
     }
 
+    const nextAlbumTechSpecsMap = new Map();
+    if (sourceCatalog.albumTechSpecs && typeof sourceCatalog.albumTechSpecs === "object") {
+      for (const [albumId, techSpec] of Object.entries(sourceCatalog.albumTechSpecs)) {
+        if (
+          typeof albumId === "string" &&
+          albumId.length > 0 &&
+          techSpec &&
+          typeof techSpec === "object"
+        ) {
+          nextAlbumTechSpecsMap.set(albumId, { ...techSpec });
+        }
+      }
+    }
+
     albumByIdMap = nextAlbumMap;
+    albumTechSpecsById = nextAlbumTechSpecsMap;
     trackByIdMap = nextTrackMap;
     playlists = clonePlaylists(sourceCatalog.playlists);
     lyricsCatalog =
@@ -1271,6 +1314,93 @@ export function createNowPlayingController({
       applyTrackChangePresentation(priorTrack, priorAlbum, activeTrack, stepDirection);
     } else {
       pendingTrackChangeTransition = null;
+    }
+  }
+
+  /**
+   * Toggle playback between playing and paused when a track is loaded.
+   */
+  function togglePlayPause() {
+    togglePlayPauseState();
+  }
+
+  /**
+   * Close Quick Actions and modal sheets, then toggle the Live Lyrics overlay.
+   */
+  function toggleLyrics() {
+    if (operatingMode !== "playing") {
+      return;
+    }
+    clearPendingSingleTap();
+    quickActionsOpen = false;
+    playlistPickerOpen = false;
+    detailsSheetOpen = false;
+    queueSheetOpen = false;
+    if (lyricsOpen) {
+      lyricsOpen = false;
+    } else {
+      openLyricsOverlay();
+    }
+  }
+
+  /**
+   * Close Quick Actions, queue sheet, and playlist picker, then toggle Track Details.
+   */
+  function toggleTrackDetails() {
+    if (operatingMode !== "playing") {
+      return;
+    }
+    clearPendingSingleTap();
+    quickActionsOpen = false;
+    queueSheetOpen = false;
+    playlistPickerOpen = false;
+    detailsSheetOpen = !detailsSheetOpen;
+  }
+
+  /**
+   * Toggle the Context Queue sheet open or closed.
+   */
+  function toggleQueueSheet() {
+    if (operatingMode !== "playing") {
+      return;
+    }
+    clearPendingSingleTap();
+    if (queueSheetOpen) {
+      queueSheetOpen = false;
+    } else {
+      openQueueSheet();
+    }
+  }
+
+  /**
+   * Replace internal cloned playlists when playlists change externally.
+   *
+   * @param {Array<object> | null} nextPlaylists Updated playlist list.
+   */
+  function setPlaylists(nextPlaylists) {
+    playlists = clonePlaylists(nextPlaylists);
+  }
+
+  /**
+   * Synchronize favorite flag for `trackId` across `activeTrack`, `queueTracks`, and cached tracks.
+   *
+   * @param {string} trackId Track identifier to update.
+   * @param {boolean} isFavorite Updated favorite state.
+   */
+  function updateTrackFavorite(trackId, isFavorite) {
+    if (typeof trackId !== "string" || trackId.length === 0) {
+      return;
+    }
+    const nextFavorite = Boolean(isFavorite);
+    if (activeTrack && activeTrack.id === trackId) {
+      activeTrack = { ...activeTrack, isFavorite: nextFavorite };
+    }
+    queueTracks = queueTracks.map((trackEntry) =>
+      trackEntry.id === trackId ? { ...trackEntry, isFavorite: nextFavorite } : trackEntry,
+    );
+    const cachedTrack = trackByIdMap.get(trackId);
+    if (cachedTrack) {
+      trackByIdMap.set(trackId, { ...cachedTrack, isFavorite: nextFavorite });
     }
   }
 
@@ -2136,16 +2266,7 @@ export function createNowPlayingController({
         if (actionId === "favorite") {
           if (activeTrack) {
             const nextFavorite = !activeTrack.isFavorite;
-            activeTrack = { ...activeTrack, isFavorite: nextFavorite };
-            queueTracks = queueTracks.map((trackEntry) =>
-              trackEntry.id === activeTrack.id
-                ? { ...trackEntry, isFavorite: nextFavorite }
-                : trackEntry,
-            );
-            const cachedTrack = trackByIdMap.get(activeTrack.id);
-            if (cachedTrack) {
-              trackByIdMap.set(activeTrack.id, { ...cachedTrack, isFavorite: nextFavorite });
-            }
+            updateTrackFavorite(activeTrack.id, nextFavorite);
             if (typeof onToggleFavorite === "function") {
               onToggleFavorite(activeTrack.id, nextFavorite);
             }
@@ -2251,11 +2372,15 @@ export function createNowPlayingController({
       trackElapsedSeconds,
       lyricsMode,
     );
+    const resolvedAlbumId = activeTrack?.albumId || activeAlbum?.id || "";
+    const albumTechSpec =
+      (resolvedAlbumId ? albumTechSpecsById.get(resolvedAlbumId) : null) || null;
     const trackDetails = enrichTrackDetails(
       activeTrack,
       activeAlbum,
       queueTracks.length,
       queueTracks.length > 0 ? queueIndex + 1 : 0,
+      albumTechSpec,
     );
 
     return {
@@ -2334,6 +2459,12 @@ export function createNowPlayingController({
     activateFocused,
     skipTrack,
     cycleLyricsMode,
+    togglePlayPause,
+    toggleLyrics,
+    toggleTrackDetails,
+    toggleQueueSheet,
+    setPlaylists,
+    updateTrackFavorite,
     handlePointerDown,
     handlePointerMove,
     handlePointerUp,

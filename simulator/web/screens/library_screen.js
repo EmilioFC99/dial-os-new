@@ -105,7 +105,15 @@ function resolveAppearance(appearance) {
   return appearance === "light" ? "light" : "dark";
 }
 
-function truncateCanvasText(drawingContext, labelText, maxWidthPx) {
+/**
+ * Truncate text cleanly with an ellipsis when its measured canvas width exceeds `maxWidthPx`.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {string} labelText Source text string.
+ * @param {number} maxWidthPx Maximum line width in pixels.
+ * @returns {string} Fitted text string.
+ */
+export function truncateCanvasText(drawingContext, labelText, maxWidthPx) {
   const safeLabel = String(labelText ?? "");
   if (drawingContext.measureText(safeLabel).width <= maxWidthPx) {
     return safeLabel;
@@ -120,7 +128,17 @@ function truncateCanvasText(drawingContext, labelText, maxWidthPx) {
   return `${clipped.trimEnd()}\u2026`;
 }
 
-function traceChamferRect(drawingContext, leftX, topY, width, height, chamfer) {
+/**
+ * Trace an octagonal chamfered rectangle path onto `drawingContext`.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {number} leftX Top-left X coordinate.
+ * @param {number} topY Top-left Y coordinate.
+ * @param {number} width Rectangle width in pixels.
+ * @param {number} height Rectangle height in pixels.
+ * @param {number} chamfer Corner chamfer size in pixels.
+ */
+export function traceChamferRect(drawingContext, leftX, topY, width, height, chamfer) {
   const cut = Math.min(chamfer, width * 0.4, height * 0.4);
   const rightX = leftX + width;
   const bottomY = topY + height;
@@ -136,7 +154,20 @@ function traceChamferRect(drawingContext, leftX, topY, width, height, chamfer) {
   drawingContext.closePath();
 }
 
-function drawLibraryCornerBrackets(
+/**
+ * Draw opposing top-left and bottom-right L-shaped registration brackets around a rectangle.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {number} leftX Bounding box left X.
+ * @param {number} topY Bounding box top Y.
+ * @param {number} width Bounding box width.
+ * @param {number} height Bounding box height.
+ * @param {number} armLength Bracket leg length in pixels.
+ * @param {number} lineWidth Stroke width in pixels.
+ * @param {string} color Stroke color.
+ * @param {number} alpha Layer opacity.
+ */
+export function drawLibraryCornerBrackets(
   drawingContext,
   leftX,
   topY,
@@ -877,7 +908,16 @@ function drawLibraryPeripheralChrome(
   drawingContext.restore();
 }
 
-function drawLibraryScrollArc(drawingContext, scrollPosition, totalRows, alpha, palette) {
+/**
+ * Draw the curved right-edge scroll indicator arc and active position thumb.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {number} scrollPosition Continuous list scroll position.
+ * @param {number} totalRows Total row count in the list.
+ * @param {number} alpha Layer opacity.
+ * @param {object} palette Semantic Dark/Light appearance palette.
+ */
+export function drawLibraryScrollArc(drawingContext, scrollPosition, totalRows, alpha, palette) {
   if (totalRows <= LIBRARY_CONSTANTS.LIST_FULL_SLOTS || alpha <= CONTENT_VISIBILITY_THRESHOLD) {
     return;
   }
@@ -923,7 +963,22 @@ function drawLibraryScrollArc(drawingContext, scrollPosition, totalRows, alpha, 
   drawingContext.restore();
 }
 
-function drawLibraryPerspectiveFloor(drawingContext, scrollPosition, alpha, palette, appearance) {
+/**
+ * Draw the subtle perspective floor grid and diagonal registration marks.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {number} scrollPosition Continuous scroll offset for subtle floor parallax.
+ * @param {number} alpha Layer opacity.
+ * @param {object} palette Semantic Dark/Light appearance palette.
+ * @param {string} appearance Semantic appearance ("dark" | "light").
+ */
+export function drawLibraryPerspectiveFloor(
+  drawingContext,
+  scrollPosition,
+  alpha,
+  palette,
+  appearance,
+) {
   if (alpha <= CONTENT_VISIBILITY_THRESHOLD) {
     return;
   }
@@ -977,7 +1032,16 @@ function drawLibraryPerspectiveFloor(drawingContext, scrollPosition, alpha, pale
   drawingContext.restore();
 }
 
-function drawLiveMiniEqualizer(drawingContext, centerX, centerY, clockSeconds, palette) {
+/**
+ * Draw an animated 3-bar mini equalizer indicator for the currently playing track row.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {number} centerX Center X coordinate.
+ * @param {number} centerY Center Y coordinate.
+ * @param {number} clockSeconds Continuous clock in seconds.
+ * @param {object} palette Semantic Dark/Light appearance palette.
+ */
+export function drawLiveMiniEqualizer(drawingContext, centerX, centerY, clockSeconds, palette) {
   const barWidth = 2.6;
   const barGap = 2.2;
   const totalWidth = barWidth * 3 + barGap * 2;

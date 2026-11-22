@@ -9,6 +9,7 @@ import {
   fetchBootStatus,
   fetchLibraryCatalog,
   savePlaylists,
+  setTrackFavorite,
   triggerBootScan,
   triggerLibraryRescan,
 } from "./core/api_client.js";
@@ -23,12 +24,17 @@ import {
 } from "./core/geometry.js";
 import { HOME_APPS, createHomeController, wrapAppIndex } from "./core/home_controller.js";
 import { createLibraryController } from "./core/library_controller.js";
+import { createNowPlayingController } from "./core/now_playing_controller.js";
 import { drawSafeAreaGuides } from "./core/primitives.js";
 import { createRouter } from "./core/router.js";
 import { APPEARANCE_PALETTES } from "./core/tokens.js";
 import { hitTestBootScreen, renderBootScreen } from "./screens/boot_screen.js";
 import { hitTestHomeInteractive, renderHomeScreen } from "./screens/home_screen.js";
 import { hitTestLibraryInteractive, renderLibraryScreen } from "./screens/library_screen.js";
+import {
+  hitTestNowPlayingInteractive,
+  renderNowPlayingScreen,
+} from "./screens/now_playing_screen.js";
 import { createShellController } from "./shell/shell_controller.js";
 
 const MAX_PIXEL_RATIO = 2;
@@ -50,6 +56,18 @@ const libraryController = createLibraryController({
   onLaunchTrack: handleLaunchLibraryTrack,
   onExitToHome: handleExitLibraryToHome,
   onPersistPlaylists: handlePersistPlaylists,
+});
+const nowPlayingController = createNowPlayingController({
+  onBrowseLibrary: handleNowPlayingBrowseLibrary,
+  onTogglePlayPause: handleNowPlayingTogglePlayPause,
+  onSeek: handleNowPlayingSeek,
+  onVolumeChange: handleNowPlayingVolumeChange,
+  onSkipTrack: handleNowPlayingSkipTrack,
+  onSelectQueueIndex: handleNowPlayingSelectQueueIndex,
+  onToggleFavorite: handleNowPlayingToggleFavorite,
+  onPlayModeChange: handleNowPlayingPlayModeChange,
+  onPersistPlaylists: handlePersistPlaylists,
+  onExit: handleExitNowPlaying,
 });
 const router = createRouter({ initialScreen: "boot" });
 
@@ -110,25 +128,139 @@ function releaseActivePointerCapture(pointerId) {
   }
 }
 
-function handleLaunchLibraryTrack(selectionSpec) {
-  const activeCatalog = latestCatalog || libraryController.getRenderSnapshot().catalog;
-  audioEngine.playTrackFromSource(selectionSpec, activeCatalog);
-  const audioState = audioEngine.getState();
-  libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
-  homeController.syncPlaybackState({
-    playbackState: audioState.isPlaying ? "playing" : "idle",
-    volumeLevel: audioState.volumeLevel,
-  });
-  syncShellIfNeeded(true);
-}
-
-function handleExitLibraryToHome() {
+function clearActiveCanvasPointer() {
   if (activePointerId !== null) {
     const releasedPointerId = activePointerId;
     activePointerId = null;
     pointerDownPoint = null;
     releaseActivePointerCapture(releasedPointerId);
   }
+}
+
+function syncPlaybackAcrossControllers() {
+  const audioState = audioEngine.getState();
+  nowPlayingController.syncAudioState(audioState);
+  libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
+  homeController.syncPlaybackState({
+    playbackState: audioState.isPlaying ? "playing" : "idle",
+    volumeLevel: audioState.volumeLevel,
+  });
+  syncShellIfNeeded(false);
+}
+
+function handleNowPlayingBrowseLibrary() {
+  clearActiveCanvasPointer();
+  libraryController.enterFromHome();
+  router.navigateTo("library");
+  syncDisplayCanvasCursorClasses(lastHoverPoint);
+  syncShellIfNeeded(true);
+}
+
+function handleNowPlayingTogglePlayPause() {
+  audioEngine.togglePlayPause();
+  syncPlaybackAcrossControllers();
+}
+
+function handleNowPlayingSeek(targetSeconds) {
+  audioEngine.seekTo(targetSeconds);
+  syncPlaybackAcrossControllers();
+}
+
+function handleNowPlayingVolumeChange(nextVolume) {
+  audioEngine.setVolume(nextVolume);
+  syncPlaybackAcrossControllers();
+}
+
+function handleNowPlayingSkipTrack(direction) {
+  audioEngine.skipTrack(direction);
+  syncPlaybackAcrossControllers();
+}
+
+function handleNowPlayingSelectQueueIndex(rowIndex) {
+  audioEngine.selectQueueIndex(rowIndex);
+  syncPlaybackAcrossControllers();
+}
+
+function handleNowPlayingToggleFavorite(trackId, nextState) {
+  audioEngine.updateTrackFavorite(trackId, nextState);
+  libraryController.setTrackFavorite(trackId, nextState);
+  if (latestCatalog && typeof latestCatalog === "object") {
+    const nextFavorite = Boolean(nextState);
+    const nextAllTracks = Array.isArray(latestCatalog.allTracks)
+      ? latestCatalog.allTracks.map((trackEntry) =>
+          trackEntry.id === trackId ? { ...trackEntry, isFavorite: nextFavorite } : trackEntry,
+        )
+      : [];
+    const nextAlbums = Array.isArray(latestCatalog.albums)
+      ? latestCatalog.albums.map((albumEntry) => {
+          if (!Array.isArray(albumEntry.tracks)) {
+            return albumEntry;
+          }
+          return {
+            ...albumEntry,
+            tracks: albumEntry.tracks.map((trackEntry) =>
+              trackEntry.id === trackId
+                ? { ...trackEntry, isFavorite: nextFavorite }
+                : trackEntry,
+            ),
+          };
+        })
+      : [];
+    latestCatalog = {
+      ...latestCatalog,
+      allTracks: nextAllTracks,
+      albums: nextAlbums,
+      counts: {
+        ...(latestCatalog.counts || {}),
+        favorites: nextAllTracks.filter((trackEntry) => Boolean(trackEntry.isFavorite)).length,
+      },
+    };
+  }
+  void setTrackFavorite(trackId, nextState);
+  syncPlaybackAcrossControllers();
+  syncShellIfNeeded(true);
+}
+
+function handleNowPlayingPlayModeChange(nextModeId) {
+  audioEngine.setPlayMode(nextModeId);
+  syncPlaybackAcrossControllers();
+}
+
+function handleExitNowPlaying(exitReturnScreen) {
+  clearActiveCanvasPointer();
+  if (exitReturnScreen === "library") {
+    libraryController.resetVinylLaunch();
+    router.navigateTo("library");
+  } else {
+    router.navigateTo("home");
+    homeController.returnFromScreen("now-playing");
+  }
+  syncDisplayCanvasCursorClasses(lastHoverPoint);
+  syncShellIfNeeded(true);
+}
+
+function handleLaunchLibraryTrack(selectionSpec) {
+  const activeCatalog = latestCatalog || libraryController.getRenderSnapshot().catalog;
+  audioEngine.playTrackFromSource(selectionSpec, activeCatalog);
+  const audioState = audioEngine.getState();
+  libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
+  libraryController.resetVinylLaunch();
+  homeController.syncPlaybackState({
+    playbackState: audioState.isPlaying ? "playing" : "idle",
+    volumeLevel: audioState.volumeLevel,
+  });
+  nowPlayingController.enterFromLibrary({
+    returnScreen: "library",
+    audioState,
+  });
+  clearActiveCanvasPointer();
+  router.navigateTo("now-playing");
+  syncDisplayCanvasCursorClasses(lastHoverPoint);
+  syncShellIfNeeded(true);
+}
+
+function handleExitLibraryToHome() {
+  clearActiveCanvasPointer();
   router.navigateTo("home");
   homeController.returnFromScreen("library");
   syncDisplayCanvasCursorClasses(lastHoverPoint);
@@ -136,36 +268,42 @@ function handleExitLibraryToHome() {
 }
 
 /**
- * Immediately switch into the real Library view whenever Home launches `library`.
+ * Immediately switch from Home into launched destination apps (`library` or `now-playing`).
  *
- * @returns {boolean} True when control transferred from Home to Library.
+ * @returns {boolean} True when control transferred from Home to a dedicated screen.
  */
-function handoffHomeToLibraryIfLaunched() {
+function handoffHomeAppIfLaunched() {
   if (router.getState().activeScreen !== "home") {
     return false;
   }
   const launchedHomeState = homeController.getRenderSnapshot();
-  if (
-    launchedHomeState.launchTarget === 1 &&
-    launchedHomeState.launchedAppId === "library"
-  ) {
-    if (activePointerId !== null) {
-      const releasedPointerId = activePointerId;
-      activePointerId = null;
-      pointerDownPoint = null;
-      releaseActivePointerCapture(releasedPointerId);
-    }
+  if (launchedHomeState.launchTarget !== 1) {
+    return false;
+  }
+  if (launchedHomeState.launchedAppId === "library") {
+    clearActiveCanvasPointer();
     libraryController.enterFromHome();
     router.navigateTo("library");
+    return true;
+  }
+  if (launchedHomeState.launchedAppId === "now-playing") {
+    clearActiveCanvasPointer();
+    nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: audioEngine.getState(),
+    });
+    router.navigateTo("now-playing");
     return true;
   }
   return false;
 }
 
 function handlePersistPlaylists(updatedPlaylists) {
-  void savePlaylists(updatedPlaylists);
+  const nextPlaylists = Array.isArray(updatedPlaylists) ? updatedPlaylists.slice() : [];
+  void savePlaylists(nextPlaylists);
+  libraryController.setPlaylists(nextPlaylists);
+  nowPlayingController.setPlaylists(nextPlaylists);
   if (latestCatalog && typeof latestCatalog === "object") {
-    const nextPlaylists = Array.isArray(updatedPlaylists) ? updatedPlaylists.slice() : [];
     latestCatalog = {
       ...latestCatalog,
       playlists: nextPlaylists,
@@ -200,6 +338,7 @@ function formatTelemetryPhaseLabel(
   bootSnapshot,
   homeState,
   libraryState,
+  nowPlayingState,
   audioState,
 ) {
   if (activeScreen === "boot") {
@@ -211,6 +350,36 @@ function formatTelemetryPhaseLabel(
         ? bootSnapshot.phase.toUpperCase()
         : "WAKE";
     return `BOOT: ${bootPhase}`;
+  }
+
+  if (activeScreen === "now-playing") {
+    if (nowPlayingState?.operatingMode !== "playing") {
+      return "NOW \u00b7 IDLE";
+    }
+    if (nowPlayingState?.playlistPickerOpen) {
+      return "NOW \u00b7 PLAYLIST PICKER";
+    }
+    if (nowPlayingState?.detailsSheetOpen) {
+      return "NOW \u00b7 TRACK DETAILS";
+    }
+    if (nowPlayingState?.queueSheetOpen) {
+      return "NOW \u00b7 QUEUE";
+    }
+    if (nowPlayingState?.quickActionsOpen) {
+      return "NOW \u00b7 QUICK ACTIONS";
+    }
+    if (nowPlayingState?.lyricsOpen) {
+      const lyricsModeLabel = nowPlayingState?.lyricsFrame?.modeLabel || "TRACK";
+      return `LYRICS \u00b7 ${lyricsModeLabel}`;
+    }
+    if (nowPlayingState?.isSeeking) {
+      return "NOW \u00b7 SEEK";
+    }
+    const trackTitle = nowPlayingState?.activeTrack?.title || audioState?.activeTrack?.title;
+    if (typeof trackTitle === "string" && trackTitle.trim().length > 0) {
+      return `NOW \u00b7 ${trackTitle.trim().toUpperCase()}`;
+    }
+    return nowPlayingState?.isPlaying ? "NOW \u00b7 PLAYING" : "NOW \u00b7 PAUSED";
   }
 
   if (activeScreen === "library") {
@@ -251,6 +420,7 @@ function buildTelemetrySnapshot(
   routerState,
   homeState,
   libraryState,
+  nowPlayingState,
   audioState,
 ) {
   const counts = latestCatalog?.counts || bootSnapshot.backendCounts;
@@ -260,6 +430,7 @@ function buildTelemetrySnapshot(
     bootSnapshot,
     homeState,
     libraryState,
+    nowPlayingState,
     audioState,
   );
 
@@ -278,6 +449,7 @@ function buildTelemetrySignature(
   routerState,
   homeState,
   libraryState,
+  nowPlayingState,
   audioState,
 ) {
   const telemetry = buildTelemetrySnapshot(
@@ -285,6 +457,7 @@ function buildTelemetrySignature(
     routerState,
     homeState,
     libraryState,
+    nowPlayingState,
     audioState,
   );
   const counts = telemetry.counts || {};
@@ -307,6 +480,15 @@ function buildTelemetrySignature(
     libraryState?.currentView?.title || "",
     libraryState?.vinylLaunchTarget || 0,
     libraryState?.playlistSheetOpen ? 1 : 0,
+    nowPlayingState?.operatingMode || "",
+    nowPlayingState?.lyricsOpen ? 1 : 0,
+    nowPlayingState?.lyricsMode || "",
+    nowPlayingState?.quickActionsOpen ? 1 : 0,
+    nowPlayingState?.queueSheetOpen ? 1 : 0,
+    nowPlayingState?.detailsSheetOpen ? 1 : 0,
+    nowPlayingState?.playlistPickerOpen ? 1 : 0,
+    nowPlayingState?.isSeeking ? 1 : 0,
+    nowPlayingState?.playMode || "",
     audioState?.activeTrack?.id || "",
     audioState?.isPlaying ? 1 : 0,
     counts.tracks || 0,
@@ -323,12 +505,14 @@ function syncShellIfNeeded(forceSync = false) {
   const routerState = router.getState();
   const homeState = homeController.getRenderSnapshot();
   const libraryState = libraryController.getRenderSnapshot();
+  const nowPlayingState = nowPlayingController.getRenderSnapshot();
   const audioState = audioEngine.getState();
   const nextSignature = buildTelemetrySignature(
     bootSnapshot,
     routerState,
     homeState,
     libraryState,
+    nowPlayingState,
     audioState,
   );
   if (!forceSync && nextSignature === lastTelemetrySignature) {
@@ -342,6 +526,7 @@ function syncShellIfNeeded(forceSync = false) {
       routerState,
       homeState,
       libraryState,
+      nowPlayingState,
       audioState,
     ),
   });
@@ -361,6 +546,7 @@ async function loadCatalogWhenReady(sessionId) {
       latestCatalog = catalogResponse.payload;
       catalogLoaded = true;
       libraryController.hydrateCatalog(latestCatalog);
+      nowPlayingController.hydrateCatalog(latestCatalog);
       if (typeof catalogResponse.payload.musicRoot === "string") {
         musicRootPath = catalogResponse.payload.musicRoot;
       }
@@ -460,6 +646,7 @@ function syncDisplayCanvasCursorClasses(
   bootSnapshot = bootController.getRenderSnapshot(),
   homeState = homeController.getRenderSnapshot(),
   libraryState = libraryController.getRenderSnapshot(),
+  nowPlayingState = nowPlayingController.getRenderSnapshot(),
 ) {
   if (routerState.activeScreen === "boot") {
     displayCanvas.classList.remove("is-interactive");
@@ -468,6 +655,35 @@ function syncDisplayCanvasCursorClasses(
       hoverPoint && hitTestBootScreen(hoverPoint.pointX, hoverPoint.pointY, bootSnapshot) !== null,
     );
     displayCanvas.classList.toggle("is-clickable", hoveringRetry);
+    return;
+  }
+
+  if (routerState.activeScreen === "now-playing") {
+    const isInteractiveSurface =
+      nowPlayingState?.operatingMode === "playing" &&
+      !nowPlayingState?.detailsSheetOpen &&
+      !nowPlayingState?.playlistPickerOpen &&
+      !nowPlayingState?.quickActionsOpen;
+    const isPointerDragging = Boolean(
+      nowPlayingState?.pointerActive &&
+        (nowPlayingState?.pointerMode === "seek" ||
+          nowPlayingState?.pointerMode === "volume" ||
+          nowPlayingState?.pointerMode === "skip-drag" ||
+          nowPlayingState?.pointerMode === "queue-pull" ||
+          nowPlayingState?.pointerMode === "back-swipe" ||
+          (nowPlayingState?.pointerMode === "queue-list" &&
+            nowPlayingState?.pressedQueueRowIndex === null)),
+    );
+    const isHoveringTarget =
+      !isPointerDragging &&
+      Boolean(
+        hoverPoint &&
+          hitTestNowPlayingInteractive(hoverPoint.pointX, hoverPoint.pointY, nowPlayingState),
+      );
+
+    displayCanvas.classList.toggle("is-interactive", isInteractiveSurface);
+    displayCanvas.classList.toggle("is-dragging", isPointerDragging);
+    displayCanvas.classList.toggle("is-clickable", isHoveringTarget);
     return;
   }
 
@@ -517,6 +733,7 @@ function syncDisplayCanvasCursorClasses(
  */
 function reboot({ rescan = true, keepDelayFault = false } = {}) {
   clearScheduledPoll();
+  clearActiveCanvasPointer();
   bootSessionId += 1;
   const currentSessionId = bootSessionId;
 
@@ -528,8 +745,6 @@ function reboot({ rescan = true, keepDelayFault = false } = {}) {
     coverCache.clear();
   }
 
-  activePointerId = null;
-  pointerDownPoint = null;
   bootController = createBootController();
   router.reboot();
 
@@ -616,6 +831,7 @@ async function handleRescanLibrary() {
       catalogLoaded = true;
       coverCache.clear();
       libraryController.hydrateCatalog(latestCatalog);
+      nowPlayingController.hydrateCatalog(latestCatalog);
       if (typeof rescanResponse.payload.musicRoot === "string") {
         musicRootPath = rescanResponse.payload.musicRoot;
       }
@@ -648,6 +864,12 @@ async function handleRescanLibrary() {
 
 function handleNavigateLeft() {
   const routerState = router.getState();
+  if (routerState.activeScreen === "now-playing") {
+    nowPlayingController.skipTrack(-1);
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
   if (routerState.activeScreen === "library") {
     libraryController.stepDetent(-1);
     syncShellIfNeeded(false);
@@ -662,6 +884,12 @@ function handleNavigateLeft() {
 
 function handleNavigateRight() {
   const routerState = router.getState();
+  if (routerState.activeScreen === "now-playing") {
+    nowPlayingController.skipTrack(1);
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
   if (routerState.activeScreen === "library") {
     libraryController.stepDetent(1);
     syncShellIfNeeded(false);
@@ -675,7 +903,13 @@ function handleNavigateRight() {
 }
 
 function handleNavigateUp() {
-  if (router.getState().activeScreen === "library") {
+  const activeScreen = router.getState().activeScreen;
+  if (activeScreen === "now-playing") {
+    nowPlayingController.handleWheel(-1);
+    syncShellIfNeeded(false);
+    return;
+  }
+  if (activeScreen === "library") {
     if (libraryController.getRenderSnapshot().currentView?.kind === "albums") {
       libraryController.openFocusedAlbumTracks();
     } else {
@@ -686,7 +920,13 @@ function handleNavigateUp() {
 }
 
 function handleNavigateDown() {
-  if (router.getState().activeScreen === "library") {
+  const activeScreen = router.getState().activeScreen;
+  if (activeScreen === "now-playing") {
+    nowPlayingController.handleWheel(1);
+    syncShellIfNeeded(false);
+    return;
+  }
+  if (activeScreen === "library") {
     libraryController.stepDetent(1);
     syncShellIfNeeded(false);
   }
@@ -694,6 +934,12 @@ function handleNavigateDown() {
 
 function handleActivate() {
   const routerState = router.getState();
+  if (routerState.activeScreen === "now-playing") {
+    nowPlayingController.activateFocused();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
   if (routerState.activeScreen === "library") {
     libraryController.activateFocused();
     syncDisplayCanvasCursorClasses(lastHoverPoint);
@@ -709,13 +955,53 @@ function handleActivate() {
   } else if (homeState.launchedAppId === "now-playing" && homeState.playbackState === "idle") {
     homeController.jumpFromNotPlayingToLibrary();
   }
-  handoffHomeToLibraryIfLaunched();
+  handoffHomeAppIfLaunched();
   syncDisplayCanvasCursorClasses(lastHoverPoint);
   syncShellIfNeeded(false);
 }
 
+function handleSpaceKey() {
+  if (router.getState().activeScreen === "now-playing") {
+    nowPlayingController.togglePlayPause();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
+  handleActivate();
+}
+
+function handleToggleLyrics() {
+  if (router.getState().activeScreen === "now-playing") {
+    nowPlayingController.toggleLyrics();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+  }
+}
+
+function handleToggleTrackInfo() {
+  if (router.getState().activeScreen === "now-playing") {
+    nowPlayingController.toggleTrackDetails();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+  }
+}
+
+function handleToggleQueue() {
+  if (router.getState().activeScreen === "now-playing") {
+    nowPlayingController.toggleQueueSheet();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+  }
+}
+
 function handleNavigateBack() {
   const routerState = router.getState();
+  if (routerState.activeScreen === "now-playing") {
+    nowPlayingController.stepBack();
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
   if (routerState.activeScreen === "library") {
     libraryController.stepBack();
     syncDisplayCanvasCursorClasses(lastHoverPoint);
@@ -745,6 +1031,10 @@ const shellController = createShellController({
   onNavigateUp: handleNavigateUp,
   onNavigateDown: handleNavigateDown,
   onActivate: handleActivate,
+  onSpaceKey: handleSpaceKey,
+  onToggleLyrics: handleToggleLyrics,
+  onToggleTrackInfo: handleToggleTrackInfo,
+  onToggleQueue: handleToggleQueue,
   onNavigateBack: handleNavigateBack,
 });
 
@@ -784,6 +1074,8 @@ displayCanvas.addEventListener("pointerdown", (pointerEvent) => {
     homeController.handlePointerDown(displayPoint.pointX, displayPoint.pointY);
   } else if (activeScreen === "library") {
     libraryController.handlePointerDown(displayPoint.pointX, displayPoint.pointY);
+  } else if (activeScreen === "now-playing") {
+    nowPlayingController.handlePointerDown(displayPoint.pointX, displayPoint.pointY);
   }
   syncDisplayCanvasCursorClasses(displayPoint);
 });
@@ -798,6 +1090,8 @@ displayCanvas.addEventListener("pointermove", (pointerEvent) => {
       homeController.handlePointerMove(hoverPoint.pointX, hoverPoint.pointY);
     } else if (activeScreen === "library") {
       libraryController.handlePointerMove(hoverPoint.pointX, hoverPoint.pointY);
+    } else if (activeScreen === "now-playing") {
+      nowPlayingController.handlePointerMove(hoverPoint.pointX, hoverPoint.pointY);
     }
   }
   syncDisplayCanvasCursorClasses(hoverPoint);
@@ -818,7 +1112,7 @@ displayCanvas.addEventListener("pointerup", (pointerEvent) => {
   if (routerState.activeScreen === "home") {
     if (releasePoint) {
       homeController.handlePointerUp(releasePoint.pointX, releasePoint.pointY);
-      handoffHomeToLibraryIfLaunched();
+      handoffHomeAppIfLaunched();
       lastHoverPoint = releasePoint;
     } else {
       homeController.handlePointerCancel();
@@ -834,6 +1128,18 @@ displayCanvas.addEventListener("pointerup", (pointerEvent) => {
       lastHoverPoint = releasePoint;
     } else {
       libraryController.handlePointerCancel();
+    }
+    syncDisplayCanvasCursorClasses(lastHoverPoint);
+    syncShellIfNeeded(false);
+    return;
+  }
+
+  if (routerState.activeScreen === "now-playing") {
+    if (releasePoint) {
+      nowPlayingController.handlePointerUp(releasePoint.pointX, releasePoint.pointY);
+      lastHoverPoint = releasePoint;
+    } else {
+      nowPlayingController.handlePointerCancel();
     }
     syncDisplayCanvasCursorClasses(lastHoverPoint);
     syncShellIfNeeded(false);
@@ -876,6 +1182,8 @@ displayCanvas.addEventListener("pointercancel", (pointerEvent) => {
     homeController.handlePointerCancel();
   } else if (activeScreen === "library") {
     libraryController.handlePointerCancel();
+  } else if (activeScreen === "now-playing") {
+    nowPlayingController.handlePointerCancel();
   }
   syncDisplayCanvasCursorClasses(lastHoverPoint);
 });
@@ -889,6 +1197,24 @@ displayCanvas.addEventListener(
   "wheel",
   (wheelEvent) => {
     const routerState = router.getState();
+    if (routerState.activeScreen === "now-playing") {
+      const nowPlayingState = nowPlayingController.getRenderSnapshot();
+      if (
+        nowPlayingState.operatingMode !== "playing" ||
+        nowPlayingState.detailsSheetOpen ||
+        nowPlayingState.playlistPickerOpen
+      ) {
+        return;
+      }
+      wheelEvent.preventDefault();
+      const wheelDelta = wheelEvent.deltaY !== 0 ? wheelEvent.deltaY : wheelEvent.deltaX;
+      if (wheelDelta !== 0) {
+        nowPlayingController.handleWheel(wheelDelta);
+        syncShellIfNeeded(false);
+      }
+      return;
+    }
+
     const homeState = homeController.getRenderSnapshot();
     const canWheelHome = routerState.activeScreen === "home" && homeState.launchTarget === 0;
     const canWheelLibrary = routerState.activeScreen === "library";
@@ -924,6 +1250,7 @@ function renderDisplayFrame(
   routerState,
   homeState,
   libraryState,
+  nowPlayingState,
   audioState,
 ) {
   const pixelRatio = syncCanvasBackingResolution();
@@ -946,6 +1273,14 @@ function renderDisplayFrame(
 
   if (routerState.activeScreen === "boot") {
     renderBootScreen(drawingContext, bootSnapshot, palette);
+  } else if (routerState.activeScreen === "now-playing") {
+    const catalogAlbums = latestCatalog?.albums || libraryState?.catalog?.albums || [];
+    renderNowPlayingScreen(drawingContext, nowPlayingState, {
+      appearance: shellState.appearance,
+      palette,
+      coverCache,
+      catalogAlbums,
+    });
   } else if (routerState.activeScreen === "library") {
     renderLibraryScreen(drawingContext, libraryState, {
       appearance: shellState.appearance,
@@ -1008,22 +1343,36 @@ function animationTick(timestampMs) {
 
   if (routerState.activeScreen === "home") {
     homeController.step(frameDeltaSeconds);
-    if (handoffHomeToLibraryIfLaunched()) {
+    if (handoffHomeAppIfLaunched()) {
       routerState = router.getState();
     }
   } else if (routerState.activeScreen === "library") {
     libraryController.step(frameDeltaSeconds);
+  } else if (routerState.activeScreen === "now-playing") {
+    nowPlayingController.step(frameDeltaSeconds);
+    if (!nowPlayingController.getRenderSnapshot().isSeeking) {
+      nowPlayingController.syncAudioState(audioState);
+    }
   }
 
   const homeState = homeController.getRenderSnapshot();
   const libraryState = libraryController.getRenderSnapshot();
-  renderDisplayFrame(bootSnapshot, routerState, homeState, libraryState, audioState);
+  const nowPlayingState = nowPlayingController.getRenderSnapshot();
+  renderDisplayFrame(
+    bootSnapshot,
+    routerState,
+    homeState,
+    libraryState,
+    nowPlayingState,
+    audioState,
+  );
   syncDisplayCanvasCursorClasses(
     lastHoverPoint,
     routerState,
     bootSnapshot,
     homeState,
     libraryState,
+    nowPlayingState,
   );
   syncShellIfNeeded(false);
 

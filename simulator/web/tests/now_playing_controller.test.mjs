@@ -1423,4 +1423,142 @@ describe("createNowPlayingController lyrics playback, back navigation, and negat
     standaloneController.enterFromLibrary({ returnScreen: "library", audioState: null });
     assert.equal(standaloneController.getRenderSnapshot().operatingMode, "idle");
   });
+
+  test("albumTechSpecs provides fallback format, sampleRate, bitrate, and mbPerMin while preserving explicit track fields", () => {
+    const bareTrack = {
+      id: "bare-1",
+      title: "01 Bare",
+      albumId: "album-dsd",
+      durationSeconds: 120,
+      format: "DSD 128",
+    };
+    const albumEntry = {
+      id: "album-dsd",
+      title: "Tape Sessions",
+      artist: "Studio Ensemble",
+      genre: "Electronic",
+      year: 2025,
+      tracks: [bareTrack],
+    };
+    const albumTechSpec = {
+      format: "DSD 64",
+      sampleRate: "2.8 MHZ",
+      bitrate: "5,644 KBPS",
+      mbPerMin: 40.0,
+    };
+
+    const directDetails = enrichTrackDetails(bareTrack, albumEntry, 4, 2, albumTechSpec);
+    assert.equal(directDetails.format, "DSD 128");
+    assert.equal(directDetails.sampleRate, "2.8 MHZ");
+    assert.equal(directDetails.bitrate, "5,644 KBPS");
+    assert.equal(directDetails.fileSize, "80.0 MB");
+
+    const sparseCatalog = {
+      albums: [albumEntry],
+      allTracks: [bareTrack],
+      playlists: [],
+      albumTechSpecs: {
+        "album-dsd": albumTechSpec,
+      },
+      lyricsCatalog: {},
+    };
+    const { nowPlayingController } = createNowPlayingTestHarness({
+      catalog: sparseCatalog,
+      sourceSpec: { trackId: "bare-1", queueSource: "album", albumId: "album-dsd" },
+    });
+    const hydratedDetails = nowPlayingController.getRenderSnapshot().trackDetails;
+    assert.equal(hydratedDetails.format, "DSD 128");
+    assert.equal(hydratedDetails.sampleRate, "2.8 MHZ");
+    assert.equal(hydratedDetails.bitrate, "5,644 KBPS");
+    assert.equal(hydratedDetails.fileSize, "80.0 MB");
+  });
+
+  test("exposes imperative togglePlayPause, toggleLyrics, toggleTrackDetails, toggleQueueSheet, setPlaylists, and updateTrackFavorite", () => {
+    const idleHarness = createNowPlayingTestHarness({ sourceSpec: null });
+    idleHarness.nowPlayingController.togglePlayPause();
+    idleHarness.nowPlayingController.toggleLyrics();
+    idleHarness.nowPlayingController.toggleTrackDetails();
+    idleHarness.nowPlayingController.toggleQueueSheet();
+    const idleSnapshot = idleHarness.nowPlayingController.getRenderSnapshot();
+    assert.equal(idleHarness.callbackLogs.togglePlayPauseCalls, 0);
+    assert.equal(idleSnapshot.lyricsOpen, false);
+    assert.equal(idleSnapshot.detailsSheetOpen, false);
+    assert.equal(idleSnapshot.queueSheetOpen, false);
+
+    const { audioEngine, nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      sourceSpec: { trackId: "t2", queueSource: "all-songs" },
+    });
+
+    // togglePlayPause updates playback, pulse, and toast
+    nowPlayingController.togglePlayPause();
+    assert.equal(callbackLogs.togglePlayPauseCalls, 1);
+    assert.equal(nowPlayingController.getRenderSnapshot().isPlaying, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().playPausePulseAlpha, 1);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "PAUSED");
+
+    nowPlayingController.togglePlayPause();
+    assert.equal(callbackLogs.togglePlayPauseCalls, 2);
+    assert.equal(nowPlayingController.getRenderSnapshot().isPlaying, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "PLAYING");
+
+    // toggleLyrics closes Quick Actions/sheets and toggles lyricsOpen
+    openQuickActionsViaTap(nowPlayingController);
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, true);
+    nowPlayingController.toggleLyrics();
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsOpen, true);
+
+    // toggleTrackDetails closes Quick Actions/queue/picker and toggles detailsSheetOpen
+    nowPlayingController.toggleTrackDetails();
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsOpen, true);
+    nowPlayingController.toggleTrackDetails();
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, false);
+
+    // toggleLyrics off closes lyrics and any active sheets
+    nowPlayingController.toggleTrackDetails();
+    nowPlayingController.toggleLyrics();
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsOpen, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, false);
+
+    // toggleQueueSheet opens anchored to active queueIndex and closes on second call
+    openQuickActionsViaTap(nowPlayingController);
+    nowPlayingController.toggleQueueSheet();
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueScrollPosition, 1);
+    nowPlayingController.toggleQueueSheet();
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+
+    // setPlaylists replaces cloned playlists cleanly and handles null safely
+    const externalPlaylists = [{ id: "p-ext", name: "External Mix", trackIds: ["t1"] }];
+    nowPlayingController.setPlaylists(externalPlaylists);
+    externalPlaylists[0].trackIds.push("t3");
+    assert.deepEqual(nowPlayingController.getRenderSnapshot().playlists, [
+      { id: "p-ext", name: "External Mix", trackIds: ["t1"] },
+    ]);
+    nowPlayingController.setPlaylists(null);
+    assert.deepEqual(nowPlayingController.getRenderSnapshot().playlists, []);
+
+    // updateTrackFavorite syncs activeTrack, queueTracks, and cached track cleanly across syncAudioState
+    assert.equal(nowPlayingController.getRenderSnapshot().activeTrack.isFavorite, true);
+    nowPlayingController.updateTrackFavorite("t2", false);
+    audioEngine.updateTrackFavorite("t2", false);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    const afterUnfavorite = nowPlayingController.getRenderSnapshot();
+    assert.equal(afterUnfavorite.activeTrack.isFavorite, false);
+    assert.equal(
+      afterUnfavorite.queueTracks.find((trackEntry) => trackEntry.id === "t2").isFavorite,
+      false,
+    );
+    nowPlayingController.updateTrackFavorite("t1", true);
+    assert.equal(
+      nowPlayingController
+        .getRenderSnapshot()
+        .queueTracks.find((trackEntry) => trackEntry.id === "t1").isFavorite,
+      true,
+    );
+    nowPlayingController.updateTrackFavorite("", true);
+    nowPlayingController.updateTrackFavorite(null, false);
+  });
 });

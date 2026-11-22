@@ -148,7 +148,7 @@ export function createShellController(callbacks = {}) {
       return;
     }
 
-    if (pressedKey === "Enter" || pressedKey === " ") {
+    if (pressedKey === "Enter") {
       if (
         !isEditableEventTarget(keyboardEvent.target) &&
         !(keyboardEvent.target instanceof HTMLButtonElement) &&
@@ -156,6 +156,22 @@ export function createShellController(callbacks = {}) {
       ) {
         keyboardEvent.preventDefault();
         callbacks.onActivate?.();
+      }
+      return;
+    }
+
+    if (pressedKey === " ") {
+      if (
+        !isEditableEventTarget(keyboardEvent.target) &&
+        !(keyboardEvent.target instanceof HTMLButtonElement) &&
+        !devMenuOpen
+      ) {
+        keyboardEvent.preventDefault();
+        if (typeof callbacks.onSpaceKey === "function") {
+          callbacks.onSpaceKey();
+        } else {
+          callbacks.onActivate?.();
+        }
       }
       return;
     }
@@ -179,6 +195,15 @@ export function createShellController(callbacks = {}) {
     } else if (normalizedKey === "g") {
       keyboardEvent.preventDefault();
       callbacks.onToggleSafeGuides?.();
+    } else if (normalizedKey === "l") {
+      keyboardEvent.preventDefault();
+      callbacks.onToggleLyrics?.();
+    } else if (normalizedKey === "i" || normalizedKey === "d") {
+      keyboardEvent.preventDefault();
+      callbacks.onToggleTrackInfo?.();
+    } else if (normalizedKey === "q") {
+      keyboardEvent.preventDefault();
+      callbacks.onToggleQueue?.();
     }
   }
 
