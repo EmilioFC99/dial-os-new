@@ -8,6 +8,7 @@ import { clamp } from "./geometry.js";
 
 const DEFAULT_TRACK_DURATION_SECONDS = 180;
 const DEFAULT_VOLUME_LEVEL = 0.62;
+const AUDIO_READY_STATE_METADATA = 1;
 
 export const PLAY_MODES = Object.freeze(["sequential", "shuffle", "repeat-all", "repeat-one"]);
 
@@ -147,6 +148,7 @@ export function createAudioEngine({ createAudioElement } = {}) {
   let playMode = PLAY_MODES[0];
   let elapsedSeconds = 0;
   let durationSeconds = 0;
+  let pendingSeekSeconds = null;
   let volumeLevel = DEFAULT_VOLUME_LEVEL;
   let error = null;
   let cachedAlbumByIdMap = new Map();
@@ -185,6 +187,7 @@ export function createAudioEngine({ createAudioElement } = {}) {
     activeTrack = nextTrack;
     activeAlbum = cachedAlbumByIdMap.get(nextTrack.albumId) || null;
     elapsedSeconds = 0;
+    pendingSeekSeconds = null;
     durationSeconds =
       typeof nextTrack.durationSeconds === "number" &&
       Number.isFinite(nextTrack.durationSeconds) &&
@@ -226,6 +229,7 @@ export function createAudioEngine({ createAudioElement } = {}) {
 
     if (playMode === "repeat-one") {
       elapsedSeconds = 0;
+      pendingSeekSeconds = null;
       isPlaying = true;
       playbackState = "playing";
       if (audioElement) {
@@ -279,6 +283,7 @@ export function createAudioEngine({ createAudioElement } = {}) {
 
     element.addEventListener("timeupdate", () => {
       if (
+        pendingSeekSeconds === null &&
         typeof element.currentTime === "number" &&
         Number.isFinite(element.currentTime) &&
         element.currentTime >= 0
@@ -295,6 +300,17 @@ export function createAudioEngine({ createAudioElement } = {}) {
         element.duration > 0
       ) {
         durationSeconds = element.duration;
+      }
+      if (pendingSeekSeconds !== null) {
+        const upperDuration = durationSeconds > 0 ? durationSeconds : 0;
+        const targetPendingSeek = clamp(pendingSeekSeconds, 0, upperDuration);
+        pendingSeekSeconds = null;
+        elapsedSeconds = targetPendingSeek;
+        try {
+          element.currentTime = targetPendingSeek;
+        } catch (seekError) {
+          /* Ignore transient seek error if audio element is not yet seekable */
+        }
       }
     });
 
@@ -450,6 +466,7 @@ export function createAudioEngine({ createAudioElement } = {}) {
         ? genreAlbumIds.slice()
         : [];
 
+    pendingSeekSeconds = null;
     loadQueueTrackAt(selectedIndex, { autoplay: true });
   }
 
@@ -590,10 +607,18 @@ export function createAudioEngine({ createAudioElement } = {}) {
     const clampedSeconds = clamp(seconds, 0, upperDuration);
     elapsedSeconds = clampedSeconds;
     if (audioElement) {
-      try {
-        audioElement.currentTime = clampedSeconds;
-      } catch (seekError) {
-        /* Ignore transient seek error before metadata loads */
+      const elementReady =
+        typeof audioElement.readyState !== "number" ||
+        audioElement.readyState >= AUDIO_READY_STATE_METADATA;
+      if (elementReady) {
+        pendingSeekSeconds = null;
+        try {
+          audioElement.currentTime = clampedSeconds;
+        } catch (seekError) {
+          /* Ignore transient seek error before metadata loads */
+        }
+      } else {
+        pendingSeekSeconds = clampedSeconds;
       }
     }
   }
@@ -624,22 +649,23 @@ export function createAudioEngine({ createAudioElement } = {}) {
       return;
     }
 
-    if (
-      audioElement &&
-      !audioElement.paused &&
-      typeof audioElement.currentTime === "number" &&
-      Number.isFinite(audioElement.currentTime) &&
-      audioElement.currentTime > 0
-    ) {
+    if (audioElement) {
       if (
-        typeof audioElement.duration === "number" &&
-        Number.isFinite(audioElement.duration) &&
-        audioElement.duration > 0
+        !audioElement.paused &&
+        typeof audioElement.currentTime === "number" &&
+        Number.isFinite(audioElement.currentTime) &&
+        audioElement.currentTime > 0
       ) {
-        durationSeconds = audioElement.duration;
+        if (
+          typeof audioElement.duration === "number" &&
+          Number.isFinite(audioElement.duration) &&
+          audioElement.duration > 0
+        ) {
+          durationSeconds = audioElement.duration;
+        }
+        const upperDuration = durationSeconds > 0 ? durationSeconds : audioElement.currentTime;
+        elapsedSeconds = clamp(audioElement.currentTime, 0, upperDuration);
       }
-      const upperDuration = durationSeconds > 0 ? durationSeconds : audioElement.currentTime;
-      elapsedSeconds = clamp(audioElement.currentTime, 0, upperDuration);
       return;
     }
 

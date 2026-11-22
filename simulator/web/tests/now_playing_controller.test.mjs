@@ -666,6 +666,67 @@ describe("audio_engine.js play modes, queue selection, and metadata preservation
     assert.equal(headlessEngine.getState().queueIndex, 0);
     assert.equal(headlessEngine.getState().isPlaying, true);
   });
+
+  test("defers seekTo until loadedmetadata when readyState is 0 and locks clock to attached audio element", () => {
+    const catalog = buildNowPlayingTestCatalog();
+    const stubAudio = createMockAudioStub();
+    stubAudio.readyState = 0;
+
+    const audioEngine = createAudioEngine({ createAudioElement: () => stubAudio });
+    audioEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, catalog);
+
+    // Attached element at currentTime === 0 must not drift synthetically during buffering or pause
+    audioEngine.step(0.5);
+    assert.equal(audioEngine.getState().elapsedSeconds, 0);
+
+    stubAudio.paused = true;
+    audioEngine.step(0.5);
+    assert.equal(audioEngine.getState().elapsedSeconds, 0);
+
+    // Seeking while readyState === 0 defers audioElement.currentTime until loadedmetadata
+    audioEngine.seekTo(42);
+    assert.equal(audioEngine.getState().elapsedSeconds, 42);
+    assert.equal(stubAudio.currentTime, 0);
+
+    audioEngine.step(0.5);
+    assert.equal(audioEngine.getState().elapsedSeconds, 42);
+    assert.equal(stubAudio.currentTime, 0);
+
+    stubAudio.readyState = 1;
+    stubAudio.duration = 180;
+    stubAudio.emit("loadedmetadata");
+    assert.equal(stubAudio.currentTime, 42);
+    assert.equal(audioEngine.getState().elapsedSeconds, 42);
+
+    // Deferred seek also clamps against updated loadedmetadata duration and resets on track switch
+    stubAudio.readyState = 0;
+    stubAudio.currentTime = 0;
+    audioEngine.seekTo(160);
+    assert.equal(audioEngine.getState().elapsedSeconds, 160);
+    assert.equal(stubAudio.currentTime, 0);
+
+    stubAudio.readyState = 1;
+    stubAudio.duration = 120;
+    stubAudio.emit("loadedmetadata");
+    assert.equal(stubAudio.currentTime, 120);
+    assert.equal(audioEngine.getState().elapsedSeconds, 120);
+
+    // Pending seek is cleared when loading another track via skipTrack or playTrackFromSource
+    stubAudio.readyState = 0;
+    audioEngine.seekTo(55);
+    audioEngine.skipTrack(1);
+    stubAudio.readyState = 1;
+    stubAudio.duration = 200;
+    stubAudio.emit("loadedmetadata");
+    assert.equal(stubAudio.currentTime, 0);
+    assert.equal(audioEngine.getState().elapsedSeconds, 0);
+
+    // Live playback syncs elapsedSeconds from attached element once currentTime > 0
+    stubAudio.paused = false;
+    stubAudio.currentTime = 17.5;
+    audioEngine.step(0.5);
+    assert.equal(audioEngine.getState().elapsedSeconds, 17.5);
+  });
 });
 
 describe("now_playing_controller.js constants and pure helpers", () => {
