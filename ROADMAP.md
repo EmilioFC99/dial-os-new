@@ -17,7 +17,7 @@ Every phase follows the same five steps before moving to the next:
 ## Guardrails
 
 - **Host & Target:** Apple Silicon macOS (`zig cc` targeting `mipsel-linux-musleabihf`, `EF_MIPS_NAN2008`); FiiO Snowsky Disc stock firmware `V2.57` only; GPL-3.0-or-later.
-- **First-Principles V2.57 Rule (see [AGENTS.md](AGENTS.md)):** Direct custom `360x360` XRGB8888 2D renderer (no LVGL). Inspect stock `V2.57` binaries directly — never blindly imitate stock `mq_ui`, `diskOS`, or `dial-os`. Only reuse the 5 verified USB Mask-ROM / SquashFS binaries in `tools/vendor/`.
+- **First-Principles V2.57 Rule (see [AGENTS.md](AGENTS.md)):** Direct custom `360x360` XRGB8888 2D renderer (no LVGL). Inspect stock `V2.57` binaries directly — never blindly imitate stock `mq_ui`. Only reuse the 5 verified USB Mask-ROM / SquashFS binaries in `tools/vendor/`.
 - **SD-Card Non-Destruction:** Never ship unpatched `mq_player` (`rm -rf %s` -> `rmdir  %s`), never modify user music files, write DialOS state only inside `.dial-os/` atomically (`temp` + `fsync` + `rename`), and disable `mq_player`'s unsynced idle `poweroff -f` (`0664=0`).
 - **No Theme Leakage:** Zero theme names in file names, identifiers, or strings; use semantic **Dark Mode** and **Light Mode** tokens only.
 - **Hardware-Verified Only:** No phase is complete until verified on the real FiiO Snowsky Disc (`V2.57`).
@@ -30,32 +30,36 @@ Every phase follows the same five steps before moving to the next:
 - Clean-room `./dial-os-mac` CLI (`build`, `flash`, `sd-update`, `use-stock`, `restore-stock`) with microSD hot-reload hook and `mq_player` SD safety patch.
 - Real V2.57 hardware baseline recorded in [docs/benchmarks/m0-v257-results.md](docs/benchmarks/m0-v257-results.md) (`270 fps` triple-buffer rotation, `~38–40 Hz` `cst816t` touch, clean `0100` M3U handoff, `147`-frame golden IPC trace).
 
-### Phase 1 — Boot Screen
-- First-principles startup sequence, display initialization, boot screen animation/status, `mq_player` readiness handoff, watchdog survival, and crash logging.
+### Phase 1 — Boot Loadscreen & Core Startup *(Done)*
+- First-principles startup sequence, `360x360` `180°` triple-buffered display initialization, animated boot loadscreen, `mq_player` `aa24` readiness handoff, idle `poweroff -f` disable (`0664=0`), physical key handling (sleep/wake, poweroff, volume), watchdog survival, and atomic crash logging.
 
-### Phase 2 — Mass Storage Mode
-- Safe USB file transfer mode (mounting/unmounting SD cleanly with zero corruption) and basic physical/touch input to enter and exit.
+### Phase 2 — Theme & Themed Boot Screen
+- Semantic **Dark Mode** and **Light Mode** design tokens (palette, surfaces, typography scale, spacing, motion curves), typography via rootfs `SourceHanSans-Regular.ttc` (Latin/CJK/Cyrillic), and shared 2D round-screen drawing primitives (anti-aliased arcs, circles, pills, icons, bezel clipping).
+- Upgrade the **Boot Screen** (plus warning, ready, crash, and shutdown states) onto the theme and visual system, hardware-verifying the theme immediately on the real Disc (`V2.57`).
 
-### Phase 3 — Theme & Visual System
-- Semantic **Dark Mode** and **Light Mode** design tokens, typography (CJK/Cyrillic via rootfs font), shared 2D drawing primitives, and tactile round-screen gesture rules.
+### Phase 3 — Home Menu
+- `cst816t` round-screen touch and rim gesture layer (tuned for `~38–40 Hz` native sample rate, consistent left-edge back swipe).
+- Curved mechanical app launcher (`Now Playing`, `Library`, `Modes`, `Settings`) with circular pebbles, bezel tick marks, detented carousel motion, screen transitions, and themed placeholders for unbuilt destinations.
 
-### Phase 4 — Library
-- Browsing and indexing large microSD music collections (`Favorites`, `Playlists`, `Artists`, `Albums`, `Genres`, `All songs`, letter seek) with screen-bounded RAM and launching playback via `mq_player`.
+### Phase 4 — Modes: Storage Mode
+- `Modes` entry screen from the Home Menu (structured to host future `1.x` modes, starting with Storage Mode).
+- Safe USB Mass Storage Mode (clean SD unmount/remount with zero corruption, live transfer status, and clean physical/touch exit back to Home).
 
-### Phase 5 — Now Playing
-- Reliable playback controls, classic playback modes (linear/sequential, shuffle, repeat all, repeat one), spinning album art, progress ring & scrub, volume HUD, Quick Actions, Track Details, and Lyrics.
+### Phase 5 — Library
+- Browsing and indexing large microSD music collections (`Favorites`, `Playlists`, `Artists`, `Albums` cover carousel, `Genres`, `All songs`, letter seek) with screen-bounded RAM, calm empty states, and launching playback via `mq_player` (`0100` M3U handoff).
 
-### Phase 6 — Home Screen
-- Curved mechanical app launcher (`Now Playing`, `Library`, `Modes`, `Settings`), pull-down Control Center, and screen transitions.
+### Phase 6 — Now Playing
+- Full-bleed spinning album art (seamless expansion from Home/Albums), center spindle progress ring and scrub, reliable playback controls, classic playback modes (linear/sequential, shuffle, repeat all, repeat one), right-edge volume HUD, Quick Actions overlay, Track Details sheet, and synced/unsynced Lyrics.
 
 ### Phase 7 — Settings
-- Hardware-verified Audio (presets/EQ, DAC filter, gain, gapless, balance, volume limit), Display (brightness, Dark/Light mode, vinyl spin, screen timeout), Power & System (battery, idle power-off, rescan), and Bluetooth last.
+- Hardware-verified Audio (presets/EQ, DAC filter, gain, gapless, balance, volume limit), Display (brightness slider, Dark/Light mode toggle, vinyl spin, screen timeout), Power & System (battery, power draw, idle power-off, live library rescan), and Bluetooth last.
 
 ---
 
 ## Future (`1.x`)
 
 Planned only after `1.0` (Phases 1–7) is rock-solid on hardware:
+- Pull-down Control Center
 - Queue & Folder Browser polish
 - Wi-Fi & easy provisioning
 - Signed Wi-Fi OTA updates
