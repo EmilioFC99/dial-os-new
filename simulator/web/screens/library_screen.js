@@ -89,6 +89,10 @@ const CRATE_PEEK_BOTTOM_Y = 212;
 const CRATE_SLEEVE_LEFT_X = 108;
 const CRATE_SLEEVE_TOP_Y = 90;
 const CRATE_SLEEVE_BOTTOM_Y = 216;
+const CRATE_SWIPE_UP_HINT_HALF_WIDTH_PX = 58;
+const CRATE_SWIPE_UP_HINT_TOP_Y = 302;
+const CRATE_SWIPE_UP_HINT_BOTTOM_Y = 346;
+const CRYSTAL_OVERLAY_TOP_Y = HEADER_CLIP_TOP_Y - 2;
 
 function resolvePalette(appearance, palette) {
   if (palette && typeof palette === "object") {
@@ -1430,6 +1434,241 @@ function renderLibraryCurvedList(
   }
 }
 
+function drawCrateAlbumSleeveWithDisc(
+  drawingContext,
+  album,
+  {
+    centerX,
+    centerY,
+    sleeveSize,
+    focusWeight,
+    delta,
+    baseAlpha,
+    vinylRotationRadians,
+    palette,
+    appearance,
+    coverCache,
+  },
+) {
+  if (!album || baseAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+
+  const isDark = appearance === "dark";
+  const sleeveHalf = sleeveSize / 2;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = baseAlpha;
+
+  if (focusWeight > CRATE_DISC_PEEK_THRESHOLD) {
+    const peekWeight = easeOutCubic(
+      normalizeRange(focusWeight, CRATE_DISC_PEEK_THRESHOLD, 1.0),
+    );
+    const discPeekX = centerX + lerp(sleeveHalf * 0.12, sleeveHalf * 0.42 + 22, peekWeight);
+    const discRadius = sleeveHalf * 0.88;
+    const discAlpha = baseAlpha * peekWeight * 0.96;
+    drawLibraryVinylDisc(
+      drawingContext,
+      album,
+      discPeekX,
+      centerY,
+      discRadius,
+      vinylRotationRadians,
+      palette,
+      appearance,
+      discAlpha,
+      coverCache,
+    );
+
+    drawingContext.save();
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = 1.4;
+    drawingContext.globalAlpha = baseAlpha * peekWeight * 0.85;
+    drawingContext.beginPath();
+    drawingContext.arc(discPeekX, centerY, discRadius + 0.8, -Math.PI * 0.44, Math.PI * 0.44);
+    drawingContext.stroke();
+    drawingContext.restore();
+  }
+
+  drawingContext.save();
+  drawingContext.translate(centerX, centerY);
+
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(-sleeveHalf, -sleeveHalf, sleeveSize, sleeveSize);
+  drawingContext.clip();
+
+  drawLibraryAlbumArtworkMotif(
+    drawingContext,
+    album,
+    sleeveHalf,
+    palette,
+    appearance,
+    coverCache,
+  );
+
+  const glareShift = delta * 26;
+  drawingContext.fillStyle = isDark ? "rgba(255, 255, 255, 0.11)" : "rgba(255, 255, 255, 0.30)";
+  drawingContext.beginPath();
+  drawingContext.moveTo(-sleeveHalf * 0.95 + glareShift, -sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf * 0.38 + glareShift, -sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf * 1.12 + glareShift, sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf * 1.68 + glareShift, sleeveHalf);
+  drawingContext.closePath();
+  drawingContext.fill();
+  drawingContext.restore();
+
+  drawingContext.strokeStyle = isDark
+    ? focusWeight > 0.5
+      ? "rgba(245, 250, 255, 0.78)"
+      : "rgba(215, 228, 246, 0.52)"
+    : focusWeight > 0.5
+      ? "rgba(46, 50, 56, 0.68)"
+      : "rgba(46, 50, 56, 0.42)";
+  drawingContext.lineWidth = focusWeight > 0.5 ? 1.6 : 1.15;
+  drawingContext.strokeRect(-sleeveHalf + 0.5, -sleeveHalf + 0.5, sleeveSize - 1, sleeveSize - 1);
+
+  if (focusWeight > 0.5) {
+    const armLength = 12;
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = 2.3;
+    drawingContext.globalAlpha = baseAlpha * focusWeight;
+
+    drawingContext.beginPath();
+    drawingContext.moveTo(-sleeveHalf, -sleeveHalf + armLength);
+    drawingContext.lineTo(-sleeveHalf, -sleeveHalf);
+    drawingContext.lineTo(-sleeveHalf + armLength, -sleeveHalf);
+    drawingContext.moveTo(sleeveHalf - armLength, sleeveHalf);
+    drawingContext.lineTo(sleeveHalf, sleeveHalf);
+    drawingContext.lineTo(sleeveHalf, sleeveHalf - armLength);
+    drawingContext.stroke();
+  }
+
+  drawingContext.restore();
+  drawingContext.restore();
+}
+
+function drawCrateSwipeUpIndicator(
+  drawingContext,
+  clockSeconds,
+  pullProgress,
+  alpha,
+  palette,
+  appearance,
+) {
+  if (alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+
+  const isDark = appearance === "dark";
+  const safeClock = Number.isFinite(clockSeconds) ? clockSeconds : 0;
+  const clampedPull = clamp(pullProgress, 0, 1);
+  const floatOffsetY =
+    Math.sin(safeClock * 2.8) * 1.8 * (1 - clampedPull) - clampedPull * 4;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+
+  const chevronApexY = 309 + floatOffsetY;
+  drawingContext.lineCap = "round";
+  drawingContext.lineJoin = "round";
+
+  drawingContext.strokeStyle = palette.signalHighlight;
+  drawingContext.lineWidth = 1.8;
+  drawingContext.beginPath();
+  drawingContext.moveTo(DISPLAY_CENTER_PX - 6.5, chevronApexY + 4.5);
+  drawingContext.lineTo(DISPLAY_CENTER_PX, chevronApexY);
+  drawingContext.lineTo(DISPLAY_CENTER_PX + 6.5, chevronApexY + 4.5);
+  drawingContext.stroke();
+
+  drawingContext.strokeStyle = isDark
+    ? "rgba(235, 245, 255, 0.34)"
+    : "rgba(46, 50, 56, 0.34)";
+  drawingContext.lineWidth = 1.25;
+  drawingContext.beginPath();
+  drawingContext.moveTo(DISPLAY_CENTER_PX - 4.5, chevronApexY + 8.5);
+  drawingContext.lineTo(DISPLAY_CENTER_PX, chevronApexY + 5);
+  drawingContext.lineTo(DISPLAY_CENTER_PX + 4.5, chevronApexY + 8.5);
+  drawingContext.stroke();
+
+  drawingContext.font = `700 8.5px ${FONT_MONO}`;
+  drawingContext.fillStyle = clampedPull > 0.15 ? palette.signalHighlight : palette.inkSecondary;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillText("SWIPE UP \u00b7 TRACKS", DISPLAY_CENTER_PX, 328);
+
+  drawingContext.restore();
+}
+
+function drawAlbumTracklistCrystalScreen(
+  drawingContext,
+  sheetRevealProgress,
+  alpha,
+  palette,
+  appearance,
+) {
+  if (alpha <= CONTENT_VISIBILITY_THRESHOLD || sheetRevealProgress <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+
+  const isDark = appearance === "dark";
+  const revealEase = easeOutExpo(clamp(sheetRevealProgress, 0, 1));
+  const sheetTopY = lerp(DISPLAY_DIAMETER_PX - 44, CRYSTAL_OVERLAY_TOP_Y, revealEase);
+  const sheetHeight = DISPLAY_DIAMETER_PX - sheetTopY;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+
+  const glassGradient = drawingContext.createLinearGradient(0, sheetTopY, 0, DISPLAY_DIAMETER_PX);
+  if (isDark) {
+    glassGradient.addColorStop(0, "rgba(10, 13, 19, 0.80)");
+    glassGradient.addColorStop(0.55, "rgba(8, 11, 16, 0.74)");
+    glassGradient.addColorStop(1, "rgba(6, 9, 14, 0.84)");
+  } else {
+    glassGradient.addColorStop(0, "rgba(239, 243, 248, 0.84)");
+    glassGradient.addColorStop(0.55, "rgba(235, 240, 246, 0.78)");
+    glassGradient.addColorStop(1, "rgba(229, 234, 242, 0.86)");
+  }
+  drawingContext.fillStyle = glassGradient;
+  drawingContext.fillRect(0, sheetTopY, DISPLAY_DIAMETER_PX, sheetHeight);
+
+  /* Crisp diagonal crystal refraction sheen across the sliding glass sheet */
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(0, sheetTopY, DISPLAY_DIAMETER_PX, sheetHeight);
+  drawingContext.clip();
+  drawingContext.fillStyle = isDark
+    ? "rgba(225, 238, 255, 0.035)"
+    : "rgba(255, 255, 255, 0.24)";
+  drawingContext.beginPath();
+  drawingContext.moveTo(42, sheetTopY);
+  drawingContext.lineTo(136, sheetTopY);
+  drawingContext.lineTo(54, DISPLAY_DIAMETER_PX);
+  drawingContext.lineTo(-40, DISPLAY_DIAMETER_PX);
+  drawingContext.closePath();
+  drawingContext.fill();
+  drawingContext.restore();
+
+  drawingContext.strokeStyle = isDark
+    ? "rgba(235, 245, 255, 0.24)"
+    : "rgba(46, 50, 56, 0.22)";
+  drawingContext.lineWidth = 1.25;
+  drawingContext.beginPath();
+  drawingContext.moveTo(48, sheetTopY + 0.5);
+  drawingContext.lineTo(DISPLAY_DIAMETER_PX - 48, sheetTopY + 0.5);
+  drawingContext.stroke();
+
+  drawingContext.fillStyle = palette.hairlineStrong;
+  drawingContext.fillRect(
+    DISPLAY_CENTER_PX - TOP_HANDLE_HALF_WIDTH_PX,
+    sheetTopY + 6,
+    TOP_HANDLE_HALF_WIDTH_PX * 2,
+    TOP_HANDLE_HEIGHT_PX,
+  );
+
+  drawingContext.restore();
+}
+
 function renderLibraryAlbumCrate(
   drawingContext,
   viewEntry,
@@ -1445,11 +1684,12 @@ function renderLibraryAlbumCrate(
   const clockSeconds = Number.isFinite(libraryState.idleClockSeconds)
     ? libraryState.idleClockSeconds
     : 0;
-  const isDark = appearance === "dark";
   const launchPartEase = easeInOutCubic(normalizeRange(vinylLaunchProgress, 0.0, 0.50));
+  const pullUpProgress = clamp(Number(libraryState.cratePullUpProgress ?? 0), 0, 1);
+  const pullIsolationEase = easeOutCubic(pullUpProgress);
   const focusedIndex = clamp(Math.round(scrollPosition), 0, Math.max(0, albums.length - 1));
 
-  const shelfAlpha = contentAlpha * (1 - launchPartEase);
+  const shelfAlpha = contentAlpha * (1 - launchPartEase) * (1 - pullIsolationEase);
   if (shelfAlpha > CONTENT_VISIBILITY_THRESHOLD) {
     drawingContext.save();
     drawingContext.globalAlpha = shelfAlpha * 0.45;
@@ -1484,7 +1724,7 @@ function renderLibraryAlbumCrate(
     const launchSideSpread = !isFocusedTarget
       ? Math.sign(delta || 1) * 145 * launchPartEase
       : 0;
-    const neighborFade = isFocusedTarget ? 1 : 1 - launchPartEase;
+    const neighborFade = isFocusedTarget ? 1 : (1 - launchPartEase) * (1 - pullIsolationEase);
     const focusOpacity = lerp(CRATE_MIN_OPACITY, 1.0, easeInOutCubic(focusWeight));
     const outerEdgeFade = 1 - normalizeRange(absDelta, 1.15, 1.85);
     const baseAlpha = outerEdgeFade * focusOpacity * contentAlpha * neighborFade;
@@ -1493,7 +1733,6 @@ function renderLibraryAlbumCrate(
     }
 
     const sleeveSize = lerp(CRATE_MIN_SLEEVE_PX, CRATE_MAX_SLEEVE_PX, easeInOutCubic(focusWeight));
-    const sleeveHalf = sleeveSize / 2;
     const focusShiftLeft = focusWeight * 8;
     const centerX =
       DISPLAY_CENTER_PX -
@@ -1514,99 +1753,32 @@ function renderLibraryAlbumCrate(
       continue;
     }
 
-    drawingContext.save();
-    drawingContext.globalAlpha = baseAlpha * sleeveDissolve;
-
-    if (focusWeight > CRATE_DISC_PEEK_THRESHOLD) {
-      const peekWeight = easeOutCubic(
-        normalizeRange(focusWeight, CRATE_DISC_PEEK_THRESHOLD, 1.0),
-      );
-      const discPeekX = centerX + lerp(sleeveHalf * 0.12, sleeveHalf * 0.42 + 22, peekWeight);
-      const discRadius = sleeveHalf * 0.88;
-      const discAlpha = baseAlpha * sleeveDissolve * peekWeight * 0.96;
-      drawLibraryVinylDisc(
-        drawingContext,
-        album,
-        discPeekX,
-        centerY,
-        discRadius,
-        libraryState.vinylRotationRadians,
-        palette,
-        appearance,
-        discAlpha,
-        coverCache,
-      );
-
-      drawingContext.save();
-      drawingContext.strokeStyle = palette.signalHighlight;
-      drawingContext.lineWidth = 1.4;
-      drawingContext.globalAlpha = baseAlpha * sleeveDissolve * peekWeight * 0.85;
-      drawingContext.beginPath();
-      drawingContext.arc(discPeekX, centerY, discRadius + 0.8, -Math.PI * 0.44, Math.PI * 0.44);
-      drawingContext.stroke();
-      drawingContext.restore();
-    }
-
-    drawingContext.save();
-    drawingContext.translate(centerX, centerY);
-
-    drawingContext.save();
-    drawingContext.beginPath();
-    drawingContext.rect(-sleeveHalf, -sleeveHalf, sleeveSize, sleeveSize);
-    drawingContext.clip();
-
-    drawLibraryAlbumArtworkMotif(
-      drawingContext,
-      album,
-      sleeveHalf,
+    drawCrateAlbumSleeveWithDisc(drawingContext, album, {
+      centerX,
+      centerY,
+      sleeveSize,
+      focusWeight,
+      delta,
+      baseAlpha: baseAlpha * sleeveDissolve,
+      vinylRotationRadians: libraryState.vinylRotationRadians,
       palette,
       appearance,
       coverCache,
+    });
+  }
+
+  if (pullUpProgress > CONTENT_VISIBILITY_THRESHOLD && vinylLaunchProgress < 0.05) {
+    drawAlbumTracklistCrystalScreen(
+      drawingContext,
+      pullUpProgress,
+      contentAlpha * pullUpProgress,
+      palette,
+      appearance,
     );
-
-    const glareShift = delta * 26;
-    drawingContext.fillStyle = isDark ? "rgba(255, 255, 255, 0.11)" : "rgba(255, 255, 255, 0.30)";
-    drawingContext.beginPath();
-    drawingContext.moveTo(-sleeveHalf * 0.95 + glareShift, -sleeveHalf);
-    drawingContext.lineTo(-sleeveHalf * 0.38 + glareShift, -sleeveHalf);
-    drawingContext.lineTo(-sleeveHalf * 1.12 + glareShift, sleeveHalf);
-    drawingContext.lineTo(-sleeveHalf * 1.68 + glareShift, sleeveHalf);
-    drawingContext.closePath();
-    drawingContext.fill();
-    drawingContext.restore();
-
-    drawingContext.strokeStyle = isDark
-      ? focusWeight > 0.5
-        ? "rgba(245, 250, 255, 0.78)"
-        : "rgba(215, 228, 246, 0.52)"
-      : focusWeight > 0.5
-        ? "rgba(46, 50, 56, 0.68)"
-        : "rgba(46, 50, 56, 0.42)";
-    drawingContext.lineWidth = focusWeight > 0.5 ? 1.6 : 1.15;
-    drawingContext.strokeRect(-sleeveHalf + 0.5, -sleeveHalf + 0.5, sleeveSize - 1, sleeveSize - 1);
-
-    if (focusWeight > 0.5) {
-      const armLength = 12;
-      drawingContext.strokeStyle = palette.signalHighlight;
-      drawingContext.lineWidth = 2.3;
-      drawingContext.globalAlpha = baseAlpha * sleeveDissolve * focusWeight;
-
-      drawingContext.beginPath();
-      drawingContext.moveTo(-sleeveHalf, -sleeveHalf + armLength);
-      drawingContext.lineTo(-sleeveHalf, -sleeveHalf);
-      drawingContext.lineTo(-sleeveHalf + armLength, -sleeveHalf);
-      drawingContext.moveTo(sleeveHalf - armLength, sleeveHalf);
-      drawingContext.lineTo(sleeveHalf, sleeveHalf);
-      drawingContext.lineTo(sleeveHalf, sleeveHalf - armLength);
-      drawingContext.stroke();
-    }
-
-    drawingContext.restore();
-    drawingContext.restore();
   }
 
   const bottomExit = easeInOutCubic(normalizeRange(vinylLaunchProgress, 0.0, 0.42));
-  const bottomAlpha = contentAlpha * (1 - bottomExit);
+  const bottomAlpha = contentAlpha * (1 - bottomExit) * (1 - pullIsolationEase * 0.85);
   if (bottomAlpha > CONTENT_VISIBILITY_THRESHOLD && albums.length > 0) {
     const focusedAlbum = albums[focusedIndex];
     const offsetFromFocused = scrollPosition - focusedIndex;
@@ -1658,6 +1830,15 @@ function renderLibraryAlbumCrate(
       drawingContext.fillRect(cursorX, CRATE_BAR_Y, bar.width, CRATE_BAR_HEIGHT_PX);
       cursorX += bar.width + CRATE_BAR_GAP_PX;
     }
+
+    drawCrateSwipeUpIndicator(
+      drawingContext,
+      clockSeconds,
+      pullUpProgress,
+      bottomAlpha,
+      palette,
+      appearance,
+    );
 
     drawingContext.restore();
   }
@@ -2265,12 +2446,17 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
   }
 
   const scrollPosition = Number.isFinite(currentView.scrollPosition) ? currentView.scrollPosition : 0;
+  const isAlbumTracklistOverlay =
+    currentView.kind === "tracks" && currentView.sourceType === "album";
   const transitionProgress = clamp(Number(libraryState.transitionProgress ?? 1), 0, 1);
   const transitionDirection = Number.isFinite(libraryState.transitionDirection)
     ? libraryState.transitionDirection
     : 1;
   const transitionEase = easeOutExpo(transitionProgress);
-  const slideOffsetX = (1 - transitionEase) * 28 * transitionDirection;
+  const slideOffsetX = isAlbumTracklistOverlay
+    ? 0
+    : (1 - transitionEase) * 28 * transitionDirection;
+  const verticalSheetSlideY = isAlbumTracklistOverlay ? (1 - transitionEase) * 42 : 0;
   const launchProgress = clamp(Number(libraryState.vinylLaunchProgress ?? 0), 0, 1);
 
   const headerLaunchExit = easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.44));
@@ -2362,7 +2548,40 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
     const listFade =
       easeOutCubic(transitionProgress) *
       (1 - easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.40)));
+    if (isAlbumTracklistOverlay) {
+      const catalogAlbums = Array.isArray(libraryState.catalog?.albums)
+        ? libraryState.catalog.albums
+        : [];
+      const singleBackgroundAlbum =
+        catalogAlbums.find((albumEntry) => albumEntry.id === currentView.albumId) || null;
+      const singleAlbumAlpha = 1 - easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.34));
+      if (singleBackgroundAlbum && singleAlbumAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+        drawCrateAlbumSleeveWithDisc(drawingContext, singleBackgroundAlbum, {
+          centerX: DISPLAY_CENTER_PX - 8,
+          centerY: LIBRARY_CONSTANTS.CRATE_CENTER_Y,
+          sleeveSize: CRATE_MAX_SLEEVE_PX,
+          focusWeight: 1,
+          delta: 0,
+          baseAlpha: singleAlbumAlpha,
+          vinylRotationRadians: libraryState.vinylRotationRadians,
+          palette,
+          appearance,
+          coverCache,
+        });
+      }
+      if (listFade > CONTENT_VISIBILITY_THRESHOLD) {
+        drawAlbumTracklistCrystalScreen(
+          drawingContext,
+          transitionProgress,
+          listFade,
+          palette,
+          appearance,
+        );
+      }
+    }
     if (listFade > CONTENT_VISIBILITY_THRESHOLD) {
+      drawingContext.save();
+      drawingContext.translate(0, verticalSheetSlideY);
       renderLibraryCurvedList(
         drawingContext,
         currentView,
@@ -2372,6 +2591,7 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
         palette,
         appearance,
       );
+      drawingContext.restore();
     }
   }
   drawingContext.restore();
@@ -2535,7 +2755,11 @@ export function hitTestLibraryInteractive(pointX, pointY, libraryState) {
       pointX <= CRATE_PEEK_RIGHT_X &&
       pointY >= CRATE_PEEK_TOP_Y &&
       pointY <= CRATE_PEEK_BOTTOM_Y;
-    if (hitCenterSleeve || hitPeekingDisc) {
+    const hitSwipeUpHint =
+      Math.abs(pointX - DISPLAY_CENTER_PX) <= CRATE_SWIPE_UP_HINT_HALF_WIDTH_PX &&
+      pointY >= CRATE_SWIPE_UP_HINT_TOP_Y &&
+      pointY <= CRATE_SWIPE_UP_HINT_BOTTOM_Y;
+    if (hitCenterSleeve || hitPeekingDisc || hitSwipeUpHint) {
       return true;
     }
 

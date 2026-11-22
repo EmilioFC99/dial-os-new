@@ -1048,6 +1048,12 @@ describe("createLibraryController nominal behavior", () => {
     advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
 
     libraryController.handlePointerDown(180, 296);
+    libraryController.handlePointerMove(180, 240);
+    const pullMidSnapshot = libraryController.getRenderSnapshot();
+    assert.ok(
+      pullMidSnapshot.cratePullUpProgress > 0 && pullMidSnapshot.cratePullUpProgress <= 1,
+    );
+
     libraryController.handlePointerMove(180, 180);
     libraryController.handlePointerUp(180, 180);
     const tracksSnapshot = advanceLibraryController(
@@ -1059,6 +1065,31 @@ describe("createLibraryController nominal behavior", () => {
     assert.equal(tracksSnapshot.currentView.kind, "tracks");
     assert.equal(tracksSnapshot.currentView.sourceType, "album");
     assert.equal(tracksSnapshot.currentView.albumId, "album-a");
+    assert.equal(tracksSnapshot.cratePullUpProgress, 0);
+
+    // Horizontal swipe inside the crystal album tracklist must stay locked to this album.
+    libraryController.handlePointerDown(260, 180);
+    libraryController.handlePointerMove(100, 180);
+    libraryController.handlePointerUp(100, 180);
+    const lockedTracksSnapshot = advanceLibraryController(
+      libraryController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.equal(lockedTracksSnapshot.currentView.kind, "tracks");
+    assert.equal(lockedTracksSnapshot.currentView.albumId, "album-a");
+
+    // Step back to Albums and verify tapping the bottom swipe-up indicator opens tracks.
+    libraryController.stepBack();
+    advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    tapPoint(libraryController, 180, 320);
+    const indicatorTracksSnapshot = advanceLibraryController(
+      libraryController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.equal(indicatorTracksSnapshot.currentView.kind, "tracks");
+    assert.equal(indicatorTracksSnapshot.currentView.albumId, "album-a");
   });
 
   test("rim-arc drag triggers >180 degree Crystal-Slab Letter Seek and populates rimSlabPullLevels in All songs", () => {
