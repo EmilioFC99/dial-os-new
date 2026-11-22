@@ -9,6 +9,7 @@ Crafted from the ground up for a small round touchscreen rather than squeezed do
 ### Tactile, Rim-First Interaction
 Every gesture is shaped around the round bezel:
 - **Infinite glass wheel**: The Home screen presents apps as floating 3D translucent glass cubes with living animated icons suspended inside, arranged on a seamless infinite cyclic wheel (wrapping smoothly from the last app back to the first and vice versa) where scrolling rotates each cube into focus.
+- **Direct-touch clarity & undeformed depth**: Because there is no physical scroll wheel, lists show two full tappable rows plus a soft third preview and illuminate only while pressed—never dimming or locking focus to one center row. Carousels keep every album cover in pure, undeformed `1:1` proportions, conveying depth through smooth transparency and tactile reveal transitions rather than squishing artwork.
 - **Rim-arc browsing & Crystal-Slab Letter Seek**: On any list, you can swipe vertically or trace your thumb around the circular bezel—clockwise scrolls down, counter-clockwise scrolls up. Sweeping past half an arc in an alphabetical list enters **Letter Seek**, where each `6%` rim segment pulls inward like a beveled crystal slab as your finger passes over it, jumping cleanly to the next or previous letter for instant lookup.
 - **Distraction-free listening**: Now Playing opens directly to full-bleed spinning album art with a small progress ring at the center and no cluttering text. Controls appear only when you ask for them.
 - **Consistent edge gestures**: Swiping right from the left edge always takes you back a step. Swiping down from the top edge pulls open a compact grid of circular quick-control buttons from anywhere.
@@ -49,7 +50,7 @@ When you open the Library, you're greeted by a **2-up spatial crystal grid** of 
 - **Artists** | **Albums**
 - **Genres** | **All songs**
 
-Two floating chamfered translucent glass tiles sit side-by-side at full clarity (with the next pair softly peeking below), each cradling a living sculptural icon, clean title, and simple count. Resting tiles never highlight—a crystal tile illuminates with signal corner brackets only while pressed and opens immediately on tap.
+Two floating chamfered translucent glass tiles sit side-by-side at full clarity (with the next pair softly peeking below), each cradling a living sculptural icon that echoes what lives inside (for instance, **Albums** shows a miniature translucent sleeve with a peeking spinning vinyl), paired with a clean title and simple count. Resting tiles never highlight—a crystal tile illuminates with signal corner brackets only while pressed and opens immediately on tap.
 
 ### Alphabetical Ordering & Crystal-Slab Letter Seek
 - **A–Z everywhere**: All songs (by song title), Favorites, Albums, Artists, Genres, and Playlists are ordered alphabetically ascending so you always know where to look.
@@ -57,7 +58,7 @@ Two floating chamfered translucent glass tiles sit side-by-side at full clarity 
 - **Half-arc Crystal-Slab Letter Seek**: Continuously sweeping past **half an arc (180°)** around the bezel in an alphabetical list enters **Letter Seek**. A circular optical ring lens appears in the center while the outer bezel divides into `6%` letter dashes—as your thumb glides over each dash, it physically **pulls inward like a translucent beveled crystal slab** (with a subtle wave on immediate neighbors), jumping cleanly to the next or previous letter and settling onto the matching item when you lift your thumb.
 
 ### Flipping Through Albums
-Opening **Albums** shifts into a visual cover carousel (ordered A–Z). The focused album art sits front and center with a peeking spinning vinyl record while neighboring covers angle in from the sides, with the album title and artist resting neatly underneath. Turning through them—by swiping horizontally or tracing the rim arc—feels like thumbing through a crate of vinyl records.
+Opening **Albums** shifts into a visual cover carousel (ordered A–Z). Every cover stays a crisp, undeformed square—neighboring sleeves sit on either side at reduced transparency with their discs tucked safely inside, and as a cover glides into center focus it rises to full clarity while its spinning vinyl record slides smoothly out from the sleeve, with the album title and artist resting neatly underneath. Turning through them—by swiping horizontally or tracing the rim arc—feels like thumbing through a crate of vinyl records.
 
 ### Drilling Down & Listening
 - **Artists** and **Genres** let you narrow things down naturally—pick an artist to see their albums, then pick an album to see its songs.
