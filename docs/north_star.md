@@ -8,13 +8,13 @@ Crafted from the ground up for a small round touchscreen rather than squeezed do
 
 ### Tactile, Rim-First Interaction
 Every gesture is shaped around the round bezel:
-- **Mechanical carousel**: The Home screen arranges apps as circular pebbles along a gentle curve lined with subtle tick marks, feeling like turning a finely detented dial.
+- **Infinite glass wheel**: The Home screen presents apps as floating 3D translucent glass cubes with living animated icons suspended inside, arranged on a seamless infinite cyclic wheel (wrapping smoothly from the last app back to the first and vice versa) where scrolling rotates each cube into focus.
 - **Distraction-free listening**: Now Playing opens directly to full-bleed spinning album art with a small progress ring at the center and no cluttering text. Controls appear only when you ask for them.
 - **Consistent edge gestures**: Swiping right from the left edge always takes you back a step. Swiping down from the top edge pulls open a compact grid of circular quick-control buttons from anywhere.
 - **Deliberate friction**: Destructive actions, like deleting a playlist, ask you to press and hold for a moment so nothing happens by accident.
 
 ### Motion & Pacing
-Movement across the app feels snappy yet unhurried. Quick taps respond right away, transitions settle smoothly without bouncing, and when you open an app from Home, the surrounding pebbles gently part outward past the round edge of the screen.
+Movement across the app feels snappy yet unhurried. Quick taps respond right away, transitions settle smoothly without bouncing, and when you open an app from Home, the surrounding glass cubes gently part outward past the round edge of the screen.
 
 ---
 
@@ -23,18 +23,18 @@ Movement across the app feels snappy yet unhurried. Quick taps respond right awa
 Moving into Now Playing feels like lifting a record straight onto a turntable.
 
 ### Gentle Exit of the Previous Screen
-- **From Home**: The curved dial and tick marks fade away, the title, subtitle, and page dots drift gently downward out of view, and the neighboring app pebbles spread outward off the round edge.
+- **From Home**: The spatial floor plane fades away, the title, subtitle, and page bars drift gently downward out of view, and the neighboring glass cubes glide outward off the round edge.
 - **From Albums**: The heading lifts softly upward, the album title and artist fade downward, and neighboring album covers slide outward to make room.
 
 ### Expanding Into Spinning Vinyl
 When a song is loaded:
-- **Seamless growth**: The centered album artwork swells smoothly from a compact circle into a full-screen spinning record, gaining a gentle forward nudge of rotation as it opens—and again when you close it.
-- **Fading accent ring**: A soft accent halo around the artwork dissolves quickly as the cover expands, leaving a thin outline that disappears right as the record fills the face.
+- **Seamless growth**: The outer crystal cube shell expands and dissolves cleanly as the spinning album artwork inside swells smoothly into a full-screen spinning record, gaining a gentle forward nudge of rotation as it opens—and again when you close it.
+- **Fading accent ring**: A thin outline around the expanding artwork dissolves quickly, disappearing right as the record fills the face.
 - **Staged controls**: If the on-screen controls are active, they appear in two calm waves—first the inner progress ring blooms open at the center spindle, then the curved right-edge volume bar, top handle, and bottom details chevron fade softly into place.
 
 ### When Nothing Is Playing (or in Other Modes)
-- If no song is queued, the center pebble shrinks slightly and rises to make room for a calm *"Not Playing"* message and a **Browse Library** button that glide softly into view.
-- In other operating modes, the pebble settles cleanly near the top to introduce the active mode's name, summary, and a **Back to Home** button.
+- If no song is queued, the center glass cube shrinks slightly and rises to make room for a calm *"Not Playing"* message and a **Browse Library** button that glide softly into view.
+- In other operating modes, the glass cube settles cleanly near the top to introduce the active mode's name, summary, and a **Back to Home** button.
 
 ---
 
