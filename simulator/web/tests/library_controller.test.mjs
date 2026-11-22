@@ -1293,4 +1293,58 @@ describe("createLibraryController boundaries and negative guards", () => {
     assert.equal(topView.kind, "empty");
     assert.equal(topView.emptyTitle, "No Playlists Left");
   });
+
+  test("setTrackFavorite, setPlaylists, and resetVinylLaunch synchronize counts, catalog, and launch state safely", () => {
+    const libraryController = createSettledLibraryController();
+
+    assert.equal(libraryController.getRenderSnapshot().counts.favorites, 0);
+    libraryController.setTrackFavorite("t-a1", true);
+    const favoritedSnapshot = libraryController.getRenderSnapshot();
+    assert.equal(favoritedSnapshot.counts.favorites, 1);
+    assert.equal(
+      favoritedSnapshot.catalog.allTracks.find((trackEntry) => trackEntry.id === "t-a1").isFavorite,
+      true,
+    );
+    assert.equal(
+      favoritedSnapshot.catalog.albums
+        .find((albumEntry) => albumEntry.id === "album-a")
+        .tracks.find((trackEntry) => trackEntry.id === "t-a1").isFavorite,
+      true,
+    );
+
+    libraryController.setTrackFavorite("t-a1", false);
+    libraryController.setTrackFavorite("nonexistent-track", true);
+    libraryController.setTrackFavorite(null, true);
+    assert.equal(libraryController.getRenderSnapshot().counts.favorites, 0);
+
+    libraryController.setPlaylists([
+      { id: "p-crate", name: "DialOS Crate", trackIds: ["t-a1", "t-m1"] },
+      { id: "p-alpha", name: "Amber Mix", trackIds: ["t-c1"] },
+    ]);
+    const playlistsUpdatedSnapshot = libraryController.getRenderSnapshot();
+    assert.equal(playlistsUpdatedSnapshot.counts.playlists, 2);
+    assert.deepEqual(
+      playlistsUpdatedSnapshot.playlists.map((playlistEntry) => playlistEntry.name),
+      ["Amber Mix", "DialOS Crate"],
+    );
+
+    libraryController.setPlaylists(null);
+    assert.equal(libraryController.getRenderSnapshot().counts.playlists, 0);
+    assert.deepEqual(libraryController.getRenderSnapshot().playlists, []);
+
+    openHubSectionTile(libraryController, 3);
+    tapPoint(libraryController, CRATE_SLEEVE_TAP_X, CRATE_CENTER_Y);
+    advanceLibraryController(libraryController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    assert.equal(libraryController.getRenderSnapshot().vinylLaunchTarget, 1);
+    assert.equal(libraryController.getRenderSnapshot().vinylLaunchProgress, 1);
+
+    libraryController.handlePointerDown(BACK_SWIPE_START_X, BACK_SWIPE_Y);
+    assert.equal(libraryController.getRenderSnapshot().pointerActive, true);
+    libraryController.resetVinylLaunch();
+    const resetSnapshot = libraryController.getRenderSnapshot();
+    assert.equal(resetSnapshot.vinylLaunchTarget, 0);
+    assert.equal(resetSnapshot.vinylLaunchProgress, 0);
+    assert.equal(resetSnapshot.pointerActive, false);
+    assert.equal(resetSnapshot.pointerMode, "none");
+  });
 });

@@ -1087,6 +1087,105 @@ export function createLibraryController({
   }
 
   /**
+   * Update favorite status for `trackId` across `allTracks`, album tracks, `trackByIdMap`,
+   * and `counts.favorites`.
+   *
+   * @param {string} trackId Track identifier to update.
+   * @param {boolean} isFavorite Updated favorite state.
+   */
+  function setTrackFavorite(trackId, isFavorite) {
+    if (typeof trackId !== "string" || trackId.length === 0) {
+      return;
+    }
+    const nextFavorite = Boolean(isFavorite);
+    let trackMatched = false;
+
+    catalog.allTracks = catalog.allTracks.map((trackEntry) => {
+      if (trackEntry.id !== trackId) {
+        return trackEntry;
+      }
+      trackMatched = true;
+      return { ...trackEntry, isFavorite: nextFavorite };
+    });
+
+    catalog.albums = catalog.albums.map((albumEntry) => {
+      if (!Array.isArray(albumEntry.tracks)) {
+        return albumEntry;
+      }
+      let albumUpdated = false;
+      const updatedTracks = albumEntry.tracks.map((trackEntry) => {
+        if (trackEntry.id !== trackId) {
+          return trackEntry;
+        }
+        albumUpdated = true;
+        trackMatched = true;
+        return { ...trackEntry, isFavorite: nextFavorite };
+      });
+      return albumUpdated ? { ...albumEntry, tracks: updatedTracks } : albumEntry;
+    });
+
+    const mappedTrack = trackByIdMap.get(trackId);
+    if (mappedTrack) {
+      trackByIdMap.set(trackId, { ...mappedTrack, isFavorite: nextFavorite });
+      trackMatched = true;
+    }
+
+    if (!trackMatched) {
+      return;
+    }
+
+    syncCounts();
+    for (const viewEntry of viewStack) {
+      if (viewEntry.kind === "tracks" && viewEntry.sourceType === "favorites") {
+        viewEntry.subtitle = `${formatIntegerCount(counts.favorites)} HEARTED TRACKS`;
+      }
+    }
+  }
+
+  /**
+   * Replace internal playlists from external state (such as Now Playing Mix+ additions)
+   * and refresh playlist counts.
+   *
+   * @param {Array<object>} nextPlaylists Updated playlist entries.
+   */
+  function setPlaylists(nextPlaylists) {
+    const incomingList = Array.isArray(nextPlaylists) ? nextPlaylists : [];
+    const normalizedList = incomingList
+      .filter((playlistEntry) => playlistEntry && typeof playlistEntry === "object")
+      .map((playlistEntry) => ({
+        ...playlistEntry,
+        name: String(playlistEntry.name ?? ""),
+        trackIds: Array.isArray(playlistEntry.trackIds) ? playlistEntry.trackIds.slice() : [],
+      }));
+    playlists = sortAlphabeticallyBy(normalizedList, (playlistEntry) => playlistEntry.name);
+    syncCounts();
+    for (const viewEntry of viewStack) {
+      if (viewEntry.kind === "playlists") {
+        viewEntry.subtitle = `${formatIntegerCount(playlists.length)} MIXES`;
+      } else if (viewEntry.kind === "tracks" && viewEntry.sourceType === "playlist") {
+        const matchedPlaylist = playlists.find(
+          (playlistEntry) => playlistEntry.id === viewEntry.playlistId,
+        );
+        if (matchedPlaylist) {
+          viewEntry.subtitle = `${formatIntegerCount(matchedPlaylist.trackIds.length)} TRACKS \u00b7 MIX`;
+        }
+      }
+    }
+  }
+
+  /**
+   * Reset vinyl launch and pointer interaction state cleanly when returning from Now Playing.
+   */
+  function resetVinylLaunch() {
+    vinylLaunchTarget = 0;
+    vinylLaunchProgress = 0;
+    backSwipeProgress = 0;
+    pressedRowIndex = null;
+    pressHighlightLevel = 0;
+    clearPointerState();
+  }
+
+  /**
    * Navigate back one level: closes launched vinyl, then Playlist Action Sheet,
    * then pops the view stack, or invokes `onExitToHome` at the Hub root.
    */
@@ -2108,6 +2207,9 @@ export function createLibraryController({
     hydrateCatalog,
     enterFromHome,
     setActiveTrackId,
+    setTrackFavorite,
+    setPlaylists,
+    resetVinylLaunch,
     step,
     stepBack,
     stepDetent,
