@@ -89,9 +89,9 @@ const CRATE_PEEK_BOTTOM_Y = 212;
 const CRATE_SLEEVE_LEFT_X = 108;
 const CRATE_SLEEVE_TOP_Y = 90;
 const CRATE_SLEEVE_BOTTOM_Y = 216;
-const CRATE_SWIPE_UP_HINT_HALF_WIDTH_PX = 58;
-const CRATE_SWIPE_UP_HINT_TOP_Y = 302;
-const CRATE_SWIPE_UP_HINT_BOTTOM_Y = 346;
+const CRATE_NOTE_BUTTON_CENTER_Y = 325;
+const CRATE_NOTE_BUTTON_RADIUS_PX = 18;
+const CRATE_NOTE_BUTTON_HIT_RADIUS_PX = 22;
 const CRYSTAL_OVERLAY_TOP_Y = HEADER_CLIP_TOP_Y - 2;
 
 function resolvePalette(appearance, palette) {
@@ -126,6 +126,131 @@ export function truncateCanvasText(drawingContext, labelText, maxWidthPx) {
     clipped = clipped.slice(0, -1);
   }
   return `${clipped.trimEnd()}\u2026`;
+}
+
+function parseCanvasFontSizePx(fontSpec) {
+  const sizeMatch = /(\d+(?:\.\d+)?)px/.exec(String(fontSpec || ""));
+  return sizeMatch ? Number(sizeMatch[1]) : 12;
+}
+
+/**
+ * Draw text statically when fitting inside `maxWidthPx`, or clip and smoothly marquee
+ * with a start pause, end pause, whitespace gap, and continuous loop when overflowing.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {string} labelText Full label text.
+ * @param {number} anchorX Text alignment anchor X coordinate.
+ * @param {number} anchorY Text baseline Y coordinate.
+ * @param {number} maxWidthPx Maximum available horizontal width in pixels.
+ * @param {number|object} [timeOrOptions=0] Animation clock in seconds or options object.
+ * @param {object} [extraOptions={}] Optional marquee timing configuration.
+ */
+export function drawMarqueeCanvasText(
+  drawingContext,
+  labelText,
+  anchorX,
+  anchorY,
+  maxWidthPx,
+  timeOrOptions = 0,
+  extraOptions = {},
+) {
+  if (!drawingContext) {
+    return;
+  }
+  const safeLabel = String(labelText ?? "");
+  if (!safeLabel) {
+    return;
+  }
+
+  const measuredWidth = drawingContext.measureText(safeLabel).width;
+  if (!Number.isFinite(maxWidthPx) || maxWidthPx <= 0 || measuredWidth <= maxWidthPx) {
+    drawingContext.fillText(safeLabel, anchorX, anchorY);
+    return;
+  }
+
+  const optionsObject =
+    timeOrOptions && typeof timeOrOptions === "object"
+      ? timeOrOptions
+      : extraOptions && typeof extraOptions === "object"
+        ? extraOptions
+        : {};
+  const animationTimeSeconds =
+    typeof timeOrOptions === "number" && Number.isFinite(timeOrOptions)
+      ? Math.max(0, timeOrOptions)
+      : Number.isFinite(optionsObject.animationTimeSeconds)
+        ? Math.max(0, optionsObject.animationTimeSeconds)
+        : 0;
+
+  const fontSizePx = parseCanvasFontSizePx(drawingContext.font);
+  const startPauseSeconds = Number.isFinite(optionsObject.startPauseSeconds)
+    ? optionsObject.startPauseSeconds
+    : 0.9;
+  const endPauseSeconds = Number.isFinite(optionsObject.endPauseSeconds)
+    ? optionsObject.endPauseSeconds
+    : 0.8;
+  const gapWidthPx = Number.isFinite(optionsObject.gapWidthPx) ? optionsObject.gapWidthPx : 36;
+  const scrollSpeedPxPerSecond = Number.isFinite(optionsObject.scrollSpeedPxPerSecond)
+    ? Math.max(8, optionsObject.scrollSpeedPxPerSecond)
+    : 28;
+  const clipHeightPx = Number.isFinite(optionsObject.clipHeightPx)
+    ? optionsObject.clipHeightPx
+    : Math.max(20, fontSizePx * 1.7);
+
+  const overflowDistance = measuredWidth - maxWidthPx;
+  const scrollToEndSeconds = overflowDistance / scrollSpeedPxPerSecond;
+  const gapScrollDistance = maxWidthPx + gapWidthPx;
+  const scrollThroughGapSeconds = gapScrollDistance / scrollSpeedPxPerSecond;
+  const cycleDurationSeconds =
+    startPauseSeconds + scrollToEndSeconds + endPauseSeconds + scrollThroughGapSeconds;
+  const cycleTimeSeconds =
+    cycleDurationSeconds > 0 ? animationTimeSeconds % cycleDurationSeconds : 0;
+
+  let horizontalOffsetPx = 0;
+  if (cycleTimeSeconds <= startPauseSeconds) {
+    horizontalOffsetPx = 0;
+  } else if (cycleTimeSeconds <= startPauseSeconds + scrollToEndSeconds) {
+    horizontalOffsetPx = (cycleTimeSeconds - startPauseSeconds) * scrollSpeedPxPerSecond;
+  } else if (cycleTimeSeconds <= startPauseSeconds + scrollToEndSeconds + endPauseSeconds) {
+    horizontalOffsetPx = overflowDistance;
+  } else {
+    horizontalOffsetPx =
+      overflowDistance +
+      (cycleTimeSeconds - startPauseSeconds - scrollToEndSeconds - endPauseSeconds) *
+        scrollSpeedPxPerSecond;
+  }
+
+  const activeAlign = drawingContext.textAlign;
+  const boxLeftX =
+    activeAlign === "center"
+      ? anchorX - maxWidthPx / 2
+      : activeAlign === "right" || activeAlign === "end"
+        ? anchorX - maxWidthPx
+        : anchorX;
+
+  const activeBaseline = drawingContext.textBaseline;
+  const clipTopY =
+    activeBaseline === "top"
+      ? anchorY - 2
+      : activeBaseline === "bottom"
+        ? anchorY - clipHeightPx + 2
+        : anchorY - clipHeightPx / 2;
+
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(boxLeftX, clipTopY, maxWidthPx, clipHeightPx);
+  drawingContext.clip();
+  drawingContext.textAlign = "left";
+
+  const primaryLeftX = boxLeftX - horizontalOffsetPx;
+  if (primaryLeftX + measuredWidth >= boxLeftX - 4) {
+    drawingContext.fillText(safeLabel, primaryLeftX, anchorY);
+  }
+  const trailingLeftX = primaryLeftX + measuredWidth + gapWidthPx;
+  if (trailingLeftX <= boxLeftX + maxWidthPx + 4) {
+    drawingContext.fillText(safeLabel, trailingLeftX, anchorY);
+  }
+
+  drawingContext.restore();
 }
 
 /**
@@ -769,6 +894,7 @@ export function drawLibraryVinylDisc(
   appearance = "dark",
   alpha = 1,
   coverCache = null,
+  vinylOptions = {},
 ) {
   if (!drawingContext || alpha <= ALPHA_VISIBILITY_THRESHOLD || radius <= 2) {
     return;
@@ -776,6 +902,12 @@ export function drawLibraryVinylDisc(
   const resolvedAppearance = resolveAppearance(appearance);
   const resolvedPalette = resolvePalette(resolvedAppearance, palette);
   const safeRotation = Number.isFinite(rotationRadians) ? rotationRadians : 0;
+  const showCenterLabel = vinylOptions?.showCenterLabel !== false;
+  const grooveAlpha = clamp(
+    Number.isFinite(vinylOptions?.grooveAlpha) ? vinylOptions.grooveAlpha : 1,
+    0,
+    1,
+  );
 
   drawingContext.save();
   drawingContext.globalAlpha = alpha;
@@ -795,34 +927,37 @@ export function drawLibraryVinylDisc(
     coverCache,
   );
 
-  const grooveColor =
-    resolvedAppearance === "dark" ? "rgba(245, 246, 248, 0.10)" : "rgba(245, 246, 248, 0.13)";
-  drawingContext.strokeStyle = grooveColor;
-  drawingContext.lineWidth = Math.max(0.8, radius * 0.008);
-  const grooveRatios = [0.88, 0.78, 0.68, 0.48];
-  for (let grooveIndex = 0; grooveIndex < grooveRatios.length; grooveIndex += 1) {
-    drawingContext.beginPath();
-    drawingContext.arc(0, 0, radius * grooveRatios[grooveIndex], 0, FULL_CIRCLE_RADIANS);
-    drawingContext.stroke();
+  if (grooveAlpha > ALPHA_VISIBILITY_THRESHOLD) {
+    const baseGrooveOpacity = resolvedAppearance === "dark" ? 0.1 : 0.13;
+    drawingContext.strokeStyle = `rgba(245, 246, 248, ${(baseGrooveOpacity * grooveAlpha).toFixed(3)})`;
+    drawingContext.lineWidth = Math.max(0.8, radius * 0.008);
+    const grooveRatios = [0.88, 0.78, 0.68, 0.48];
+    for (let grooveIndex = 0; grooveIndex < grooveRatios.length; grooveIndex += 1) {
+      drawingContext.beginPath();
+      drawingContext.arc(0, 0, radius * grooveRatios[grooveIndex], 0, FULL_CIRCLE_RADIANS);
+      drawingContext.stroke();
+    }
   }
 
-  const labelRadius = radius * 0.28;
-  drawingContext.beginPath();
-  drawingContext.arc(0, 0, labelRadius, 0, FULL_CIRCLE_RADIANS);
-  drawingContext.fillStyle = "#11151C";
-  drawingContext.fill();
-  drawingContext.strokeStyle = "#F5F6F8";
-  drawingContext.lineWidth = Math.max(1.2, radius * 0.018);
-  drawingContext.stroke();
+  if (showCenterLabel) {
+    const labelRadius = radius * 0.28;
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, labelRadius, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = "#11151C";
+    drawingContext.fill();
+    drawingContext.strokeStyle = "#F5F6F8";
+    drawingContext.lineWidth = Math.max(1.2, radius * 0.018);
+    drawingContext.stroke();
 
-  const labelBlockSize = Math.max(3, radius * 0.075);
-  drawingContext.fillStyle = resolvedPalette.signalHighlight;
-  drawingContext.fillRect(labelRadius * 0.22, -labelBlockSize / 2, labelBlockSize, labelBlockSize);
+    const labelBlockSize = Math.max(3, radius * 0.075);
+    drawingContext.fillStyle = resolvedPalette.signalHighlight;
+    drawingContext.fillRect(labelRadius * 0.22, -labelBlockSize / 2, labelBlockSize, labelBlockSize);
 
-  drawingContext.beginPath();
-  drawingContext.arc(0, 0, Math.max(2.5, radius * 0.075), 0, FULL_CIRCLE_RADIANS);
-  drawingContext.fillStyle = "#060709";
-  drawingContext.fill();
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, Math.max(2.5, radius * 0.075), 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = "#060709";
+    drawingContext.fill();
+  }
 
   drawingContext.restore();
 }
@@ -835,6 +970,7 @@ function drawLibraryPeripheralChrome(
   chromeAlpha,
   palette,
   appearance,
+  animationTimeSeconds = 0,
 ) {
   if (chromeAlpha <= ALPHA_VISIBILITY_THRESHOLD) {
     return;
@@ -888,14 +1024,19 @@ function drawLibraryPeripheralChrome(
   drawingContext.fillStyle = palette.inkPrimary;
   drawingContext.textAlign = "center";
   drawingContext.textBaseline = "middle";
-  const fittedTitle = truncateCanvasText(drawingContext, title, 184);
-  drawingContext.fillText(fittedTitle, DISPLAY_CENTER_PX, 44);
+  drawMarqueeCanvasText(drawingContext, title, DISPLAY_CENTER_PX, 44, 184, animationTimeSeconds);
 
   if (subtitle) {
     drawingContext.font = `600 9px ${FONT_MONO}`;
     drawingContext.fillStyle = palette.inkSecondary;
-    const fittedSubtitle = truncateCanvasText(drawingContext, subtitle, 196);
-    drawingContext.fillText(fittedSubtitle, DISPLAY_CENTER_PX, 60);
+    drawMarqueeCanvasText(
+      drawingContext,
+      subtitle,
+      DISPLAY_CENTER_PX,
+      60,
+      196,
+      animationTimeSeconds,
+    );
   }
 
   drawingContext.strokeStyle = palette.hairline;
@@ -1262,7 +1403,14 @@ function renderLibraryHubGrid(
     drawingContext.textBaseline = "middle";
     drawingContext.font = `${tileRect.isPeeking ? "600 11.5px" : "700 13px"} ${FONT_DISPLAY}`;
     drawingContext.fillStyle = isPressed ? palette.signalHighlight : palette.inkPrimary;
-    drawingContext.fillText(row.title, tileRect.centerX, tileRect.centerY + 25);
+    drawMarqueeCanvasText(
+      drawingContext,
+      row.title,
+      tileRect.centerX,
+      tileRect.centerY + 25,
+      Math.max(40, width - 14),
+      clockSeconds,
+    );
 
     drawingContext.font = `600 9px ${FONT_MONO}`;
     drawingContext.fillStyle = palette.inkSecondary;
@@ -1300,11 +1448,15 @@ function renderLibraryCurvedList(
   contentAlpha,
   palette,
   appearance,
+  animationTimeSeconds = 0,
 ) {
   const scrollPosition = Number.isFinite(viewEntry.scrollPosition) ? viewEntry.scrollPosition : 0;
   const clockSeconds = Number.isFinite(libraryState.idleClockSeconds)
     ? libraryState.idleClockSeconds
-    : 0;
+    : animationTimeSeconds;
+  const marqueeTimeSeconds = Number.isFinite(animationTimeSeconds)
+    ? animationTimeSeconds
+    : clockSeconds;
 
   drawingContext.save();
   drawingContext.beginPath();
@@ -1400,10 +1552,13 @@ function renderLibraryCurvedList(
       drawingContext.font = `${isPreview ? "600 13.5px" : "700 15.5px"} ${FONT_DISPLAY}`;
       drawingContext.fillStyle = isPreview ? palette.inkSecondary : palette.inkPrimary;
       drawingContext.textAlign = "left";
-      drawingContext.fillText(
-        truncateCanvasText(drawingContext, row.title, maxTitleWidth),
+      drawMarqueeCanvasText(
+        drawingContext,
+        row.title,
         textOriginX,
         layout.rowY + 0.5,
+        maxTitleWidth,
+        marqueeTimeSeconds,
       );
     } else if (row.rowType === "track") {
       const isPlayingTrack = Boolean(
@@ -1457,18 +1612,24 @@ function renderLibraryCurvedList(
       if (!isPreview && !row.showTrackNumbers) {
         drawingContext.font = `700 15px ${FONT_DISPLAY}`;
         drawingContext.fillStyle = isPlayingTrack ? palette.signalHighlight : palette.inkPrimary;
-        drawingContext.fillText(
-          truncateCanvasText(drawingContext, row.title, maxTitleWidth),
+        drawMarqueeCanvasText(
+          drawingContext,
+          row.title,
           textOriginX,
           layout.rowY - 8,
+          maxTitleWidth,
+          marqueeTimeSeconds,
         );
 
         drawingContext.font = `600 9px ${FONT_MONO}`;
         drawingContext.fillStyle = palette.inkSecondary;
-        drawingContext.fillText(
-          truncateCanvasText(drawingContext, String(row.artist || "").toUpperCase(), maxTitleWidth),
+        drawMarqueeCanvasText(
+          drawingContext,
+          String(row.artist || "").toUpperCase(),
           textOriginX,
           layout.rowY + 9,
+          maxTitleWidth,
+          marqueeTimeSeconds,
         );
       } else {
         drawingContext.font = `${isPreview ? "600 13.5px" : "700 15px"} ${FONT_DISPLAY}`;
@@ -1477,10 +1638,13 @@ function renderLibraryCurvedList(
           : isPreview
             ? palette.inkSecondary
             : palette.inkPrimary;
-        drawingContext.fillText(
-          truncateCanvasText(drawingContext, row.title, maxTitleWidth),
+        drawMarqueeCanvasText(
+          drawingContext,
+          row.title,
           textOriginX,
           layout.rowY + 0.5,
+          maxTitleWidth,
+          marqueeTimeSeconds,
         );
       }
     }
@@ -1498,63 +1662,40 @@ function renderLibraryCurvedList(
   }
 }
 
-function drawCrateAlbumSleeveWithDisc(
+/**
+ * Draw a square crate album sleeve box without rendering a peeking vinyl disc.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {object} album Album metadata descriptor.
+ * @param {object} options Geometry and style configuration.
+ */
+export function drawCrateAlbumSleeveBox(
   drawingContext,
   album,
   {
     centerX,
     centerY,
     sleeveSize,
-    focusWeight,
-    delta,
-    baseAlpha,
-    vinylRotationRadians,
+    focusWeight = 1,
+    delta = 0,
+    baseAlpha = 1,
+    alpha,
     palette,
-    appearance,
-    coverCache,
+    appearance = "dark",
+    coverCache = null,
   },
 ) {
-  if (!album || baseAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+  const resolvedAlpha = Number.isFinite(alpha) ? alpha : baseAlpha;
+  if (!album || resolvedAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
     return;
   }
-
-  const isDark = appearance === "dark";
+  const resolvedAppearance = resolveAppearance(appearance);
+  const resolvedPalette = resolvePalette(resolvedAppearance, palette);
+  const isDark = resolvedAppearance === "dark";
   const sleeveHalf = sleeveSize / 2;
 
   drawingContext.save();
-  drawingContext.globalAlpha = baseAlpha;
-
-  if (focusWeight > CRATE_DISC_PEEK_THRESHOLD) {
-    const peekWeight = easeOutCubic(
-      normalizeRange(focusWeight, CRATE_DISC_PEEK_THRESHOLD, 1.0),
-    );
-    const discPeekX = centerX + lerp(sleeveHalf * 0.12, sleeveHalf * 0.42 + 22, peekWeight);
-    const discRadius = sleeveHalf * 0.88;
-    const discAlpha = baseAlpha * peekWeight * 0.96;
-    drawLibraryVinylDisc(
-      drawingContext,
-      album,
-      discPeekX,
-      centerY,
-      discRadius,
-      vinylRotationRadians,
-      palette,
-      appearance,
-      discAlpha,
-      coverCache,
-    );
-
-    drawingContext.save();
-    drawingContext.strokeStyle = palette.signalHighlight;
-    drawingContext.lineWidth = 1.4;
-    drawingContext.globalAlpha = baseAlpha * peekWeight * 0.85;
-    drawingContext.beginPath();
-    drawingContext.arc(discPeekX, centerY, discRadius + 0.8, -Math.PI * 0.44, Math.PI * 0.44);
-    drawingContext.stroke();
-    drawingContext.restore();
-  }
-
-  drawingContext.save();
+  drawingContext.globalAlpha = resolvedAlpha;
   drawingContext.translate(centerX, centerY);
 
   drawingContext.save();
@@ -1566,8 +1707,8 @@ function drawCrateAlbumSleeveWithDisc(
     drawingContext,
     album,
     sleeveHalf,
-    palette,
-    appearance,
+    resolvedPalette,
+    resolvedAppearance,
     coverCache,
   );
 
@@ -1594,9 +1735,9 @@ function drawCrateAlbumSleeveWithDisc(
 
   if (focusWeight > 0.5) {
     const armLength = 12;
-    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.strokeStyle = resolvedPalette.signalHighlight;
     drawingContext.lineWidth = 2.3;
-    drawingContext.globalAlpha = baseAlpha * focusWeight;
+    drawingContext.globalAlpha = resolvedAlpha * focusWeight;
 
     drawingContext.beginPath();
     drawingContext.moveTo(-sleeveHalf, -sleeveHalf + armLength);
@@ -1609,13 +1750,84 @@ function drawCrateAlbumSleeveWithDisc(
   }
 
   drawingContext.restore();
+}
+
+function drawCrateAlbumSleeveWithDisc(
+  drawingContext,
+  album,
+  {
+    centerX,
+    centerY,
+    sleeveSize,
+    focusWeight,
+    delta,
+    baseAlpha,
+    vinylRotationRadians,
+    showPeekingDisc = false,
+    isDiscPlaying = false,
+    palette,
+    appearance,
+    coverCache,
+  },
+) {
+  if (!album || baseAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+
+  const sleeveHalf = sleeveSize / 2;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = baseAlpha;
+
+  if (showPeekingDisc && focusWeight > CRATE_DISC_PEEK_THRESHOLD) {
+    const peekWeight = easeOutCubic(
+      normalizeRange(focusWeight, CRATE_DISC_PEEK_THRESHOLD, 1.0),
+    );
+    const discPeekX = centerX + lerp(sleeveHalf * 0.12, sleeveHalf * 0.42 + 22, peekWeight);
+    const discRadius = sleeveHalf * 0.88;
+    const discAlpha = baseAlpha * peekWeight * 0.96;
+    const appliedRotationRadians = isDiscPlaying ? vinylRotationRadians : 0;
+    drawLibraryVinylDisc(
+      drawingContext,
+      album,
+      discPeekX,
+      centerY,
+      discRadius,
+      appliedRotationRadians,
+      palette,
+      appearance,
+      discAlpha,
+      coverCache,
+    );
+
+    drawingContext.save();
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = 1.4;
+    drawingContext.globalAlpha = baseAlpha * peekWeight * 0.85;
+    drawingContext.beginPath();
+    drawingContext.arc(discPeekX, centerY, discRadius + 0.8, -Math.PI * 0.44, Math.PI * 0.44);
+    drawingContext.stroke();
+    drawingContext.restore();
+  }
+
+  drawCrateAlbumSleeveBox(drawingContext, album, {
+    centerX,
+    centerY,
+    sleeveSize,
+    focusWeight,
+    delta,
+    baseAlpha,
+    palette,
+    appearance,
+    coverCache,
+  });
+
   drawingContext.restore();
 }
 
-function drawCrateSwipeUpIndicator(
+function drawCrateFloatingNoteButton(
   drawingContext,
   clockSeconds,
-  pullProgress,
   alpha,
   palette,
   appearance,
@@ -1626,40 +1838,35 @@ function drawCrateSwipeUpIndicator(
 
   const isDark = appearance === "dark";
   const safeClock = Number.isFinite(clockSeconds) ? clockSeconds : 0;
-  const clampedPull = clamp(pullProgress, 0, 1);
-  const floatOffsetY =
-    Math.sin(safeClock * 2.8) * 1.8 * (1 - clampedPull) - clampedPull * 4;
+  const centerY = CRATE_NOTE_BUTTON_CENTER_Y + Math.sin(safeClock * 2.4) * 1.1;
+  const buttonRadius = CRATE_NOTE_BUTTON_RADIUS_PX;
 
   drawingContext.save();
   drawingContext.globalAlpha = alpha;
+  drawingContext.translate(DISPLAY_CENTER_PX, centerY);
 
-  const chevronApexY = 309 + floatOffsetY;
-  drawingContext.lineCap = "round";
-  drawingContext.lineJoin = "round";
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, buttonRadius, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = isDark ? "rgba(18, 22, 30, 0.88)" : "rgba(255, 255, 255, 0.84)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = palette.signalHighlight;
+  drawingContext.lineWidth = 1.4;
+  drawingContext.stroke();
+
+  // Crisp 2D beamed eighth-note vector icon
+  drawingContext.fillStyle = palette.signalHighlight;
+  drawingContext.fillRect(-5.5, 2.5, 4.5, 3.6);
+  drawingContext.fillRect(1.5, 1.0, 4.5, 3.6);
 
   drawingContext.strokeStyle = palette.signalHighlight;
-  drawingContext.lineWidth = 1.8;
+  drawingContext.lineWidth = 1.65;
+  drawingContext.lineCap = "butt";
   drawingContext.beginPath();
-  drawingContext.moveTo(DISPLAY_CENTER_PX - 6.5, chevronApexY + 4.5);
-  drawingContext.lineTo(DISPLAY_CENTER_PX, chevronApexY);
-  drawingContext.lineTo(DISPLAY_CENTER_PX + 6.5, chevronApexY + 4.5);
+  drawingContext.moveTo(-1.2, 4.0);
+  drawingContext.lineTo(-1.2, -5.0);
+  drawingContext.lineTo(5.8, -6.5);
+  drawingContext.lineTo(5.8, 2.5);
   drawingContext.stroke();
-
-  drawingContext.strokeStyle = isDark
-    ? "rgba(235, 245, 255, 0.34)"
-    : "rgba(46, 50, 56, 0.34)";
-  drawingContext.lineWidth = 1.25;
-  drawingContext.beginPath();
-  drawingContext.moveTo(DISPLAY_CENTER_PX - 4.5, chevronApexY + 8.5);
-  drawingContext.lineTo(DISPLAY_CENTER_PX, chevronApexY + 5);
-  drawingContext.lineTo(DISPLAY_CENTER_PX + 4.5, chevronApexY + 8.5);
-  drawingContext.stroke();
-
-  drawingContext.font = `700 8.5px ${FONT_MONO}`;
-  drawingContext.fillStyle = clampedPull > 0.15 ? palette.signalHighlight : palette.inkSecondary;
-  drawingContext.textAlign = "center";
-  drawingContext.textBaseline = "middle";
-  drawingContext.fillText("SWIPE UP \u00b7 TRACKS", DISPLAY_CENTER_PX, 328);
 
   drawingContext.restore();
 }
@@ -1743,17 +1950,23 @@ function renderLibraryAlbumCrate(
   palette,
   appearance,
   coverCache,
+  animationTimeSeconds = 0,
+  playbackActive = false,
 ) {
   const scrollPosition = Number.isFinite(viewEntry.scrollPosition) ? viewEntry.scrollPosition : 0;
   const clockSeconds = Number.isFinite(libraryState.idleClockSeconds)
     ? libraryState.idleClockSeconds
-    : 0;
+    : animationTimeSeconds;
+  const marqueeTimeSeconds = Number.isFinite(animationTimeSeconds)
+    ? animationTimeSeconds
+    : clockSeconds;
+  const activeTrackId = libraryState.activeTrackId || null;
+  const isDiscPlaying =
+    typeof libraryState.isPlaying === "boolean" ? libraryState.isPlaying : Boolean(playbackActive);
   const launchPartEase = easeInOutCubic(normalizeRange(vinylLaunchProgress, 0.0, 0.50));
-  const pullUpProgress = clamp(Number(libraryState.cratePullUpProgress ?? 0), 0, 1);
-  const pullIsolationEase = easeOutCubic(pullUpProgress);
   const focusedIndex = clamp(Math.round(scrollPosition), 0, Math.max(0, albums.length - 1));
 
-  const shelfAlpha = contentAlpha * (1 - launchPartEase) * (1 - pullIsolationEase);
+  const shelfAlpha = contentAlpha * (1 - launchPartEase);
   if (shelfAlpha > CONTENT_VISIBILITY_THRESHOLD) {
     drawingContext.save();
     drawingContext.globalAlpha = shelfAlpha * 0.45;
@@ -1784,11 +1997,16 @@ function renderLibraryAlbumCrate(
     }
     const focusWeight = clamp(1 - absDelta, 0, 1);
     const isFocusedTarget = albumIndex === focusedIndex;
+    const isAlbumCurrentlyPlaying = Boolean(
+      activeTrackId &&
+        Array.isArray(album.tracks) &&
+        album.tracks.some((trackEntry) => trackEntry.id === activeTrackId),
+    );
 
     const launchSideSpread = !isFocusedTarget
       ? Math.sign(delta || 1) * 145 * launchPartEase
       : 0;
-    const neighborFade = isFocusedTarget ? 1 : (1 - launchPartEase) * (1 - pullIsolationEase);
+    const neighborFade = isFocusedTarget ? 1 : 1 - launchPartEase;
     const focusOpacity = lerp(CRATE_MIN_OPACITY, 1.0, easeInOutCubic(focusWeight));
     const outerEdgeFade = 1 - normalizeRange(absDelta, 1.15, 1.85);
     const baseAlpha = outerEdgeFade * focusOpacity * contentAlpha * neighborFade;
@@ -1804,9 +2022,11 @@ function renderLibraryAlbumCrate(
       delta * LIBRARY_CONSTANTS.CRATE_SPACING_PX +
       launchSideSpread;
     const bobY =
-      Math.sin(clockSeconds * 1.7 + albumIndex * 1.4) *
-      lerp(0.8, 2.2, focusWeight) *
-      (1 - launchPartEase);
+      isAlbumCurrentlyPlaying && isDiscPlaying
+        ? Math.sin(clockSeconds * 1.7 + albumIndex * 1.4) *
+          lerp(0.8, 2.2, focusWeight) *
+          (1 - launchPartEase)
+        : 0;
     const centerY =
       LIBRARY_CONSTANTS.CRATE_CENTER_Y + Math.min(absDelta, 1.5) * 6 + bobY;
 
@@ -1825,24 +2045,16 @@ function renderLibraryAlbumCrate(
       delta,
       baseAlpha: baseAlpha * sleeveDissolve,
       vinylRotationRadians: libraryState.vinylRotationRadians,
+      showPeekingDisc: isAlbumCurrentlyPlaying,
+      isDiscPlaying: isAlbumCurrentlyPlaying && isDiscPlaying,
       palette,
       appearance,
       coverCache,
     });
   }
 
-  if (pullUpProgress > CONTENT_VISIBILITY_THRESHOLD && vinylLaunchProgress < 0.05) {
-    drawAlbumTracklistCrystalScreen(
-      drawingContext,
-      pullUpProgress,
-      contentAlpha * pullUpProgress,
-      palette,
-      appearance,
-    );
-  }
-
   const bottomExit = easeInOutCubic(normalizeRange(vinylLaunchProgress, 0.0, 0.42));
-  const bottomAlpha = contentAlpha * (1 - bottomExit) * (1 - pullIsolationEase * 0.85);
+  const bottomAlpha = contentAlpha * (1 - bottomExit);
   if (bottomAlpha > CONTENT_VISIBILITY_THRESHOLD && albums.length > 0) {
     const focusedAlbum = albums[focusedIndex];
     const offsetFromFocused = scrollPosition - focusedIndex;
@@ -1860,19 +2072,25 @@ function renderLibraryAlbumCrate(
     drawingContext.fillStyle = palette.inkPrimary;
     drawingContext.textAlign = "center";
     drawingContext.textBaseline = "middle";
-    drawingContext.fillText(
-      truncateCanvasText(drawingContext, focusedAlbum.title, 224),
+    drawMarqueeCanvasText(
+      drawingContext,
+      focusedAlbum.title,
       DISPLAY_CENTER_PX,
       246,
+      224,
+      marqueeTimeSeconds,
     );
 
     drawingContext.font = `600 9.5px ${FONT_MONO}`;
     drawingContext.fillStyle = palette.inkSecondary;
     const metaLine = `${String(focusedAlbum.artist || "").toUpperCase()} \u00b7 ${formatIntegerCount(trackCount)} TRACKS`;
-    drawingContext.fillText(
-      truncateCanvasText(drawingContext, metaLine, 214),
+    drawMarqueeCanvasText(
+      drawingContext,
+      metaLine,
       DISPLAY_CENTER_PX,
       268,
+      214,
+      marqueeTimeSeconds,
     );
     drawingContext.restore();
 
@@ -1895,10 +2113,9 @@ function renderLibraryAlbumCrate(
       cursorX += bar.width + CRATE_BAR_GAP_PX;
     }
 
-    drawCrateSwipeUpIndicator(
+    drawCrateFloatingNoteButton(
       drawingContext,
       clockSeconds,
-      pullUpProgress,
       bottomAlpha,
       palette,
       appearance,
@@ -2237,10 +2454,13 @@ function renderLibraryLetterSearchHud(
 
   drawingContext.font = `700 10px ${FONT_MONO}`;
   drawingContext.fillStyle = palette.inkPrimary;
-  drawingContext.fillText(
-    truncateCanvasText(drawingContext, String(activeEntry.label || "").toUpperCase(), 196),
+  drawMarqueeCanvasText(
+    drawingContext,
+    String(activeEntry.label || "").toUpperCase(),
     DISPLAY_CENTER_PX,
     266,
+    196,
+    Number(libraryState.idleClockSeconds ?? 0),
   );
 
   drawingContext.font = `600 8.5px ${FONT_MONO}`;
@@ -2251,7 +2471,13 @@ function renderLibraryLetterSearchHud(
   drawingContext.restore();
 }
 
-function renderLibraryPlaylistSheet(drawingContext, libraryState, palette, appearance) {
+function renderLibraryPlaylistSheet(
+  drawingContext,
+  libraryState,
+  palette,
+  appearance,
+  animationTimeSeconds = 0,
+) {
   const sheetProgress = Number(libraryState.playlistSheetProgress ?? 0);
   if (sheetProgress <= CONTENT_VISIBILITY_THRESHOLD) {
     return;
@@ -2295,10 +2521,13 @@ function renderLibraryPlaylistSheet(drawingContext, libraryState, palette, appea
 
   drawingContext.font = `700 15.5px ${FONT_DISPLAY}`;
   drawingContext.fillStyle = palette.inkPrimary;
-  drawingContext.fillText(
-    truncateCanvasText(drawingContext, targetPlaylist.name, SHEET_CARD_WIDTH_PX - 28),
+  drawMarqueeCanvasText(
+    drawingContext,
+    targetPlaylist.name,
     DISPLAY_CENTER_PX,
     cardY + 40,
+    SHEET_CARD_WIDTH_PX - 28,
+    animationTimeSeconds,
   );
 
   const buttonX = cardX + 14;
@@ -2454,22 +2683,6 @@ function drawNowPlayingExpandedChrome(
     drawingContext.lineWidth = 4.2;
     drawingContext.stroke();
 
-    drawingContext.fillStyle = "rgba(245, 246, 248, 0.72)";
-    drawingContext.fillRect(
-      DISPLAY_CENTER_PX - TOP_HANDLE_HALF_WIDTH_PX,
-      24,
-      TOP_HANDLE_HALF_WIDTH_PX * 2,
-      TOP_HANDLE_HEIGHT_PX,
-    );
-
-    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.82)";
-    drawingContext.lineWidth = 2;
-    drawingContext.beginPath();
-    drawingContext.moveTo(DISPLAY_CENTER_PX - 6, 332);
-    drawingContext.lineTo(DISPLAY_CENTER_PX, 326);
-    drawingContext.lineTo(DISPLAY_CENTER_PX + 6, 332);
-    drawingContext.stroke();
-
     drawingContext.restore();
   }
 }
@@ -2491,6 +2704,13 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
   const palette = resolvePalette(appearance, renderContext?.palette);
   const coverCache = renderContext?.coverCache || null;
   const playback = renderContext?.playback || {};
+  const animationTimeSeconds = Number.isFinite(renderContext?.animationTimeSeconds)
+    ? renderContext.animationTimeSeconds
+    : Number(libraryState.idleClockSeconds ?? 0);
+  const playbackIsPlaying =
+    typeof libraryState.isPlaying === "boolean"
+      ? libraryState.isPlaying
+      : Boolean(playback.isPlaying);
   const elapsedSeconds =
     Number.isFinite(playback.elapsedSeconds) && playback.elapsedSeconds >= 0
       ? playback.elapsedSeconds
@@ -2565,6 +2785,7 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
     chromeAlpha,
     palette,
     appearance,
+    animationTimeSeconds,
   );
 
   drawingContext.save();
@@ -2597,6 +2818,8 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
       palette,
       appearance,
       coverCache,
+      animationTimeSeconds,
+      playbackIsPlaying,
     );
   } else if (currentView.kind === "empty") {
     renderLibraryEmptyState(
@@ -2620,6 +2843,12 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
         catalogAlbums.find((albumEntry) => albumEntry.id === currentView.albumId) || null;
       const singleAlbumAlpha = 1 - easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.34));
       if (singleBackgroundAlbum && singleAlbumAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+        const activeTrackId = libraryState.activeTrackId || null;
+        const isBackgroundAlbumPlaying = Boolean(
+          activeTrackId &&
+            Array.isArray(singleBackgroundAlbum.tracks) &&
+            singleBackgroundAlbum.tracks.some((trackEntry) => trackEntry.id === activeTrackId),
+        );
         drawCrateAlbumSleeveWithDisc(drawingContext, singleBackgroundAlbum, {
           centerX: DISPLAY_CENTER_PX - 8,
           centerY: LIBRARY_CONSTANTS.CRATE_CENTER_Y,
@@ -2628,6 +2857,8 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
           delta: 0,
           baseAlpha: singleAlbumAlpha,
           vinylRotationRadians: libraryState.vinylRotationRadians,
+          showPeekingDisc: isBackgroundAlbumPlaying,
+          isDiscPlaying: isBackgroundAlbumPlaying && playbackIsPlaying,
           palette,
           appearance,
           coverCache,
@@ -2654,6 +2885,7 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
         listFade,
         palette,
         appearance,
+        animationTimeSeconds,
       );
       drawingContext.restore();
     }
@@ -2691,6 +2923,7 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
       appearance,
       discAlpha,
       coverCache,
+      { showCenterLabel: false },
     );
 
     if (launchProgress > 0.12 && launchProgress < 0.96) {
@@ -2718,7 +2951,13 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
   }
 
   if (Number(libraryState.playlistSheetProgress ?? 0) > CONTENT_VISIBILITY_THRESHOLD) {
-    renderLibraryPlaylistSheet(drawingContext, libraryState, palette, appearance);
+    renderLibraryPlaylistSheet(
+      drawingContext,
+      libraryState,
+      palette,
+      appearance,
+      animationTimeSeconds,
+    );
   }
 
   if (
@@ -2819,11 +3058,10 @@ export function hitTestLibraryInteractive(pointX, pointY, libraryState) {
       pointX <= CRATE_PEEK_RIGHT_X &&
       pointY >= CRATE_PEEK_TOP_Y &&
       pointY <= CRATE_PEEK_BOTTOM_Y;
-    const hitSwipeUpHint =
-      Math.abs(pointX - DISPLAY_CENTER_PX) <= CRATE_SWIPE_UP_HINT_HALF_WIDTH_PX &&
-      pointY >= CRATE_SWIPE_UP_HINT_TOP_Y &&
-      pointY <= CRATE_SWIPE_UP_HINT_BOTTOM_Y;
-    if (hitCenterSleeve || hitPeekingDisc || hitSwipeUpHint) {
+    const hitFloatingNoteButton =
+      Math.hypot(pointX - DISPLAY_CENTER_PX, pointY - CRATE_NOTE_BUTTON_CENTER_Y) <=
+      CRATE_NOTE_BUTTON_HIT_RADIUS_PX;
+    if (hitCenterSleeve || hitPeekingDisc || hitFloatingNoteButton) {
       return true;
     }
 

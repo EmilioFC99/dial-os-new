@@ -78,8 +78,6 @@ const SCROLL_ROLL_RADIANS_PER_SLOT = 0.06;
 const ALPHA_FADE_START_DELTA = 1.05;
 const ALPHA_FADE_END_DELTA = 1.62;
 
-const MAX_SUBTITLE_TITLE_LENGTH = 18;
-const TRUNCATED_TITLE_LENGTH = 17;
 const DEFAULT_PLAYBACK_VOLUME = 0.62;
 const LIBRARY_SLOT_INDEX = 1;
 const VALID_PLAYBACK_STATES = new Set(["idle", "playing", "paused", "storage"]);
@@ -273,13 +271,9 @@ export function resolveHomeAppSubtitle(appSpec, context = {}) {
           ? context.trackTitle.trim()
           : "MIDNIGHT GROOVE";
       const upperTitle = titleSource.toUpperCase();
-      const compactTitle =
-        upperTitle.length > MAX_SUBTITLE_TITLE_LENGTH
-          ? `${upperTitle.slice(0, TRUNCATED_TITLE_LENGTH).trimEnd()}\u2026`
-          : upperTitle;
       const elapsedClock = formatClockTime(context?.trackElapsedSeconds);
       const durationClock = formatClockTime(context?.trackDurationSeconds);
-      return `${compactTitle} \u00b7 ${elapsedClock} / ${durationClock}`;
+      return `${upperTitle} \u00b7 ${elapsedClock} / ${durationClock}`;
     }
     if (playbackState === "storage") {
       return "USB STORAGE \u00b7 42.6 GB FREE";

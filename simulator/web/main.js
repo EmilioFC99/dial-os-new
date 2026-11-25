@@ -1289,13 +1289,16 @@ function renderDisplayFrame(
       palette,
       coverCache,
       catalogAlbums,
+      animationTimeSeconds: nowPlayingState.idleClockSeconds,
     });
   } else if (routerState.activeScreen === "library") {
     renderLibraryScreen(drawingContext, libraryState, {
       appearance: shellState.appearance,
       palette,
       coverCache,
+      animationTimeSeconds: libraryState.idleClockSeconds,
       playback: {
+        isPlaying: audioState.isPlaying,
         elapsedSeconds: audioState.elapsedSeconds,
         durationSeconds: audioState.durationSeconds,
         volumeLevel: audioState.volumeLevel,
@@ -1313,6 +1316,7 @@ function renderDisplayFrame(
       trackElapsedSeconds: audioState.elapsedSeconds,
       trackDurationSeconds: audioState.durationSeconds,
       coverCache,
+      animationTimeSeconds: homeState.idleClockSeconds,
     });
   }
 

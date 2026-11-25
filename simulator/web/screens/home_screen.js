@@ -27,7 +27,7 @@ import {
 } from "../core/home_controller.js";
 import { drawDialOsEmblem } from "../core/primitives.js";
 import { APPEARANCE_PALETTES, FONT_DISPLAY, FONT_MONO } from "../core/tokens.js";
-import { drawLibraryVinylDisc } from "./library_screen.js";
+import { drawLibraryVinylDisc, drawMarqueeCanvasText } from "./library_screen.js";
 
 const ALPHA_VISIBILITY_THRESHOLD = 0.005;
 const PERCENT_SCALE = 100;
@@ -144,6 +144,9 @@ function resolveRenderContext(renderContext) {
       ? sourceContext.activeAlbum
       : null;
   const coverCache = sourceContext.coverCache || null;
+  const animationTimeSeconds = Number.isFinite(sourceContext.animationTimeSeconds)
+    ? sourceContext.animationTimeSeconds
+    : null;
 
   return {
     appearance,
@@ -154,6 +157,7 @@ function resolveRenderContext(renderContext) {
     trackDurationSeconds,
     activeAlbum,
     coverCache,
+    animationTimeSeconds,
   };
 }
 
@@ -1384,7 +1388,14 @@ function drawHomeBottomChord(
 
   drawingContext.font = `600 9.5px ${FONT_MONO}`;
   drawingContext.fillStyle = palette.inkSecondary;
-  drawingContext.fillText(subtitleText, DISPLAY_CENTER_PX, 272);
+  drawMarqueeCanvasText(
+    drawingContext,
+    subtitleText,
+    DISPLAY_CENTER_PX,
+    272,
+    232,
+    resolvedContext.animationTimeSeconds ?? 0,
+  );
   drawingContext.restore();
 
   drawingContext.save();
@@ -1705,6 +1716,9 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
     ? homeState.volumeLevel
     : DEFAULT_VOLUME_RATIO;
   const clockSeconds = Number.isFinite(homeState.idleClockSeconds) ? homeState.idleClockSeconds : 0;
+  resolvedContext.animationTimeSeconds = Number.isFinite(resolvedContext.animationTimeSeconds)
+    ? resolvedContext.animationTimeSeconds
+    : clockSeconds;
   const vinylRotationRadians =
     (Number.isFinite(homeState.vinylRotationRadians) ? homeState.vinylRotationRadians : 0) +
     (Number.isFinite(homeState.vinylNudgeRadians) ? homeState.vinylNudgeRadians : 0);
