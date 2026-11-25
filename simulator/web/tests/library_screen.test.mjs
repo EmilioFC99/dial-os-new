@@ -856,6 +856,47 @@ describe("library_screen.js Albums Crate peeking disc, floating note button, and
       true,
       "playing album peeking disc should rotate with vinylRotationRadians",
     );
+
+    const peekDiscGreenArcs = playingContext.recordedStrokes.filter(
+      (strokeEntry) =>
+        String(strokeEntry.strokeStyle || "").toUpperCase() ===
+          APPEARANCE_PALETTES.dark.signalHighlight.toUpperCase() &&
+        strokeEntry.arcs.some(
+          (arcEntry) => arcEntry.worldCenterX > 195 && arcEntry.worldRadius >= 44,
+        ),
+    );
+    assert.equal(
+      peekDiscGreenArcs.length,
+      0,
+      "peeking vinyl in Albums crate must omit green outer rim arc",
+    );
+
+    const sleeveGreenCornerBrackets = playingContext.recordedStrokes.filter(
+      (strokeEntry) =>
+        String(strokeEntry.strokeStyle || "").toUpperCase() ===
+          APPEARANCE_PALETTES.dark.signalHighlight.toUpperCase() &&
+        strokeEntry.arcs.length === 0 &&
+        strokeEntry.points.length >= 4,
+    );
+    assert.ok(
+      sleeveGreenCornerBrackets.length >= 1,
+      "focused album sleeve must preserve green corner brackets",
+    );
+
+    const peekDiscCenterLabels = playingContext.recordedStrokes.filter((strokeEntry) =>
+      strokeEntry.arcs.some(
+        (arcEntry) =>
+          arcEntry.worldCenterX > 195 &&
+          arcEntry.worldRadius >= 10 &&
+          arcEntry.worldRadius <= 22 &&
+          /#F5F6F8/i.test(String(strokeEntry.strokeStyle || "")),
+      ),
+    );
+    assert.equal(
+      peekDiscCenterLabels.length,
+      0,
+      "peeking vinyl in Albums crate must pass { showCenterLabel: false }",
+    );
   });
 
   test("renderLibraryAlbumCrate omits SWIPE UP · TRACKS, draws floating music-note button near (180, 325), and hitTestLibraryInteractive matches it", () => {
@@ -952,11 +993,28 @@ describe("library_screen.js Albums Crate peeking disc, floating note button, and
         .flatMap((clipEntry) => clipEntry.arcs)
         .filter((arcEntry) => arcEntry.worldRadius >= 45);
 
+      const activeDiscClipArc = discClipArcs[discClipArcs.length - 1] || null;
+      const greenDiscRimArcStrokes = drawingContext.recordedStrokes.filter(
+        (strokeEntry) =>
+          String(strokeEntry.strokeStyle || "").toUpperCase() ===
+            APPEARANCE_PALETTES.dark.signalHighlight.toUpperCase() &&
+          activeDiscClipArc &&
+          strokeEntry.arcs.some(
+            (arcEntry) =>
+              Math.abs(arcEntry.worldRadius - activeDiscClipArc.worldRadius) <= 3 &&
+              Math.hypot(
+                arcEntry.worldCenterX - activeDiscClipArc.worldCenterX,
+                arcEntry.worldCenterY - activeDiscClipArc.worldCenterY,
+              ) <= 3,
+          ),
+      );
+
       return {
         snapshot,
         sleeveRect: sleeveRects[0] || null,
-        discClipArc: discClipArcs[discClipArcs.length - 1] || null,
+        discClipArc: activeDiscClipArc,
         discRotationRadians: drawingContext.recordedRotations[0],
+        greenArcStrokes: greenDiscRimArcStrokes,
       };
     }
 
@@ -965,6 +1023,20 @@ describe("library_screen.js Albums Crate peeking disc, floating note button, and
     const midReturnFrame = renderCrateReturnFrame(0.5);
     const lateReturnFrame = renderCrateReturnFrame(0.8);
     const settledFrame = renderCrateReturnFrame(1.0);
+
+    for (const sampledFrame of [
+      startFrame,
+      earlyReturnFrame,
+      midReturnFrame,
+      lateReturnFrame,
+      settledFrame,
+    ]) {
+      assert.equal(
+        sampledFrame.greenArcStrokes.length,
+        0,
+        "Now Playing -> Albums return transition must not draw a green outer ring on top of the vinyl or sleeve",
+      );
+    }
 
     assert.ok(startFrame.discClipArc, "start of return must draw full-bleed vinyl disc");
     assert.ok(Math.abs(startFrame.discClipArc.worldRadius - VINYL_FULL_RADIUS_PX) <= 1);

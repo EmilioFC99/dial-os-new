@@ -333,11 +333,20 @@ function handoffHomeAppIfLaunched() {
     return true;
   }
   if (launchedHomeState.launchedAppId === "now-playing") {
+    const hasActiveVinyl = Boolean(
+      launchedHomeState.hasActiveTrack ||
+        launchedHomeState.playbackState === "playing" ||
+        launchedHomeState.playbackState === "paused",
+    );
+    if (hasActiveVinyl && launchedHomeState.launchProgress < 1) {
+      return false;
+    }
     clearActiveCanvasPointer();
     nowPlayingController.enterFromHome({
       returnScreen: "home",
       audioState: audioEngine.getState(),
       vinylRotationRadians: handoffRotationRadians,
+      skipOpenTransition: hasActiveVinyl,
     });
     router.navigateTo("now-playing");
     return true;

@@ -49,6 +49,11 @@ const CUBE_HIT_SCALE = 1.25;
 const CUBE_HIT_PADDING_PX = 8;
 
 const RIM_SHEEN_RADIUS_PX = 175;
+const EDGE_PROGRESS_RADIUS_PX = DISPLAY_CENTER_PX - 1.5;
+const EDGE_PROGRESS_LINE_WIDTH_PX = 1.6;
+const EXPANDED_CHROME_REVEAL_START_PROGRESS = 0.72;
+const EXPANDED_CHROME_REVEAL_END_PROGRESS = 1.0;
+const EDGE_PROGRESS_MIN_RATIO = 0.001;
 const GLASS_FLOOR_TOP_Y = 202;
 const GLASS_FLOOR_BOTTOM_Y = 232;
 const GLASS_FLOOR_RAIL_SPACING_PX = 36;
@@ -316,13 +321,20 @@ function drawAlbumArtworkDisc(
     drawingContext.fillRect(-radius * 0.78, -radius * 0.58 + barIndex * barPitch, barWidth, barHeight);
   }
 
-  drawingContext.strokeStyle = discGrooveColor;
-  drawingContext.lineWidth = Math.max(0.8, radius * 0.008);
-  const grooveRatios = [0.88, 0.78, 0.68, 0.48];
-  for (let grooveIndex = 0; grooveIndex < grooveRatios.length; grooveIndex += 1) {
-    drawingContext.beginPath();
-    drawingContext.arc(0, 0, radius * grooveRatios[grooveIndex], 0, FULL_CIRCLE_RADIANS);
-    drawingContext.stroke();
+  const grooveAlpha = clamp(
+    Number.isFinite(vinylOptions?.grooveAlpha) ? vinylOptions.grooveAlpha : 1,
+    0,
+    1,
+  );
+  if (grooveAlpha > ALPHA_VISIBILITY_THRESHOLD) {
+    drawingContext.strokeStyle = discGrooveColor;
+    drawingContext.lineWidth = Math.max(0.8, radius * 0.008);
+    const grooveRatios = [0.88, 0.78, 0.68, 0.48];
+    for (let grooveIndex = 0; grooveIndex < grooveRatios.length; grooveIndex += 1) {
+      drawingContext.beginPath();
+      drawingContext.arc(0, 0, radius * grooveRatios[grooveIndex], 0, FULL_CIRCLE_RADIANS);
+      drawingContext.stroke();
+    }
   }
 
   if (vinylOptions?.showCenterLabel !== false) {
@@ -579,6 +591,7 @@ function drawAliveCubeIcon(
   palette,
   activeAlbum = null,
   coverCache = null,
+  hideVinylDisc = false,
 ) {
   const cubeScale = halfSize / CUBE_ICON_BASE_HALF_SIZE_PX;
   const highlightActive = focusWeight > 0.38;
@@ -599,46 +612,43 @@ function drawAliveCubeIcon(
 
   if (appId === "now-playing") {
     if (playbackState === "playing" || playbackState === "paused") {
-      const discRadius = halfSize * 0.64;
-      const foreshortenX = clamp(Math.cos(angleY) * 0.92, 0.24, 1.0);
-      const foreshortenY = clamp(Math.cos(angleX) * 0.96, 0.55, 1.0);
-      const discCenterY = centerY - halfSize * 0.08;
+      if (!hideVinylDisc) {
+        const discRadius = halfSize * 0.64;
+        const foreshortenX = clamp(Math.cos(angleY) * 0.92, 0.24, 1.0);
+        const foreshortenY = clamp(Math.cos(angleX) * 0.96, 0.55, 1.0);
+        const discCenterY = centerY - halfSize * 0.08;
 
-      drawingContext.save();
-      drawingContext.translate(
-        centerX + Math.sin(angleY) * 3.5 * cubeScale,
-        discCenterY + 2.2 * cubeScale,
-      );
-      drawingContext.scale(foreshortenX, foreshortenY);
-      drawingContext.beginPath();
-      drawingContext.arc(0, 0, discRadius, 0, FULL_CIRCLE_RADIANS);
-      drawingContext.fillStyle = appearance === "dark" ? "#2A303C" : "#1B1E24";
-      drawingContext.fill();
-      drawingContext.restore();
+        drawingContext.save();
+        drawingContext.translate(
+          centerX + Math.sin(angleY) * 3.5 * cubeScale,
+          discCenterY + 2.2 * cubeScale,
+        );
+        drawingContext.scale(foreshortenX, foreshortenY);
+        drawingContext.beginPath();
+        drawingContext.arc(0, 0, discRadius, 0, FULL_CIRCLE_RADIANS);
+        drawingContext.fillStyle = appearance === "dark" ? "#2A303C" : "#1B1E24";
+        drawingContext.fill();
+        drawingContext.restore();
 
-      drawingContext.save();
-      drawingContext.translate(centerX, discCenterY);
-      drawingContext.rotate(angleZ * 0.6);
-      drawingContext.scale(foreshortenX, foreshortenY);
-      drawAlbumArtworkDisc(
-        drawingContext,
-        0,
-        0,
-        discRadius,
-        vinylRotationRadians,
-        palette,
-        appearance,
-        1.0,
-        activeAlbum,
-        coverCache,
-      );
-
-      drawingContext.strokeStyle = highlightActive ? palette.signalHighlight : palette.hairlineStrong;
-      drawingContext.lineWidth = highlightActive ? 2.1 : 1.3;
-      drawingContext.beginPath();
-      drawingContext.arc(0, 0, discRadius + 1, 0, FULL_CIRCLE_RADIANS);
-      drawingContext.stroke();
-      drawingContext.restore();
+        drawingContext.save();
+        drawingContext.translate(centerX, discCenterY);
+        drawingContext.rotate(angleZ * 0.6);
+        drawingContext.scale(foreshortenX, foreshortenY);
+        drawAlbumArtworkDisc(
+          drawingContext,
+          0,
+          0,
+          discRadius,
+          vinylRotationRadians,
+          palette,
+          appearance,
+          1.0,
+          activeAlbum,
+          coverCache,
+          { showCenterLabel: false, grooveAlpha: 0 },
+        );
+        drawingContext.restore();
+      }
 
       if (cubeScale > 0.45) {
         const barCount = 4;
@@ -1098,6 +1108,7 @@ function drawGlassAppCube(drawingContext, options) {
     palette,
     activeAlbum = null,
     coverCache = null,
+    hideVinylDisc = false,
   } = options;
 
   if (alpha <= ALPHA_VISIBILITY_THRESHOLD || halfSize <= 3) {
@@ -1233,6 +1244,7 @@ function drawGlassAppCube(drawingContext, options) {
     palette,
     activeAlbum,
     coverCache,
+    hideVinylDisc,
   );
 
   /* Layer 4: Front translucent crystal facets, specular refraction glare & corner brackets */
@@ -1436,109 +1448,61 @@ function drawHomeBottomChord(
 }
 
 /**
- * Render the launched Now Playing spindle progress ring, volume arc, and handle chrome.
+ * Render the outer-edge progress arc matching Now Playing during zoom handoff.
  */
 function drawNowPlayingExpandedChrome(
   drawingContext,
   launchProgress,
   trackElapsedSeconds,
   trackDurationSeconds,
-  volumeLevel,
+  _volumeLevel,
   palette,
 ) {
-  const waveOne = easeOutExpo(normalizeRange(launchProgress, 0.52, 0.86));
-  if (waveOne > 0.01) {
-    const spindleRadius = lerp(12, 27, waveOne);
-    const activeDuration = Math.max(1, trackDurationSeconds);
-    const trackRatio = clamp((trackElapsedSeconds % activeDuration) / activeDuration, 0, 1);
+  const revealAlpha = easeOutCubic(
+    normalizeRange(
+      launchProgress,
+      EXPANDED_CHROME_REVEAL_START_PROGRESS,
+      EXPANDED_CHROME_REVEAL_END_PROGRESS,
+    ),
+  );
+  if (revealAlpha <= ALPHA_VISIBILITY_THRESHOLD) {
+    return;
+  }
 
-    drawingContext.save();
-    drawingContext.globalAlpha = waveOne;
+  const activeDuration = Math.max(1, trackDurationSeconds);
+  const trackRatio = clamp(trackElapsedSeconds / activeDuration, 0, 1);
 
-    drawingContext.beginPath();
-    drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, spindleRadius, 0, FULL_CIRCLE_RADIANS);
-    drawingContext.fillStyle = "rgba(6, 7, 9, 0.88)";
-    drawingContext.fill();
+  drawingContext.save();
+  drawingContext.globalAlpha = revealAlpha;
 
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    EDGE_PROGRESS_RADIUS_PX,
+    0,
+    FULL_CIRCLE_RADIANS,
+  );
+  drawingContext.strokeStyle = "rgba(245, 246, 248, 0.20)";
+  drawingContext.lineWidth = EDGE_PROGRESS_LINE_WIDTH_PX;
+  drawingContext.stroke();
+
+  if (trackRatio > EDGE_PROGRESS_MIN_RATIO) {
     drawingContext.beginPath();
     drawingContext.arc(
       DISPLAY_CENTER_PX,
       DISPLAY_CENTER_PX,
-      spindleRadius - 4,
-      0,
-      FULL_CIRCLE_RADIANS,
-    );
-    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.22)";
-    drawingContext.lineWidth = 3;
-    drawingContext.stroke();
-
-    drawingContext.beginPath();
-    drawingContext.arc(
-      DISPLAY_CENTER_PX,
-      DISPLAY_CENTER_PX,
-      spindleRadius - 4,
+      EDGE_PROGRESS_RADIUS_PX,
       TOP_ANGLE_RADIANS,
       TOP_ANGLE_RADIANS + trackRatio * FULL_CIRCLE_RADIANS,
     );
     drawingContext.strokeStyle = palette.signalHighlight;
-    drawingContext.lineWidth = 3.2;
+    drawingContext.lineWidth = EDGE_PROGRESS_LINE_WIDTH_PX;
     drawingContext.lineCap = "butt";
     drawingContext.stroke();
-
-    drawingContext.beginPath();
-    drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, 5, 0, FULL_CIRCLE_RADIANS);
-    drawingContext.fillStyle = "#F5F6F8";
-    drawingContext.fill();
-    drawingContext.restore();
   }
 
-  const waveTwo = easeOutCubic(normalizeRange(launchProgress, 0.68, 1.0));
-  if (waveTwo > 0.01) {
-    drawingContext.save();
-    drawingContext.globalAlpha = waveTwo;
-
-    const volumeArcRadius = 166;
-    const volumeStart = -0.46;
-    const volumeEnd = 0.46;
-    const clampedVolume = clamp(Number(volumeLevel ?? DEFAULT_VOLUME_RATIO), 0, 1);
-
-    drawingContext.beginPath();
-    drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, volumeArcRadius, volumeStart, volumeEnd);
-    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.26)";
-    drawingContext.lineWidth = 4;
-    drawingContext.lineCap = "butt";
-    drawingContext.stroke();
-
-    drawingContext.beginPath();
-    drawingContext.arc(
-      DISPLAY_CENTER_PX,
-      DISPLAY_CENTER_PX,
-      volumeArcRadius,
-      lerp(volumeEnd, volumeStart, clampedVolume),
-      volumeEnd,
-    );
-    drawingContext.strokeStyle = palette.signalHighlight;
-    drawingContext.lineWidth = 4.2;
-    drawingContext.stroke();
-
-    drawingContext.fillStyle = "rgba(245, 246, 248, 0.72)";
-    drawingContext.fillRect(
-      DISPLAY_CENTER_PX - TOP_HANDLE_HALF_WIDTH_PX,
-      TOP_HANDLE_Y,
-      TOP_HANDLE_HALF_WIDTH_PX * 2,
-      TOP_HANDLE_HEIGHT_PX,
-    );
-
-    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.82)";
-    drawingContext.lineWidth = 2;
-    drawingContext.beginPath();
-    drawingContext.moveTo(DISPLAY_CENTER_PX - 6, 332);
-    drawingContext.lineTo(DISPLAY_CENTER_PX, 326);
-    drawingContext.lineTo(DISPLAY_CENTER_PX + 6, 332);
-    drawingContext.stroke();
-
-    drawingContext.restore();
-  }
+  drawingContext.restore();
 }
 
 function buildDestinationRows(appId, appearance) {
@@ -1808,6 +1772,7 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
             palette,
             activeAlbum,
             coverCache,
+            hideVinylDisc: true,
           });
         }
 
@@ -1819,23 +1784,11 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
           vinylRotationRadians,
           palette,
           appearance,
-          easeOutCubic(normalizeRange(launchProgress, 0.06, 0.24)),
+          1.0,
           activeAlbum,
           coverCache,
-          { showCenterLabel: false },
+          { showCenterLabel: false, grooveAlpha: 0 },
         );
-
-        if (launchProgress > 0.14 && launchProgress < 0.96) {
-          const outlineAlpha = (1 - normalizeRange(launchProgress, 0.55, 0.96)) * 0.65;
-          drawingContext.save();
-          drawingContext.globalAlpha = outlineAlpha;
-          drawingContext.strokeStyle = palette.signalHighlight;
-          drawingContext.lineWidth = 1.2;
-          drawingContext.beginPath();
-          drawingContext.arc(discCenterX, discCenterY, discRadius + 1.5, 0, FULL_CIRCLE_RADIANS);
-          drawingContext.stroke();
-          drawingContext.restore();
-        }
         continue;
       }
 

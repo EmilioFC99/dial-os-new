@@ -1019,6 +1019,7 @@ export function createNowPlayingController({
     resolvedLaunchOrigin,
     audioState,
     initialVinylRotationRadians,
+    skipOpenTransition = false,
   ) {
     returnScreen = resolvedReturnScreen;
     launchOrigin = resolvedLaunchOrigin;
@@ -1061,8 +1062,8 @@ export function createNowPlayingController({
     }
 
     if (operatingMode === "playing") {
-      openTransitionProgress = 0;
-      openChromeHoldSeconds = OPEN_CHROME_HOLD_SECONDS;
+      openTransitionProgress = skipOpenTransition ? 1 : 0;
+      openChromeHoldSeconds = skipOpenTransition ? 0 : OPEN_CHROME_HOLD_SECONDS;
       openChromeHoldAlpha = 0;
       vinylNudgeRadians = 0;
       vinylNudgeTarget = 0;
@@ -1268,12 +1269,14 @@ export function createNowPlayingController({
    * @param {string} [options.launchOrigin="home"] Launch origin identifier (`home` | `album-crate` | `library`).
    * @param {object | null} [options.audioState] Current audio engine snapshot.
    * @param {number} [options.vinylRotationRadians] Synchronized vinyl angle in radians.
+   * @param {boolean} [options.skipOpenTransition=false] Skip secondary zoom when Home already zoomed in.
    */
   function enterFromHome({
     returnScreen: nextReturnScreen = "home",
     launchOrigin: nextLaunchOrigin = "home",
     audioState,
     vinylRotationRadians: nextVinylRotationRadians,
+    skipOpenTransition = false,
   } = {}) {
     const resolvedReturn =
       typeof nextReturnScreen === "string" && nextReturnScreen.length > 0
@@ -1283,7 +1286,13 @@ export function createNowPlayingController({
       nextLaunchOrigin === "album-crate" || nextLaunchOrigin === "library"
         ? nextLaunchOrigin
         : "home";
-    enterScreen(resolvedReturn, resolvedOrigin, audioState, nextVinylRotationRadians);
+    enterScreen(
+      resolvedReturn,
+      resolvedOrigin,
+      audioState,
+      nextVinylRotationRadians,
+      Boolean(skipOpenTransition),
+    );
   }
 
   /**

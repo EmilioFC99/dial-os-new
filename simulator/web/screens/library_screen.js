@@ -102,9 +102,6 @@ const TRACKLIST_DISC_START_RADIUS_PX = 36;
 const CRATE_SLIP_OUT_SPLIT_PROGRESS = 0.36;
 const CRATE_SLEEVE_SLIDE_END_PROGRESS = 0.72;
 const CRATE_SLEEVE_FADE_START_PROGRESS = 0.38;
-const HALO_VISIBLE_MIN_PROGRESS = 0.12;
-const HALO_VISIBLE_MAX_PROGRESS = 0.96;
-const HALO_FADE_START_PROGRESS = 0.52;
 const EXPANDED_CHROME_MIN_PROGRESS = 0.35;
 
 function resolvePalette(appearance, palette) {
@@ -1811,16 +1808,8 @@ function drawCrateAlbumSleeveWithDisc(
       appearance,
       discAlpha,
       coverCache,
+      { showCenterLabel: false },
     );
-
-    drawingContext.save();
-    drawingContext.strokeStyle = palette.signalHighlight;
-    drawingContext.lineWidth = 1.4;
-    drawingContext.globalAlpha = baseAlpha * peekWeight * 0.85;
-    drawingContext.beginPath();
-    drawingContext.arc(discPeekX, centerY, discRadius + 0.8, -Math.PI * 0.44, Math.PI * 0.44);
-    drawingContext.stroke();
-    drawingContext.restore();
   }
 
   drawCrateAlbumSleeveBox(drawingContext, album, {
@@ -2986,23 +2975,6 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
           coverCache,
         });
       }
-    }
-
-    if (
-      launchProgress > HALO_VISIBLE_MIN_PROGRESS &&
-      launchProgress < HALO_VISIBLE_MAX_PROGRESS
-    ) {
-      const haloAlpha =
-        (1 - normalizeRange(launchProgress, HALO_FADE_START_PROGRESS, HALO_VISIBLE_MAX_PROGRESS)) *
-        0.72;
-      drawingContext.save();
-      drawingContext.globalAlpha = haloAlpha;
-      drawingContext.strokeStyle = palette.signalHighlight;
-      drawingContext.lineWidth = 1.4;
-      drawingContext.beginPath();
-      drawingContext.arc(discCenterX, discCenterY, discRadius + 1.5, 0, FULL_CIRCLE_RADIANS);
-      drawingContext.stroke();
-      drawingContext.restore();
     }
 
     if (launchProgress > EXPANDED_CHROME_MIN_PROGRESS) {

@@ -467,6 +467,134 @@ describe("home_screen.js Now Playing transition and subtitle marquee", () => {
     assert.ok(Math.abs(pausedEndAngle - RETURN_START_ANGLE_RADIANS) < FLOAT_TOLERANCE);
   });
 
+  test("renderHomeScreen zooms single optical vinyl disc cleanly from cube thumbnail to full-bleed with outer-edge progress arc and zero center puck or green vinyl rim", () => {
+    const LAUNCH_START_ANGLE_RADIANS = 0.72;
+    const homeController = createSettledHomeController();
+    homeController.syncPlaybackState({
+      playbackState: "playing",
+      hasActiveTrack: true,
+    });
+    homeController.selectAppById("now-playing");
+    homeController.setVinylRotationRadians(LAUNCH_START_ANGLE_RADIANS);
+    homeController.launchFocusedApp();
+
+    function inspectLaunchFrame(stepSeconds) {
+      if (stepSeconds > 0) {
+        homeController.step(stepSeconds);
+      }
+      const snapshot = homeController.getRenderSnapshot();
+      const drawingContext = createRecordingCanvasContext();
+      homeScreen.renderHomeScreen(drawingContext, snapshot, {
+        appearance: "dark",
+        palette: APPEARANCE_PALETTES.dark,
+        activeAlbum: { id: "a1", title: "Alpha Horizons", motif: "prism" },
+        trackElapsedSeconds: 60,
+        trackDurationSeconds: 180,
+      });
+
+      const discClipArcs = drawingContext.recordedClips
+        .flatMap((clipEntry) => clipEntry.arcs)
+        .filter((arcEntry) => arcEntry.worldRadius >= 24);
+      const greenVinylRimArcStrokes = drawingContext.recordedStrokes.filter(
+        (strokeEntry) =>
+          String(strokeEntry.strokeStyle || "").toUpperCase() ===
+            APPEARANCE_PALETTES.dark.signalHighlight.toUpperCase() &&
+          strokeEntry.arcs.some(
+            (arcEntry) =>
+              arcEntry.radiusY === undefined &&
+              arcEntry.worldRadius >= 24 &&
+              arcEntry.worldRadius < 176,
+          ),
+      );
+      const smallSpindleFills = drawingContext.recordedFills.filter((fillEntry) =>
+        fillEntry.arcs.some(
+          (arcEntry) =>
+            arcEntry.worldRadius <= 35 &&
+            Math.hypot(
+              arcEntry.worldCenterX - DISPLAY_CENTER_PX,
+              arcEntry.worldCenterY - DISPLAY_CENTER_PX,
+            ) <= 4,
+        ),
+      );
+      const outerEdgeArcs = drawingContext.recordedStrokes
+        .filter(
+          (strokeEntry) =>
+            String(strokeEntry.strokeStyle || "").toUpperCase() ===
+              APPEARANCE_PALETTES.dark.signalHighlight.toUpperCase() &&
+            strokeEntry.arcs.length > 0,
+        )
+        .flatMap((strokeEntry) =>
+          strokeEntry.arcs.filter(
+            (arcEntry) => arcEntry.worldRadius >= 176 && arcEntry.worldRadius <= 180,
+          ),
+        );
+
+      return {
+        snapshot,
+        drawingContext,
+        discClipArcs,
+        discClipArc: discClipArcs[discClipArcs.length - 1] || null,
+        greenArcStrokes: greenVinylRimArcStrokes,
+        smallSpindleFills,
+        outerEdgeArcs,
+        discRotationRadians:
+          drawingContext.recordedRotations[drawingContext.recordedRotations.length - 1],
+      };
+    }
+
+    const startFrame = inspectLaunchFrame(0);
+    const earlyZoomFrame = inspectLaunchFrame(0.2 * HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+    const midZoomFrame = inspectLaunchFrame(0.3 * HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+    const lateZoomFrame = inspectLaunchFrame(0.45 * HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+
+    assert.equal(startFrame.discClipArcs.length, 1, "resting Home cube draws one vinyl disc");
+    assert.equal(
+      earlyZoomFrame.discClipArcs.length,
+      1,
+      "early cube-dissolve zoom must render a single unified vinyl disc without duplicate crossfade",
+    );
+    assert.equal(
+      startFrame.greenArcStrokes.length,
+      0,
+      "resting Home cube vinyl must omit green outer vinyl ring",
+    );
+    assert.equal(
+      earlyZoomFrame.greenArcStrokes.length,
+      0,
+      "early zoom vinyl must omit green outer vinyl ring",
+    );
+    assert.equal(
+      midZoomFrame.greenArcStrokes.length,
+      0,
+      "mid zoom vinyl must omit green outer vinyl ring",
+    );
+
+    assert.ok(
+      startFrame.discClipArc.worldRadius < earlyZoomFrame.discClipArc.worldRadius &&
+        earlyZoomFrame.discClipArc.worldRadius < midZoomFrame.discClipArc.worldRadius &&
+        midZoomFrame.discClipArc.worldRadius < lateZoomFrame.discClipArc.worldRadius,
+      "Home -> Now Playing disc radius must expand monotonically toward full bleed",
+    );
+    assert.ok(Math.abs(lateZoomFrame.discClipArc.worldCenterY - DISPLAY_CENTER_PX) <= 2);
+
+    assert.equal(
+      lateZoomFrame.smallSpindleFills.length,
+      0,
+      "zooming into full-bleed Now Playing must not draw legacy center spindle puck",
+    );
+    assert.ok(
+      lateZoomFrame.outerEdgeArcs.length >= 1,
+      "near-complete zoom should reveal outer-edge [176, 180] progress arc",
+    );
+
+    const expectedLateAngle =
+      LAUNCH_START_ANGLE_RADIANS + RETURN_ROTATION_TWENTY_DEG_RADIANS * 0.95;
+    assert.ok(
+      Math.abs(lateZoomFrame.discRotationRadians - expectedLateAngle) < 0.002,
+      "zooming vinyl must advance continuously at matched 20-deg angular speed",
+    );
+  });
+
   test("renderHomeScreen uses drawMarqueeCanvasText when the Home subtitle exceeds bounds and renders statically when fitting", () => {
     const homeController = createSettledHomeController();
     homeController.syncPlaybackState({

@@ -1781,6 +1781,30 @@ describe("createNowPlayingController skip transitions, quick actions, and queue 
     assert.equal(libraryEntrySnapshot.launchOrigin, "library");
     assert.equal(libraryEntrySnapshot.returnScreen, "library");
     assert.ok(Number.isFinite(libraryEntrySnapshot.vinylRotationRadians));
+
+    // 5. skipOpenTransition preserves openTransitionProgress === 1 after Home disc zoom handoff
+    nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+      skipOpenTransition: true,
+    });
+    const skippedZoomSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(skippedZoomSnapshot.openTransitionProgress, 1);
+    assert.ok(
+      Math.abs(skippedZoomSnapshot.vinylRotationRadians - HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE,
+    );
+    assert.ok(skippedZoomSnapshot.spinAngularVelocity > 0);
+
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    const postHandoffSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(postHandoffSnapshot.openTransitionProgress, 1);
+    assert.ok(
+      Math.abs(
+        postHandoffSnapshot.vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS),
+      ) < 0.002,
+    );
   });
 });
 
