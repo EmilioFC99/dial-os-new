@@ -48,6 +48,8 @@ const LAYER_VISIBILITY_THRESHOLD = 0.01;
 const DIAGONAL_MARK_COS_45 = 0.707;
 
 const RIM_SHEEN_RADIUS_PX = 175;
+const EDGE_PROGRESS_RADIUS_PX = DISPLAY_CENTER_PX - 1.5;
+const EDGE_PROGRESS_LINE_WIDTH_PX = 1.6;
 const VOLUME_ARC_RADIUS_PX = 166;
 const VOLUME_ARC_START_RADIANS = -0.48;
 const VOLUME_ARC_END_RADIANS = 0.48;
@@ -266,7 +268,6 @@ function drawNowPlayingOpticalVinyl(
   appearance,
   alpha,
   coverCache,
-  vinylOptions = {},
 ) {
   if (alpha <= ALPHA_VISIBILITY_THRESHOLD || radius <= 2) {
     return;
@@ -284,21 +285,9 @@ function drawNowPlayingOpticalVinyl(
     coverCache,
     {
       showCenterLabel: false,
-      grooveAlpha: Number.isFinite(vinylOptions?.grooveAlpha) ? vinylOptions.grooveAlpha : 1,
+      grooveAlpha: 0,
     },
   );
-
-  if (vinylOptions?.showRimStroke !== false) {
-    drawingContext.save();
-    drawingContext.globalAlpha = alpha;
-    drawingContext.translate(centerX, centerY);
-    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.14)";
-    drawingContext.lineWidth = 1;
-    drawingContext.beginPath();
-    drawingContext.arc(0, 0, Math.max(4, radius - 2.5), 0, FULL_CIRCLE_RADIANS);
-    drawingContext.stroke();
-    drawingContext.restore();
-  }
 }
 
 function drawNowPlayingActionIcon(
@@ -468,6 +457,39 @@ function drawNowPlayingSpindleAndSeek(
   drawingContext.save();
   drawingContext.globalAlpha = openWaveOne;
 
+  // Thin outer-edge song progress bar so center artwork stays pure full-bleed at rest.
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    EDGE_PROGRESS_RADIUS_PX,
+    0,
+    FULL_CIRCLE_RADIANS,
+  );
+  drawingContext.strokeStyle = "rgba(245, 246, 248, 0.20)";
+  drawingContext.lineWidth = EDGE_PROGRESS_LINE_WIDTH_PX;
+  drawingContext.stroke();
+
+  if (trackRatio > 0.001) {
+    drawingContext.beginPath();
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      DISPLAY_CENTER_PX,
+      EDGE_PROGRESS_RADIUS_PX,
+      TOP_ANGLE_RADIANS,
+      progressEndAngle,
+    );
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = EDGE_PROGRESS_LINE_WIDTH_PX;
+    drawingContext.lineCap = "butt";
+    drawingContext.stroke();
+  }
+
+  if (holdCharge <= 0.02 && seekExpand <= 0.02) {
+    drawingContext.restore();
+    return;
+  }
+
   if (holdCharge > 0.02 && seekExpand < 0.35) {
     const chargeRadius = radius + 6;
     drawingContext.save();
@@ -626,8 +648,7 @@ function drawNowPlayingSpindleAndSeek(
 function drawNowPlayingVolumeHud(drawingContext, nowPlayingState, openWaveTwo, palette) {
   const volumeLevel = clamp(Number(nowPlayingState.volumeLevel ?? 0), 0, 1);
   const volumeHudAlpha = clamp(Number(nowPlayingState.volumeHudAlpha ?? 0), 0, 1);
-  const quickActionsProgress = clamp(Number(nowPlayingState.quickActionsProgress ?? 0), 0, 1);
-  const rimAlpha = Math.max(volumeHudAlpha, openWaveTwo * 0.85, quickActionsProgress * 0.72);
+  const rimAlpha = volumeHudAlpha;
   const centerRingAlpha = easeOutExpo(volumeHudAlpha);
 
   if (rimAlpha > LAYER_VISIBILITY_THRESHOLD) {
@@ -2241,19 +2262,10 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
     const isLyricsTransitioning =
       Boolean(nowPlayingState.lyricsOpen) ||
       Number(nowPlayingState.lyricsProgress ?? 0) > LAYER_VISIBILITY_THRESHOLD;
-    const vinylOptions = {
-      grooveAlpha: isLyricsTransitioning ? 0 : 1,
-      showRimStroke: !isLyricsTransitioning,
-    };
-
-    if (openProgress < 0.96) {
-      drawLibraryPerspectiveFloor(drawingContext, 0, 1 - openEase, palette, appearance);
-    }
 
     const skipTransitionProgress = clamp(Number(nowPlayingState.skipTransitionProgress ?? 1), 0, 1);
     const skipDirection = Number(nowPlayingState.skipDirection ?? 1) >= 0 ? 1 : -1;
     const dragOffsetX = Number(nowPlayingState.skipDragOffsetX ?? 0);
-    let entranceHaloCenterX = DISPLAY_CENTER_PX;
 
     if (skipTransitionProgress < 1 && nowPlayingState.previousTrack) {
       const skipEase = easeOutExpo(skipTransitionProgress);
@@ -2277,7 +2289,6 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
         appearance,
         1 - skipEase * 0.35,
         coverCache,
-        vinylOptions,
       );
       drawNowPlayingOpticalVinyl(
         drawingContext,
@@ -2290,7 +2301,6 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
         appearance,
         1,
         coverCache,
-        vinylOptions,
       );
     } else if (isAlbumCrateEntrance) {
       const sleeveSlideEase = easeInOutCubic(normalizeRange(openProgress, 0.0, 0.72));
@@ -2300,7 +2310,6 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
         openProgress <= 0.36
           ? lerp(218, 246, easeOutCubic(openProgress / 0.36))
           : lerp(246, DISPLAY_CENTER_PX, easeInOutCubic((openProgress - 0.36) / 0.64));
-      entranceHaloCenterX = discSlipOutX;
 
       drawNowPlayingOpticalVinyl(
         drawingContext,
@@ -2313,7 +2322,6 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
         appearance,
         1,
         coverCache,
-        vinylOptions,
       );
 
       if (sleeveAlpha > LAYER_VISIBILITY_THRESHOLD) {
@@ -2353,7 +2361,6 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
         appearance,
         1,
         coverCache,
-        vinylOptions,
       );
 
       if (peekChangesCover && Math.abs(dragOffsetX) > 12) {
@@ -2370,27 +2377,8 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
           appearance,
           0.88,
           coverCache,
-          vinylOptions,
         );
       }
-    }
-
-    if (openProgress > 0.06 && openProgress < 0.96 && !isLyricsTransitioning) {
-      const haloAlpha = (1 - normalizeRange(openProgress, 0.46, 0.96)) * 0.85;
-      drawingContext.save();
-      drawingContext.globalAlpha = haloAlpha;
-      drawingContext.strokeStyle = palette.signalHighlight;
-      drawingContext.lineWidth = lerp(3.4, 1.1, openEase);
-      drawingContext.beginPath();
-      drawingContext.arc(
-        entranceHaloCenterX,
-        DISPLAY_CENTER_PX,
-        discRadius + 1.5,
-        0,
-        FULL_CIRCLE_RADIANS,
-      );
-      drawingContext.stroke();
-      drawingContext.restore();
     }
 
     if (Number(nowPlayingState.lyricsProgress ?? 0) > LAYER_VISIBILITY_THRESHOLD) {

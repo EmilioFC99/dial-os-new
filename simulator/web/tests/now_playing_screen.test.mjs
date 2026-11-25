@@ -16,7 +16,9 @@ const MOCK_AUDIO_DURATION_SECONDS = 180;
 const MOCK_AUDIO_READY_STATE = 4;
 const VINYL_CENTER_LABEL_RADIUS_PX = 50.4;
 const PROGRESS_HALO_RADIUS_PX = 166;
-const RESTING_SPINDLE_RADIUS_PX = NOW_PLAYING_CONSTANTS.SPINDLE_BASE_RADIUS_PX;
+const EDGE_PROGRESS_MIN_RADIUS_PX = 176;
+const EDGE_PROGRESS_MAX_RADIUS_PX = 180;
+const SEEK_CENTER_HOLD_MAX_RADIUS_PX = 90;
 
 /**
  * Compute world coordinates from a local 2D point and affine transformation matrix.
@@ -542,7 +544,7 @@ function findCenteredStrokedArcs(drawingContext, minRadius, maxRadius) {
 }
 
 describe("now_playing_screen.js full-bleed vinyl, spindle ring, and chrome removals", () => {
-  test("full-bleed optical vinyl removes top-left/bottom-right white specular wedges and inner 50.4px white label ring", () => {
+  test("full-bleed optical vinyl removes top-left/bottom-right white specular wedges, inner 50.4px label ring, vinyl grooves, and inner rim stroke", () => {
     const { nowPlayingController, catalog } = createNowPlayingScreenHarness();
     const state = {
       ...nowPlayingController.getRenderSnapshot(),
@@ -601,9 +603,33 @@ describe("now_playing_screen.js full-bleed vinyl, spindle ring, and chrome remov
       0,
       "full-bleed vinyl must omit inner center label fill plate",
     );
+
+    // No concentric full-circle vinyl groove strokes in [75, 165] opposing pure full-bleed art
+    const grooveStrokes = findCenteredStrokedArcs(drawingContext, 75, 165).filter(
+      ({ strokeEntry, arcEntry }) =>
+        Math.abs(arcEntry.endAngle - arcEntry.startAngle) >= FULL_CIRCLE_RADIANS - 0.1 &&
+        strokeEntry.lineWidth <= 3,
+    );
+    assert.equal(
+      grooveStrokes.length,
+      0,
+      "full-bleed now playing cover must omit concentric vinyl groove circles",
+    );
+
+    // No inner 177.5px rim stroke opposing full-bleed art
+    const innerRimStrokes = findCenteredStrokedArcs(drawingContext, 177, 178).filter(
+      ({ strokeEntry, arcEntry }) =>
+        Math.abs(arcEntry.worldRadius - 177.5) <= 0.3 &&
+        Math.abs(strokeEntry.lineWidth - 1) <= 0.1,
+    );
+    assert.equal(
+      innerRimStrokes.length,
+      0,
+      "full-bleed now playing cover must omit inner rim border stroke",
+    );
   });
 
-  test("resting progress ring draws a single 13.5px perimeter circle and thin ~1.4px progress arc centered at (180, 180)", () => {
+  test("resting full-bleed playback draws zero center spindle rings/pucks and draws a thin outer-edge progress bar in [176, 180]", () => {
     const { nowPlayingController, catalog } = createNowPlayingScreenHarness();
     const restingState = {
       ...nowPlayingController.getRenderSnapshot(),
@@ -622,32 +648,125 @@ describe("now_playing_screen.js full-bleed vinyl, spindle ring, and chrome remov
       catalogAlbums: catalog.albums,
     });
 
-    const ringStrokes = findCenteredStrokedArcs(drawingContext, 8, 35);
-    assert.ok(
-      ringStrokes.length >= 2,
-      "resting progress ring should stroke perimeter track and active progress arc",
+    const centerRegionStrokes = findCenteredStrokedArcs(
+      drawingContext,
+      1,
+      SEEK_CENTER_HOLD_MAX_RADIUS_PX,
+    );
+    assert.equal(
+      centerRegionStrokes.length,
+      0,
+      "resting full-bleed view must not stroke any center spindle ring or circle (r <= 90px)",
     );
 
-    for (const { strokeEntry, arcEntry } of ringStrokes) {
+    const centerRegionFills = drawingContext.recordedFills.filter((fillEntry) =>
+      fillEntry.arcs.some(
+        (arcEntry) =>
+          arcEntry.worldRadius <= 35 &&
+          Math.hypot(
+            arcEntry.worldCenterX - DISPLAY_CENTER_PX,
+            arcEntry.worldCenterY - DISPLAY_CENTER_PX,
+          ) <= 2.5,
+      ),
+    );
+    assert.equal(
+      centerRegionFills.length,
+      0,
+      "resting full-bleed view must not draw any center spindle puck or dot fills",
+    );
+
+    const outerEdgeStrokes = findCenteredStrokedArcs(
+      drawingContext,
+      EDGE_PROGRESS_MIN_RADIUS_PX,
+      EDGE_PROGRESS_MAX_RADIUS_PX,
+    );
+    assert.ok(
+      outerEdgeStrokes.length >= 2,
+      "outer-edge progress bar should stroke background track and active progress arc in [176, 180]",
+    );
+
+    for (const { strokeEntry, arcEntry } of outerEdgeStrokes) {
       assert.ok(
-        Math.abs(arcEntry.worldRadius - RESTING_SPINDLE_RADIUS_PX) <= 0.8,
-        `all resting spindle progress rings must share single r=${RESTING_SPINDLE_RADIUS_PX}px perimeter, got r=${arcEntry.worldRadius}`,
+        arcEntry.worldRadius >= EDGE_PROGRESS_MIN_RADIUS_PX &&
+          arcEntry.worldRadius <= EDGE_PROGRESS_MAX_RADIUS_PX,
+        `outer-edge progress ring must lie in [176, 180], got r=${arcEntry.worldRadius}`,
       );
       assert.ok(
-        strokeEntry.lineWidth >= 0.8 && strokeEntry.lineWidth <= 1.8,
-        `resting progress ring stroke must be thin (~1.4px, <=1.8px), got lineWidth=${strokeEntry.lineWidth}`,
+        strokeEntry.lineWidth > 0 && strokeEntry.lineWidth <= 2.0,
+        `outer-edge progress ring must be thin (<=2.0px), got lineWidth=${strokeEntry.lineWidth}`,
       );
     }
 
     const expectedProgressSweep = (60 / 180) * FULL_CIRCLE_RADIANS;
-    const activeProgressArc = ringStrokes.find(({ arcEntry }) => {
+    const activeProgressArc = outerEdgeStrokes.find(({ arcEntry }) => {
       const sweep = Math.abs(arcEntry.endAngle - arcEntry.startAngle);
       return Math.abs(sweep - expectedProgressSweep) <= 0.15;
     });
     assert.ok(
       activeProgressArc,
-      "playback progress arc must trace directly along the single 13.5px perimeter",
+      "outer-edge playback progress arc sweep must match (elapsed / duration) * 2*PI",
     );
+  });
+
+  test("Seek Mode preserves center hold-charge ring, expanded seek dial, tick marks, scrub arc, and SEEK readout", () => {
+    const { nowPlayingController, catalog } = createNowPlayingScreenHarness();
+
+    const holdingState = {
+      ...nowPlayingController.getRenderSnapshot(),
+      openTransitionProgress: 1,
+      trackElapsedSeconds: 60,
+      trackDurationSeconds: 180,
+      seekHoldProgress: 0.6,
+      seekExpandProgress: 0,
+      volumeHudAlpha: 0,
+    };
+    const holdingContext = createRecordingCanvasContext();
+    nowPlayingScreen.renderNowPlayingScreen(holdingContext, holdingState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+      catalogAlbums: catalog.albums,
+    });
+    const holdChargeArcs = findCenteredStrokedArcs(holdingContext, 10, 40);
+    assert.ok(
+      holdChargeArcs.length >= 2,
+      "hold-to-seek charge state must preserve center charge ring feedback",
+    );
+
+    const expandedSeekState = {
+      ...nowPlayingController.getRenderSnapshot(),
+      openTransitionProgress: 1,
+      trackElapsedSeconds: 60,
+      trackDurationSeconds: 180,
+      isSeeking: true,
+      seekHoldProgress: 1,
+      seekExpandProgress: 1,
+      volumeHudAlpha: 0,
+    };
+    const seekContext = createRecordingCanvasContext();
+    nowPlayingScreen.renderNowPlayingScreen(seekContext, expandedSeekState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+      catalogAlbums: catalog.albums,
+    });
+
+    const expandedDialArcs = findCenteredStrokedArcs(
+      seekContext,
+      NOW_PLAYING_CONSTANTS.SPINDLE_SEEK_RADIUS_PX - 10,
+      NOW_PLAYING_CONSTANTS.SPINDLE_SEEK_RADIUS_PX + 10,
+    );
+    assert.ok(
+      expandedDialArcs.length >= 2,
+      "active Seek Mode must preserve expanded center seek dial and scrub ring",
+    );
+
+    const radialTickStrokes = seekContext.recordedStrokes.filter(
+      (strokeEntry) => strokeEntry.points.length === 2 && Math.abs(strokeEntry.lineWidth - 1) < 0.1,
+    );
+    assert.ok(radialTickStrokes.length >= 12, "active Seek Mode must preserve center tick marks");
+
+    const seekLabels = seekContext.recordedTextCalls.map((call) => call.text);
+    assert.ok(seekLabels.includes("SEEK"), "active Seek Mode must render SEEK label");
+    assert.ok(seekLabels.includes("01:00"), "active Seek Mode must render current elapsed time");
   });
 
   test("lyrics overlay omits vinyl inner white label circle, outer/spindle progress circle decorations, and DOUBLE-TAP TO RESUME text when paused", () => {
