@@ -155,6 +155,7 @@ function syncPlaybackAcrossControllers() {
   const audioState = audioEngine.getState();
   nowPlayingController.syncAudioState(audioState);
   libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
+  libraryController.setPlaybackState(audioState.isPlaying);
   homeController.syncPlaybackState(buildHomePlaybackTelemetry(audioState));
   syncShellIfNeeded(false);
 }
@@ -237,30 +238,56 @@ function handleNowPlayingPlayModeChange(nextModeId) {
   syncPlaybackAcrossControllers();
 }
 
+function resolveTotalVinylRotationRadians(controllerState) {
+  const baseRotationRadians = Number.isFinite(controllerState?.vinylRotationRadians)
+    ? controllerState.vinylRotationRadians
+    : 0;
+  const nudgeRotationRadians = Number.isFinite(controllerState?.vinylNudgeRadians)
+    ? controllerState.vinylNudgeRadians
+    : 0;
+  return baseRotationRadians + nudgeRotationRadians;
+}
+
 function handleExitNowPlaying(exitReturnScreen) {
+  const nowPlayingState = nowPlayingController.getRenderSnapshot();
+  const handoffRotationRadians = resolveTotalVinylRotationRadians(nowPlayingState);
+  const audioState = audioEngine.getState();
   clearActiveCanvasPointer();
   if (exitReturnScreen === "library") {
-    libraryController.resetVinylLaunch();
+    libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
+    libraryController.returnFromNowPlaying({
+      vinylRotationRadians: handoffRotationRadians,
+      albumId: audioState.activeAlbum?.id || nowPlayingState.activeAlbum?.id || null,
+      launchOrigin: nowPlayingState.launchOrigin,
+      isPlaying: audioState.isPlaying,
+    });
     router.navigateTo("library");
   } else {
     router.navigateTo("home");
-    homeController.returnFromScreen("now-playing");
+    homeController.returnFromScreen("now-playing", {
+      vinylRotationRadians: handoffRotationRadians,
+    });
   }
   syncDisplayCanvasCursorClasses(lastHoverPoint);
   syncShellIfNeeded(true);
 }
 
 function handleLaunchLibraryTrack(selectionSpec) {
-  const activeCatalog = latestCatalog || libraryController.getRenderSnapshot().catalog;
+  const preLaunchLibraryState = libraryController.getRenderSnapshot();
+  const handoffRotationRadians = resolveTotalVinylRotationRadians(preLaunchLibraryState);
+  const activeCatalog = latestCatalog || preLaunchLibraryState.catalog;
   audioEngine.playTrackFromSource(selectionSpec, activeCatalog);
   const audioState = audioEngine.getState();
   libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
+  libraryController.setPlaybackState(audioState.isPlaying);
   libraryController.resetVinylLaunch();
+  homeController.setVinylRotationRadians(handoffRotationRadians);
   homeController.syncPlaybackState(buildHomePlaybackTelemetry(audioState));
   nowPlayingController.enterFromLibrary({
     returnScreen: "library",
     launchOrigin: selectionSpec?.launchOrigin || "library",
     audioState,
+    vinylRotationRadians: handoffRotationRadians,
   });
   clearActiveCanvasPointer();
   router.navigateTo("now-playing");
@@ -269,9 +296,13 @@ function handleLaunchLibraryTrack(selectionSpec) {
 }
 
 function handleExitLibraryToHome() {
+  const libraryState = libraryController.getRenderSnapshot();
+  const handoffRotationRadians = resolveTotalVinylRotationRadians(libraryState);
   clearActiveCanvasPointer();
   router.navigateTo("home");
-  homeController.returnFromScreen("library");
+  homeController.returnFromScreen("library", {
+    vinylRotationRadians: handoffRotationRadians,
+  });
   syncDisplayCanvasCursorClasses(lastHoverPoint);
   syncShellIfNeeded(true);
 }
@@ -289,9 +320,15 @@ function handoffHomeAppIfLaunched() {
   if (launchedHomeState.launchTarget !== 1) {
     return false;
   }
+  const handoffRotationRadians = resolveTotalVinylRotationRadians(launchedHomeState);
   if (launchedHomeState.launchedAppId === "library") {
+    const audioState = audioEngine.getState();
     clearActiveCanvasPointer();
-    libraryController.enterFromHome();
+    libraryController.enterFromHome({
+      vinylRotationRadians: handoffRotationRadians,
+      activeTrackId: audioState.activeTrack?.id || null,
+      isPlaying: audioState.isPlaying,
+    });
     router.navigateTo("library");
     return true;
   }
@@ -300,6 +337,7 @@ function handoffHomeAppIfLaunched() {
     nowPlayingController.enterFromHome({
       returnScreen: "home",
       audioState: audioEngine.getState(),
+      vinylRotationRadians: handoffRotationRadians,
     });
     router.navigateTo("now-playing");
     return true;
@@ -1346,6 +1384,7 @@ function animationTick(timestampMs) {
   audioEngine.step(frameDeltaSeconds);
   const audioState = audioEngine.getState();
   libraryController.setActiveTrackId(audioState.activeTrack?.id || null);
+  libraryController.setPlaybackState(audioState.isPlaying);
   homeController.syncPlaybackState(buildHomePlaybackTelemetry(audioState));
 
   router.stepTransition(frameDeltaSeconds);

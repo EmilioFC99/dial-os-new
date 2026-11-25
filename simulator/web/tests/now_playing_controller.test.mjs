@@ -800,7 +800,7 @@ describe("audio_engine.js play modes, queue selection, and metadata preservation
 
 describe("now_playing_controller.js constants and pure helpers", () => {
   test("exports exact NOW_PLAYING_CONSTANTS, play modes, quick buttons, and lyrics modes", () => {
-    assert.equal(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS, 0.78);
+    assert.equal(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS, 0.62);
     assert.equal(NOW_PLAYING_CONSTANTS.SKIP_DURATION_SECONDS, 0.42);
     assert.equal(NOW_PLAYING_CONSTANTS.QUICK_ACTIONS_TIMEOUT_SECONDS, 4.6);
     assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_HOLD_SECONDS, 1.45);
@@ -1644,44 +1644,60 @@ describe("createNowPlayingController skip transitions, quick actions, and queue 
     assert.deepEqual(callbackLogs.exitReturnScreens, []);
   });
 
-  test("enterFromHome triggers 20-degree entrance rotation offset easing to 0, tracks launchOrigin, and exposes enter/exit transition state", () => {
+  test("enterFromHome and enterFromLibrary adopt handoff vinylRotationRadians, rotate +20 deg clockwise at matched speed when playing, hold steady when paused, and guard invalid inputs", () => {
+    const HANDOFF_ANGLE_RADIANS = 0.85;
     const { audioEngine, nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
       returnScreen: "home",
     });
 
-    // enterFromHome while playing sets launchOrigin "home", openTransitionProgress 0, and 20-deg entrance rotation offset
+    // 1. enterFromHome while playing adopts handoff angle, sets openTransitionProgress 0, and rotates clockwise +20 deg
     nowPlayingController.enterFromHome({
       returnScreen: "home",
       audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
     });
     const homeEntrySnapshot = nowPlayingController.getRenderSnapshot();
     assert.equal(homeEntrySnapshot.launchOrigin, "home");
     assert.equal(homeEntrySnapshot.returnScreen, "home");
     assert.equal(homeEntrySnapshot.openTransitionProgress, 0);
-    assert.ok(
-      Math.abs(homeEntrySnapshot.vinylNudgeRadians - ENTRANCE_ROTATION_OFFSET_RADIANS) <
-        FLOAT_TOLERANCE,
-    );
+    assert.equal(homeEntrySnapshot.vinylNudgeRadians, 0);
+    assert.ok(Math.abs(homeEntrySnapshot.vinylRotationRadians - HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE);
 
-    // Stepping halfway eases openTransitionProgress toward 1 and entrance rotation offset smoothly toward 0
+    // Halfway through entrance: openTransitionProgress = 0.5 and +10 deg clockwise
     nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
     const homeMidSnapshot = nowPlayingController.getRenderSnapshot();
     assert.ok(
       homeMidSnapshot.openTransitionProgress > 0 && homeMidSnapshot.openTransitionProgress < 1,
     );
+    assert.equal(homeMidSnapshot.vinylNudgeRadians, 0);
     assert.ok(
-      homeMidSnapshot.vinylNudgeRadians > 0 &&
-        homeMidSnapshot.vinylNudgeRadians < ENTRANCE_ROTATION_OFFSET_RADIANS,
+      Math.abs(
+        homeMidSnapshot.vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS / 2),
+      ) < 0.002,
     );
 
-    // Settling completes openTransitionProgress = 1 and eases entrance rotation offset smoothly to 0
-    const settledHomeEntrySnapshot = advanceSteps(
-      nowPlayingController,
-      STEP_DELTA_SECONDS,
-      SETTLE_STEP_COUNT,
-    );
+    // Full OPEN_DURATION_SECONDS completes openTransitionProgress = 1 and reaches +20 deg clockwise
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
+    const settledHomeEntrySnapshot = nowPlayingController.getRenderSnapshot();
     assert.equal(settledHomeEntrySnapshot.openTransitionProgress, 1);
-    assert.ok(Math.abs(settledHomeEntrySnapshot.vinylNudgeRadians) < 0.005);
+    assert.equal(settledHomeEntrySnapshot.vinylNudgeRadians, 0);
+    assert.ok(
+      Math.abs(
+        settledHomeEntrySnapshot.vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS),
+      ) < 0.002,
+    );
+
+    // Steady angular velocity after entrance matches transition speed (+20 deg per 0.62s)
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    const postEntranceSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(
+      Math.abs(
+        postEntranceSnapshot.vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS * 2),
+      ) < 0.002,
+    );
 
     // Smooth exit transition state via left-edge swipe progress, decay on cancel/partial, and clean exit commit
     nowPlayingController.handlePointerDown(BACK_SWIPE_START_X, BACK_SWIPE_Y);
@@ -1697,40 +1713,74 @@ describe("createNowPlayingController skip transitions, quick actions, and queue 
     assert.deepEqual(callbackLogs.exitReturnScreens, ["home"]);
     assert.equal(nowPlayingController.getRenderSnapshot().backSwipeProgress, 0);
 
-    // enterFromHome when paused with an active track also triggers 20-deg entrance rotation offset
-    audioEngine.pause();
-    nowPlayingController.enterFromHome({
-      returnScreen: "home",
-      audioState: audioEngine.getState(),
-    });
-    const pausedHomeEntrySnapshot = nowPlayingController.getRenderSnapshot();
-    assert.equal(pausedHomeEntrySnapshot.operatingMode, "playing");
-    assert.equal(pausedHomeEntrySnapshot.isPlaying, false);
-    assert.equal(pausedHomeEntrySnapshot.launchOrigin, "home");
-    assert.ok(
-      Math.abs(pausedHomeEntrySnapshot.vinylNudgeRadians - ENTRANCE_ROTATION_OFFSET_RADIANS) <
-        FLOAT_TOLERANCE,
-    );
-
-    // enterFromLibrary tracks both "album-crate" and default "library" launchOrigin values
-    audioEngine.play();
+    // 2. enterFromLibrary("album-crate") while playing also rotates +10 deg at T/2 and +20 deg at T
     nowPlayingController.enterFromLibrary({
       returnScreen: "library",
       launchOrigin: "album-crate",
       audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
     });
     const crateEntrySnapshot = nowPlayingController.getRenderSnapshot();
     assert.equal(crateEntrySnapshot.launchOrigin, "album-crate");
     assert.equal(crateEntrySnapshot.returnScreen, "library");
     assert.equal(crateEntrySnapshot.openTransitionProgress, 0);
+    assert.ok(Math.abs(crateEntrySnapshot.vinylRotationRadians - HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE);
+
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
+    assert.ok(
+      Math.abs(
+        nowPlayingController.getRenderSnapshot().vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS / 2),
+      ) < 0.002,
+    );
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
+    assert.ok(
+      Math.abs(
+        nowPlayingController.getRenderSnapshot().vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS),
+      ) < 0.002,
+    );
+
+    // 3. Paused state with active track keeps vinylRotationRadians stationary on Home & Library entrances
+    audioEngine.pause();
+    nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+    });
+    const pausedHomeEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(pausedHomeEntrySnapshot.operatingMode, "playing");
+    assert.equal(pausedHomeEntrySnapshot.isPlaying, false);
+    assert.equal(pausedHomeEntrySnapshot.launchOrigin, "home");
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().vinylRotationRadians - HANDOFF_ANGLE_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
 
     nowPlayingController.enterFromLibrary({
       returnScreen: "library",
+      launchOrigin: "album-crate",
       audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+    });
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().vinylRotationRadians - HANDOFF_ANGLE_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
+
+    // 4. Fallback guard: default launchOrigin and non-finite handoff angles remain safe
+    audioEngine.play();
+    nowPlayingController.enterFromLibrary({
+      returnScreen: "library",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: Number.NaN,
     });
     const libraryEntrySnapshot = nowPlayingController.getRenderSnapshot();
     assert.equal(libraryEntrySnapshot.launchOrigin, "library");
     assert.equal(libraryEntrySnapshot.returnScreen, "library");
+    assert.ok(Number.isFinite(libraryEntrySnapshot.vinylRotationRadians));
   });
 });
 

@@ -36,10 +36,12 @@ export const HOME_CONSTANTS = Object.freeze({
   TAP_DRIFT_LIMIT_PX: 10,
 });
 
-const VINYL_SPIN_RADIANS_PER_SECOND = 0.55;
+const TRANSITION_ROTATION_DEGREES = 20;
+const DEGREES_PER_HALF_TURN = 180;
+const TRANSITION_ROTATION_RADIANS = (TRANSITION_ROTATION_DEGREES * Math.PI) / DEGREES_PER_HALF_TURN;
+const VINYL_SPIN_RADIANS_PER_SECOND =
+  TRANSITION_ROTATION_RADIANS / HOME_CONSTANTS.LAUNCH_DURATION_SECONDS;
 const VINYL_NUDGE_SPRING_RATE = 8.5;
-const VINYL_LAUNCH_NUDGE_RADIANS = 0.35;
-const RETURN_TRANSITION_ROTATION_RADIANS = (20 * Math.PI) / 180;
 const CAROUSEL_SNAP_SPRING_RATE = 13.5;
 const CAROUSEL_SNAP_SETTLE_EPSILON = 0.001;
 const CAROUSEL_NORMALIZE_REVOLUTION_THRESHOLD = 4;
@@ -481,13 +483,6 @@ export function createHomeController() {
   function launchFocusedApp() {
     focusedSlot = targetSlot;
     const focusedApp = HOME_APPS[wrapAppIndex(targetSlot)];
-    if (
-      launchTarget !== 1 &&
-      focusedApp.id === "now-playing" &&
-      (hasActiveTrack || playbackState === "playing" || playbackState === "paused")
-    ) {
-      vinylNudgeTarget += VINYL_LAUNCH_NUDGE_RADIANS;
-    }
     launchTarget = 1;
     launchedAppId = focusedApp.id;
   }
@@ -536,11 +531,24 @@ export function createHomeController() {
   }
 
   /**
+   * Synchronize the vinyl rotation angle from another screen controller when finite.
+   *
+   * @param {number} nextRotationRadians Vinyl disc angle in radians.
+   */
+  function setVinylRotationRadians(nextRotationRadians) {
+    if (Number.isFinite(nextRotationRadians)) {
+      vinylRotationRadians = nextRotationRadians;
+    }
+  }
+
+  /**
    * Re-anchor Home on `appId`'s slot at full launch depth and animate zoom-back to 0.
    *
    * @param {string} [appId="library"] App identifier being exited back to Home.
+   * @param {object} [options={}] Optional transition handoff payload.
+   * @param {number} [options.vinylRotationRadians] Synchronized vinyl angle in radians.
    */
-  function returnFromScreen(appId = "library") {
+  function returnFromScreen(appId = "library", options = {}) {
     const matchedIndex = HOME_APPS.findIndex((appEntry) => appEntry.id === appId);
     const slotIndex = matchedIndex >= 0 ? matchedIndex : 0;
     scrollPosition = slotIndex;
@@ -550,10 +558,10 @@ export function createHomeController() {
     launchTarget = 0;
     launchedAppId = null;
     backSwipeProgress = 0;
-    const shouldApplyReturnRotation =
-      appId === "now-playing" &&
-      (hasActiveTrack || playbackState === "playing" || playbackState === "paused");
-    vinylNudgeRadians = shouldApplyReturnRotation ? RETURN_TRANSITION_ROTATION_RADIANS : 0;
+    if (Number.isFinite(options?.vinylRotationRadians)) {
+      vinylRotationRadians = options.vinylRotationRadians;
+    }
+    vinylNudgeRadians = 0;
     vinylNudgeTarget = 0;
     clearPointerState();
   }
@@ -745,6 +753,7 @@ export function createHomeController() {
     launchFocusedApp,
     closeLaunchedApp,
     syncPlaybackState,
+    setVinylRotationRadians,
     returnFromScreen,
     jumpFromNotPlayingToLibrary,
     handlePointerDown,

@@ -83,10 +83,12 @@ const CRATE_BAR_MIN_WIDTH_PX = 6;
 const CRATE_BAR_MAX_WIDTH_PX = 18;
 const DEFAULT_CRATE_BAR_LIMIT = 7;
 
-const VINYL_SPIN_RADIANS_PER_SECOND = 0.55;
+const TRANSITION_ROTATION_DEGREES = 20;
+const DEGREES_PER_HALF_TURN = 180;
+const TRANSITION_ROTATION_RADIANS = (TRANSITION_ROTATION_DEGREES * Math.PI) / DEGREES_PER_HALF_TURN;
+const VINYL_SPIN_RADIANS_PER_SECOND =
+  TRANSITION_ROTATION_RADIANS / LIBRARY_CONSTANTS.VINYL_LAUNCH_DURATION_SECONDS;
 const VINYL_NUDGE_SPRING_RATE = 8.5;
-const VINYL_LAUNCH_NUDGE_RADIANS = 0.44;
-const VINYL_CLOSE_NUDGE_RADIANS = 0.34;
 const SHEET_SPRING_RATE = 14;
 const SHEET_SETTLE_EPSILON = 0.004;
 const PRESS_ATTACK_RATE = 32;
@@ -616,6 +618,8 @@ export function createLibraryController({
 
   let viewStack = [createHubView()];
   let activeTrackId = null;
+  let isPlaying = false;
+  let hasExplicitPlaybackState = false;
 
   let idleClockSeconds = 0;
   let vinylRotationRadians = 0;
@@ -982,9 +986,9 @@ export function createLibraryController({
     vinylLaunchAlbumId = albumId;
     vinylLaunchSource = sourceKind;
     vinylLaunchTarget = 1;
-    vinylNudgeTarget += VINYL_LAUNCH_NUDGE_RADIANS;
     if (trackId) {
-      activeTrackId = trackId;
+      setActiveTrackId(trackId);
+      setPlaybackState(true);
       if (typeof onLaunchTrack === "function") {
         onLaunchTrack({
           trackId,
@@ -1065,12 +1069,23 @@ export function createLibraryController({
 
   /**
    * Reset Library navigation to the Hub root with entry animation progress at 0.
+   *
+   * @param {object} [options={}] Optional synchronized playback and vinyl angle state.
    */
-  function enterFromHome() {
+  function enterFromHome(options = {}) {
     resetTransientUiState();
     viewStack = [createHubView()];
     transitionDirection = 1;
     transitionProgress = 0;
+    if (Number.isFinite(options?.vinylRotationRadians)) {
+      vinylRotationRadians = options.vinylRotationRadians;
+    }
+    if (options && typeof options === "object" && "activeTrackId" in options) {
+      setActiveTrackId(options.activeTrackId);
+    }
+    if (typeof options?.isPlaying === "boolean") {
+      setPlaybackState(options.isPlaying);
+    }
   }
 
   /**
@@ -1079,7 +1094,75 @@ export function createLibraryController({
    * @param {string | null} trackId Active track identifier.
    */
   function setActiveTrackId(trackId) {
-    activeTrackId = typeof trackId === "string" && trackId.length > 0 ? trackId : null;
+    const nextTrackId = typeof trackId === "string" && trackId.length > 0 ? trackId : null;
+    activeTrackId = nextTrackId;
+    if (nextTrackId === null) {
+      isPlaying = false;
+      hasExplicitPlaybackState = false;
+    } else if (!hasExplicitPlaybackState) {
+      isPlaying = true;
+    }
+  }
+
+  /**
+   * Update active playback flag to gate Library vinyl rotation cleanly.
+   *
+   * @param {boolean} nextIsPlaying Whether audio playback is actively advancing.
+   */
+  function setPlaybackState(nextIsPlaying) {
+    if (activeTrackId === null) {
+      isPlaying = false;
+      hasExplicitPlaybackState = false;
+      return;
+    }
+    if (typeof nextIsPlaying === "boolean") {
+      hasExplicitPlaybackState = true;
+      isPlaying = nextIsPlaying;
+    }
+  }
+
+  /**
+   * Return to the previous Library view from Now Playing while smoothly returning
+   * the vinyl disc into its album sleeve or track row at synchronized rotation.
+   *
+   * @param {object} [options={}] Transition handoff payload from Now Playing.
+   */
+  function returnFromNowPlaying({
+    vinylRotationRadians: nextRotationRadians,
+    albumId = null,
+    launchOrigin = "library",
+    isPlaying: nextIsPlaying,
+  } = {}) {
+    if (Number.isFinite(nextRotationRadians)) {
+      vinylRotationRadians = nextRotationRadians;
+    }
+    if (typeof nextIsPlaying === "boolean") {
+      setPlaybackState(nextIsPlaying);
+    }
+    vinylNudgeRadians = 0;
+    vinylNudgeTarget = 0;
+
+    const currentView = getCurrentView();
+    if (typeof albumId === "string" && albumId.length > 0) {
+      vinylLaunchAlbumId = albumId;
+      if (currentView.kind === "albums") {
+        const crateAlbums = resolveCrateAlbums(currentView);
+        const matchedIndex = crateAlbums.findIndex((albumEntry) => albumEntry.id === albumId);
+        if (matchedIndex >= 0) {
+          currentView.scrollPosition = matchedIndex;
+          currentView.targetIndex = matchedIndex;
+        }
+      }
+    }
+
+    vinylLaunchSource =
+      launchOrigin === "album-crate" || currentView.kind === "albums" ? "albums" : "tracks";
+    vinylLaunchProgress = 1;
+    vinylLaunchTarget = 0;
+    backSwipeProgress = 0;
+    pressedRowIndex = null;
+    pressHighlightLevel = 0;
+    clearPointerState();
   }
 
   /**
@@ -1190,7 +1273,6 @@ export function createLibraryController({
     pressHighlightLevel = 0;
     if (vinylLaunchTarget === 1) {
       vinylLaunchTarget = 0;
-      vinylNudgeTarget += VINYL_CLOSE_NUDGE_RADIANS;
       return;
     }
     if (playlistSheetOpen) {
@@ -1514,7 +1596,9 @@ export function createLibraryController({
 
     const currentView = getCurrentView();
     idleClockSeconds += deltaSeconds;
-    vinylRotationRadians += deltaSeconds * VINYL_SPIN_RADIANS_PER_SECOND;
+    if (isPlaying && activeTrackId !== null) {
+      vinylRotationRadians += deltaSeconds * VINYL_SPIN_RADIANS_PER_SECOND;
+    }
 
     const nudgeFollow = 1 - Math.exp(-VINYL_NUDGE_SPRING_RATE * deltaSeconds);
     vinylNudgeRadians = lerp(vinylNudgeRadians, vinylNudgeTarget, nudgeFollow);
@@ -2142,6 +2226,7 @@ export function createLibraryController({
       scrollPosition: activeView.scrollPosition,
       targetIndex: activeView.targetIndex,
       activeTrackId,
+      isPlaying,
       playlists: clonePlaylists(playlists),
       playlistSheetOpen,
       playlistSheetIndex,
@@ -2184,7 +2269,9 @@ export function createLibraryController({
   return {
     hydrateCatalog,
     enterFromHome,
+    returnFromNowPlaying,
     setActiveTrackId,
+    setPlaybackState,
     setTrackFavorite,
     setPlaylists,
     resetVinylLaunch,

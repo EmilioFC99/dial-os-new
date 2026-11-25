@@ -915,6 +915,96 @@ describe("library_screen.js Albums Crate peeking disc, floating note button, and
       "hit testing must scope to circular floating note button instead of old wide SWIPE UP hint box",
     );
   });
+
+  test("Now Playing -> Albums return transition slides album sleeve rightward, shrinks vinyl back to peeking disc, and rotates +20 deg clockwise", () => {
+    const TWENTY_DEG_RADIANS = (20 * Math.PI) / 180;
+    const RETURN_HANDOFF_ANGLE_RADIANS = 1.15;
+    const controller = createSettledLibraryViewController("albums");
+    controller.setActiveTrackId("t-a1");
+
+    function renderCrateReturnFrame(stepFraction) {
+      controller.returnFromNowPlaying({
+        vinylRotationRadians: RETURN_HANDOFF_ANGLE_RADIANS,
+        albumId: "album-a",
+        launchOrigin: "album-crate",
+        isPlaying: true,
+      });
+      if (stepFraction > 0) {
+        controller.step(stepFraction * 0.62);
+      }
+      const snapshot = controller.getRenderSnapshot();
+      const drawingContext = createRecordingCanvasContext();
+      libraryScreen.renderLibraryScreen(drawingContext, snapshot, {
+        appearance: "dark",
+        palette: APPEARANCE_PALETTES.dark,
+        playback: { isPlaying: true, elapsedSeconds: 30, durationSeconds: 180, volumeLevel: 0.6 },
+      });
+
+      const sleeveRects = drawingContext.recordedRects.filter(
+        (rectEntry) =>
+          rectEntry.kind === "strokeRect" &&
+          rectEntry.width >= 115 &&
+          rectEntry.width <= 125 &&
+          rectEntry.height >= 115 &&
+          rectEntry.height <= 125,
+      );
+      const discClipArcs = drawingContext.recordedClips
+        .flatMap((clipEntry) => clipEntry.arcs)
+        .filter((arcEntry) => arcEntry.worldRadius >= 45);
+
+      return {
+        snapshot,
+        sleeveRect: sleeveRects[0] || null,
+        discClipArc: discClipArcs[discClipArcs.length - 1] || null,
+        discRotationRadians: drawingContext.recordedRotations[0],
+      };
+    }
+
+    const startFrame = renderCrateReturnFrame(0.0);
+    const earlyReturnFrame = renderCrateReturnFrame(0.45);
+    const midReturnFrame = renderCrateReturnFrame(0.5);
+    const lateReturnFrame = renderCrateReturnFrame(0.8);
+    const settledFrame = renderCrateReturnFrame(1.0);
+
+    assert.ok(startFrame.discClipArc, "start of return must draw full-bleed vinyl disc");
+    assert.ok(Math.abs(startFrame.discClipArc.worldRadius - VINYL_FULL_RADIUS_PX) <= 1);
+    assert.ok(earlyReturnFrame.sleeveRect, "sleeve must become visible sliding back rightward");
+    assert.ok(midReturnFrame.discClipArc, "mid return must draw shrinking vinyl disc");
+    assert.ok(lateReturnFrame.sleeveRect, "late return must draw focused sleeve");
+
+    const earlySleeveCenterX =
+      earlyReturnFrame.sleeveRect.worldLeftX + earlyReturnFrame.sleeveRect.width / 2;
+    const lateSleeveCenterX =
+      lateReturnFrame.sleeveRect.worldLeftX + lateReturnFrame.sleeveRect.width / 2;
+    assert.ok(
+      lateSleeveCenterX > earlySleeveCenterX && Math.abs(lateSleeveCenterX - 172) <= 25,
+      "album sleeve must translate rightward back toward settled crate position (x=172)",
+    );
+
+    assert.ok(
+      startFrame.discClipArc.worldRadius > midReturnFrame.discClipArc.worldRadius &&
+        midReturnFrame.discClipArc.worldRadius > settledFrame.discClipArc.worldRadius,
+      "vinyl radius must shrink smoothly from 180px back to peeking radius (~52.8px)",
+    );
+    assert.ok(Math.abs(settledFrame.discClipArc.worldRadius - 52.8) <= 1.5);
+    assert.ok(Math.abs(settledFrame.discClipArc.worldCenterX - 219.2) <= 2);
+
+    assert.ok(
+      Math.abs(startFrame.discRotationRadians - RETURN_HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE,
+    );
+    assert.ok(
+      Math.abs(
+        midReturnFrame.discRotationRadians - (RETURN_HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS / 2),
+      ) < 0.002,
+      "Now Playing -> Albums midpoint must advance +10 deg clockwise",
+    );
+    assert.ok(
+      Math.abs(
+        settledFrame.discRotationRadians - (RETURN_HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS),
+      ) < 0.002,
+      "Now Playing -> Albums completion must advance +20 deg clockwise cleanly",
+    );
+  });
 });
 
 describe("library_screen.js global marquee across curved lists, crate, tracklists, and folder rows", () => {

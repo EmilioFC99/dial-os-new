@@ -1269,6 +1269,91 @@ describe("createLibraryController nominal behavior", () => {
     performLeftEdgeBackSwipe(libraryController);
     assert.equal(exitCallCount, 2);
   });
+
+  test("returnFromNowPlaying transitions vinyl back into album crate rotating 20 degrees clockwise when playing and gates spin on active playback", () => {
+    const TWENTY_DEG_RADIANS = (20 * Math.PI) / 180;
+    const HANDOFF_ANGLE_RADIANS = 1.6;
+    const libraryController = createSettledLibraryController();
+
+    openHubSectionTile(libraryController, 3);
+    libraryController.setActiveTrackId("t-z1");
+    libraryController.returnFromNowPlaying({
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+      albumId: "album-z",
+      launchOrigin: "album-crate",
+      isPlaying: true,
+    });
+
+    const returnStart = libraryController.getRenderSnapshot();
+    assert.equal(returnStart.vinylLaunchProgress, 1);
+    assert.equal(returnStart.vinylLaunchTarget, 0);
+    assert.equal(returnStart.vinylLaunchSource, "albums");
+    assert.equal(returnStart.vinylLaunchAlbumId, "album-z");
+    assert.equal(returnStart.vinylNudgeRadians, 0);
+    assert.equal(returnStart.isPlaying, true);
+    assert.equal(returnStart.currentView.scrollPosition, 3);
+    assert.equal(returnStart.currentView.targetIndex, 3);
+    assert.ok(Math.abs(returnStart.vinylRotationRadians - HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE);
+
+    // Midpoint: vinylLaunchProgress = 0.5 and +10 deg clockwise rotation
+    libraryController.step(LIBRARY_CONSTANTS.VINYL_LAUNCH_DURATION_SECONDS / 2);
+    const returnMid = libraryController.getRenderSnapshot();
+    assert.equal(returnMid.vinylLaunchProgress, 0.5);
+    assert.equal(returnMid.vinylNudgeRadians, 0);
+    assert.ok(
+      Math.abs(returnMid.vinylRotationRadians - (HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS / 2)) <
+        1e-4,
+    );
+
+    // Full return completion: vinylLaunchProgress = 0 and +20 deg clockwise rotation
+    libraryController.step(LIBRARY_CONSTANTS.VINYL_LAUNCH_DURATION_SECONDS / 2);
+    const returnEnd = libraryController.getRenderSnapshot();
+    assert.equal(returnEnd.vinylLaunchProgress, 0);
+    assert.ok(
+      Math.abs(returnEnd.vinylRotationRadians - (HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS)) < 1e-4,
+    );
+
+    // Steady angular velocity after return matches the 20-degree transition speed
+    libraryController.step(LIBRARY_CONSTANTS.VINYL_LAUNCH_DURATION_SECONDS);
+    const postReturn = libraryController.getRenderSnapshot();
+    assert.ok(
+      Math.abs(postReturn.vinylRotationRadians - (HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS * 2)) <
+        1e-4,
+    );
+
+    // Paused boundary: vinylRotationRadians stays stationary when isPlaying is false
+    const pausedAngle = postReturn.vinylRotationRadians;
+    libraryController.setPlaybackState(false);
+    assert.equal(libraryController.getRenderSnapshot().isPlaying, false);
+    libraryController.step(LIBRARY_CONSTANTS.VINYL_LAUNCH_DURATION_SECONDS);
+    assert.ok(
+      Math.abs(libraryController.getRenderSnapshot().vinylRotationRadians - pausedAngle) <
+        FLOAT_TOLERANCE,
+    );
+
+    // Idle boundary: activeTrackId = null keeps vinyl stationary even if setPlaybackState(true) is called
+    libraryController.setActiveTrackId(null);
+    libraryController.setPlaybackState(true);
+    libraryController.step(LIBRARY_CONSTANTS.VINYL_LAUNCH_DURATION_SECONDS);
+    assert.equal(libraryController.getRenderSnapshot().isPlaying, false);
+    assert.ok(
+      Math.abs(libraryController.getRenderSnapshot().vinylRotationRadians - pausedAngle) <
+        FLOAT_TOLERANCE,
+    );
+
+    // Fallback / negative guard: invalid rotation and unknown albumId keep state finite
+    libraryController.setActiveTrackId("t-a1");
+    libraryController.returnFromNowPlaying({
+      vinylRotationRadians: Number.NaN,
+      albumId: "unknown-album",
+      launchOrigin: "album-crate",
+      isPlaying: false,
+    });
+    const fallbackSnapshot = libraryController.getRenderSnapshot();
+    assert.ok(Number.isFinite(fallbackSnapshot.vinylRotationRadians));
+    assert.equal(fallbackSnapshot.vinylLaunchProgress, 1);
+    assert.equal(fallbackSnapshot.vinylLaunchTarget, 0);
+  });
 });
 
 describe("createLibraryController boundaries and negative guards", () => {

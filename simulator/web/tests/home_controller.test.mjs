@@ -434,8 +434,11 @@ describe("createHomeController nominal behavior", () => {
     assert.equal(settledSnapshot.backSwipeProgress, 0);
   });
 
-  test("returnFromScreen('now-playing') sets a 20-degree smooth transition rotation angle that settles cleanly for playing and paused active tracks", () => {
-    // 1. Playing state with active track
+  test("returnFromScreen('now-playing') adopts handoff vinylRotationRadians and rotates 20 degrees clockwise linearly when playing, while staying stationary when paused or idle", () => {
+    const HANDOFF_ROTATION_RADIANS = 1.25;
+    const UPDATED_ROTATION_RADIANS = 2.4;
+
+    // 1. Playing state with active track: continuous linear 20-degree clockwise rotation over LAUNCH_DURATION_SECONDS
     const playingHomeController = createSettledHomeController();
     playingHomeController.syncPlaybackState({
       playbackState: "playing",
@@ -445,33 +448,52 @@ describe("createHomeController nominal behavior", () => {
     playingHomeController.launchFocusedApp();
     playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
 
-    playingHomeController.returnFromScreen("now-playing");
+    playingHomeController.returnFromScreen("now-playing", {
+      vinylRotationRadians: HANDOFF_ROTATION_RADIANS,
+    });
     const playingReturnStart = playingHomeController.getRenderSnapshot();
     assert.equal(playingReturnStart.focusedApp.id, "now-playing");
     assert.equal(playingReturnStart.launchProgress, 1);
     assert.equal(playingReturnStart.launchTarget, 0);
+    assert.equal(playingReturnStart.vinylNudgeRadians, 0);
     assert.ok(
-      Math.abs(playingReturnStart.vinylNudgeRadians - TRANSITION_ROTATION_RADIANS) <
+      Math.abs(playingReturnStart.vinylRotationRadians - HANDOFF_ROTATION_RADIANS) <
         FLOAT_TOLERANCE,
     );
 
     playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
     const playingReturnMid = playingHomeController.getRenderSnapshot();
     assert.ok(playingReturnMid.launchProgress > 0 && playingReturnMid.launchProgress < 1);
+    assert.equal(playingReturnMid.vinylNudgeRadians, 0);
     assert.ok(
-      playingReturnMid.vinylNudgeRadians > 0 &&
-        playingReturnMid.vinylNudgeRadians < TRANSITION_ROTATION_RADIANS,
+      Math.abs(
+        playingReturnMid.vinylRotationRadians -
+          (HANDOFF_ROTATION_RADIANS + TRANSITION_ROTATION_RADIANS / 2),
+      ) < TRANSITION_SETTLE_TOLERANCE,
     );
 
-    const playingSettled = advanceController(
-      playingHomeController,
-      STEP_DELTA_SECONDS,
-      SETTLE_STEP_COUNT,
-    );
+    playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
+    const playingSettled = playingHomeController.getRenderSnapshot();
     assert.equal(playingSettled.launchProgress, 0);
-    assert.ok(Math.abs(playingSettled.vinylNudgeRadians) < TRANSITION_SETTLE_TOLERANCE);
+    assert.equal(playingSettled.vinylNudgeRadians, 0);
+    assert.ok(
+      Math.abs(
+        playingSettled.vinylRotationRadians -
+          (HANDOFF_ROTATION_RADIANS + TRANSITION_ROTATION_RADIANS),
+      ) < TRANSITION_SETTLE_TOLERANCE,
+    );
 
-    // 2. Paused state with active track
+    // Steady angular velocity after return matches the 20-degree transition speed
+    playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+    const postReturnSnapshot = playingHomeController.getRenderSnapshot();
+    assert.ok(
+      Math.abs(
+        postReturnSnapshot.vinylRotationRadians -
+          (HANDOFF_ROTATION_RADIANS + TRANSITION_ROTATION_RADIANS * 2),
+      ) < TRANSITION_SETTLE_TOLERANCE,
+    );
+
+    // 2. Paused state with active track preserves stationary vinyl angle across return transition
     const pausedHomeController = createSettledHomeController();
     pausedHomeController.syncPlaybackState({
       playbackState: "paused",
@@ -481,33 +503,36 @@ describe("createHomeController nominal behavior", () => {
     pausedHomeController.launchFocusedApp();
     pausedHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
 
-    pausedHomeController.returnFromScreen("now-playing");
+    pausedHomeController.returnFromScreen("now-playing", {
+      vinylRotationRadians: HANDOFF_ROTATION_RADIANS,
+    });
     const pausedReturnStart = pausedHomeController.getRenderSnapshot();
     assert.equal(pausedReturnStart.focusedApp.id, "now-playing");
     assert.equal(pausedReturnStart.launchProgress, 1);
     assert.equal(pausedReturnStart.launchTarget, 0);
+    assert.equal(pausedReturnStart.vinylNudgeRadians, 0);
     assert.ok(
-      Math.abs(pausedReturnStart.vinylNudgeRadians - TRANSITION_ROTATION_RADIANS) <
+      Math.abs(pausedReturnStart.vinylRotationRadians - HANDOFF_ROTATION_RADIANS) <
         FLOAT_TOLERANCE,
     );
 
     pausedHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
     const pausedReturnMid = pausedHomeController.getRenderSnapshot();
     assert.ok(pausedReturnMid.launchProgress > 0 && pausedReturnMid.launchProgress < 1);
+    assert.equal(pausedReturnMid.vinylNudgeRadians, 0);
     assert.ok(
-      pausedReturnMid.vinylNudgeRadians > 0 &&
-        pausedReturnMid.vinylNudgeRadians < TRANSITION_ROTATION_RADIANS,
+      Math.abs(pausedReturnMid.vinylRotationRadians - HANDOFF_ROTATION_RADIANS) < FLOAT_TOLERANCE,
     );
 
-    const pausedSettled = advanceController(
-      pausedHomeController,
-      STEP_DELTA_SECONDS,
-      SETTLE_STEP_COUNT,
-    );
+    pausedHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
+    const pausedSettled = pausedHomeController.getRenderSnapshot();
     assert.equal(pausedSettled.launchProgress, 0);
-    assert.ok(Math.abs(pausedSettled.vinylNudgeRadians) < TRANSITION_SETTLE_TOLERANCE);
+    assert.equal(pausedSettled.vinylNudgeRadians, 0);
+    assert.ok(
+      Math.abs(pausedSettled.vinylRotationRadians - HANDOFF_ROTATION_RADIANS) < FLOAT_TOLERANCE,
+    );
 
-    // 3. Idle state with no active track returns cleanly without vinyl spin rotation offset
+    // 3. Idle state with no active track returns cleanly without vinyl nudge offset
     const idleHomeController = createSettledHomeController();
     idleHomeController.syncPlaybackState({
       playbackState: "idle",
@@ -523,6 +548,26 @@ describe("createHomeController nominal behavior", () => {
     assert.equal(idleReturnStart.vinylNudgeRadians, 0);
     idleHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
     assert.equal(idleHomeController.getRenderSnapshot().launchProgress, 0);
+
+    // 4. Fallback / negative guard: non-finite handoff angles keep finite rotation intact
+    playingHomeController.setVinylRotationRadians(UPDATED_ROTATION_RADIANS);
+    assert.ok(
+      Math.abs(playingHomeController.getRenderSnapshot().vinylRotationRadians - UPDATED_ROTATION_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
+    const invalidAngles = [Number.NaN, Number.POSITIVE_INFINITY, undefined, null, "invalid"];
+    for (const invalidAngle of invalidAngles) {
+      playingHomeController.setVinylRotationRadians(invalidAngle);
+      playingHomeController.returnFromScreen("now-playing", {
+        vinylRotationRadians: invalidAngle,
+      });
+      const guardedSnapshot = playingHomeController.getRenderSnapshot();
+      assert.ok(
+        Math.abs(guardedSnapshot.vinylRotationRadians - UPDATED_ROTATION_RADIANS) <
+          FLOAT_TOLERANCE,
+      );
+      assert.ok(Number.isFinite(guardedSnapshot.vinylRotationRadians));
+    }
   });
 });
 

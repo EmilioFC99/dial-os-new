@@ -1103,7 +1103,9 @@ describe("now_playing_screen.js marquee scrolling and entrance transitions", () 
     assertTextMarqueesInOverlay(renderLyricsAtTime, longTitle, 210);
   });
 
-  test("album-crate take-out-the-disc transition translates album sleeve leftward while vinyl disc slips out rightward and grows toward full-bleed radius", () => {
+  test("album-crate take-out-the-disc transition translates album sleeve leftward while vinyl disc slips out rightward, centers smoothly, and rotates +20 deg clockwise", () => {
+    const CRATE_HANDOFF_ANGLE_RADIANS = 0.75;
+    const TWENTY_DEG_RADIANS = (20 * Math.PI) / 180;
     const { audioEngine, nowPlayingController, catalog } = createNowPlayingScreenHarness();
 
     function inspectCrateTransitionAt(progressRatio) {
@@ -1111,6 +1113,7 @@ describe("now_playing_screen.js marquee scrolling and entrance transitions", () 
         returnScreen: "library",
         launchOrigin: "album-crate",
         audioState: audioEngine.getState(),
+        vinylRotationRadians: CRATE_HANDOFF_ANGLE_RADIANS,
       });
       if (progressRatio > 0) {
         nowPlayingController.step(progressRatio * NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
@@ -1145,95 +1148,116 @@ describe("now_playing_screen.js marquee scrolling and entrance transitions", () 
         drawingContext,
         sleeveRect: sleeveRects[0] || null,
         discClipArc: discClipArcs[discClipArcs.length - 1] || null,
+        discRotationRadians: drawingContext.recordedRotations[0],
       };
     }
 
+    const startFrame = inspectCrateTransitionAt(0.0);
     const earlyFrame = inspectCrateTransitionAt(0.15);
-    const midFrame = inspectCrateTransitionAt(0.35);
+    const midSlipFrame = inspectCrateTransitionAt(0.35);
+    const midpointFrame = inspectCrateTransitionAt(0.5);
     const lateFrame = inspectCrateTransitionAt(0.7);
     const settledFrame = inspectCrateTransitionAt(1.0);
 
     assert.ok(earlyFrame.sleeveRect, "early album-crate transition should render album sleeve");
-    assert.ok(midFrame.sleeveRect, "mid album-crate transition (0.35) should render album sleeve");
+    assert.ok(midSlipFrame.sleeveRect, "mid album-crate transition (0.35) should render album sleeve");
 
     const earlySleeveCenterX = earlyFrame.sleeveRect.worldLeftX + earlyFrame.sleeveRect.width / 2;
-    const midSleeveCenterX = midFrame.sleeveRect.worldLeftX + midFrame.sleeveRect.width / 2;
+    const midSleeveCenterX = midSlipFrame.sleeveRect.worldLeftX + midSlipFrame.sleeveRect.width / 2;
     assert.ok(
       midSleeveCenterX < 168 && midSleeveCenterX < earlySleeveCenterX,
       "album sleeve must translate leftward offscreen during album-crate take-out-the-disc transition",
     );
 
-    assert.ok(midFrame.discClipArc, "mid transition should draw vinyl disc");
+    assert.ok(midSlipFrame.discClipArc, "mid transition should draw vinyl disc");
     assert.ok(
-      midFrame.discClipArc.worldCenterX > midSleeveCenterX + 30 &&
-        midFrame.discClipArc.worldCenterX > DISPLAY_CENTER_PX,
+      midSlipFrame.discClipArc.worldCenterX > midSleeveCenterX + 30 &&
+        midSlipFrame.discClipArc.worldCenterX > DISPLAY_CENTER_PX,
       "vinyl disc must slip out rightward away from translating album sleeve",
     );
 
     assert.ok(
-      earlyFrame.discClipArc.worldRadius < midFrame.discClipArc.worldRadius &&
-        midFrame.discClipArc.worldRadius < lateFrame.discClipArc.worldRadius &&
+      earlyFrame.discClipArc.worldRadius < midSlipFrame.discClipArc.worldRadius &&
+        midSlipFrame.discClipArc.worldRadius < lateFrame.discClipArc.worldRadius &&
         lateFrame.discClipArc.worldRadius < settledFrame.discClipArc.worldRadius,
       "vinyl disc radius must grow smoothly toward full-bleed 180px radius",
     );
+    assert.ok(Math.abs(startFrame.discClipArc.worldCenterY - 152) <= 1);
     assert.ok(Math.abs(settledFrame.discClipArc.worldRadius - DISPLAY_CENTER_PX) <= 1);
     assert.ok(Math.abs(settledFrame.discClipArc.worldCenterX - DISPLAY_CENTER_PX) <= 1);
+    assert.ok(Math.abs(settledFrame.discClipArc.worldCenterY - DISPLAY_CENTER_PX) <= 1);
+
+    assert.ok(
+      Math.abs(startFrame.discRotationRadians - CRATE_HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE,
+    );
+    assert.ok(
+      Math.abs(midpointFrame.discRotationRadians - (CRATE_HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS / 2)) <
+        0.002,
+      "album-crate vinyl must rotate +10 deg clockwise at midpoint without counter-clockwise freeze",
+    );
+    assert.ok(
+      Math.abs(settledFrame.discRotationRadians - (CRATE_HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS)) <
+        0.002,
+      "album-crate vinyl must rotate +20 deg clockwise at completion",
+    );
   });
 
-  test("home launch transition applies smooth vinyl rotation offset during entrance", () => {
+  test("home launch transition rotates vinyl +20 deg clockwise linearly across entrance and keeps center label hidden", () => {
+    const HOME_HANDOFF_ANGLE_RADIANS = 0.95;
+    const TWENTY_DEG_RADIANS = (20 * Math.PI) / 180;
     const { audioEngine, nowPlayingController, catalog } = createNowPlayingScreenHarness();
+
     nowPlayingController.enterFromHome({
       returnScreen: "home",
       audioState: audioEngine.getState(),
-    });
-    nowPlayingController.step(0.35 * NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
-    const transitionSnapshot = {
-      ...nowPlayingController.getRenderSnapshot(),
-      vinylRotationRadians: 0,
-    };
-    assert.equal(transitionSnapshot.launchOrigin, "home");
-    assert.ok(transitionSnapshot.vinylNudgeRadians > 0.01);
-
-    const transitionContext = createRecordingCanvasContext();
-    nowPlayingScreen.renderNowPlayingScreen(transitionContext, transitionSnapshot, {
-      appearance: "dark",
-      palette: APPEARANCE_PALETTES.dark,
-      catalogAlbums: catalog.albums,
+      vinylRotationRadians: HOME_HANDOFF_ANGLE_RADIANS,
     });
 
-    const baselineContext = createRecordingCanvasContext();
-    nowPlayingScreen.renderNowPlayingScreen(
-      baselineContext,
-      {
-        ...transitionSnapshot,
-        vinylNudgeRadians: 0,
-        vinylTransitionAngleRadians: 0,
-      },
-      {
+    function renderHomeLaunchFrame(snapshot) {
+      const drawingContext = createRecordingCanvasContext();
+      nowPlayingScreen.renderNowPlayingScreen(drawingContext, snapshot, {
         appearance: "dark",
         palette: APPEARANCE_PALETTES.dark,
         catalogAlbums: catalog.albums,
-      },
-    );
+      });
+      return drawingContext;
+    }
 
-    assert.ok(transitionContext.recordedRotations.length >= 1);
-    assert.ok(baselineContext.recordedRotations.length >= 1);
+    const startContext = renderHomeLaunchFrame(nowPlayingController.getRenderSnapshot());
+    assert.ok(startContext.recordedRotations.length >= 1);
     assert.ok(
-      Math.abs(
-        transitionContext.recordedRotations[0] -
-          baselineContext.recordedRotations[0] -
-          transitionSnapshot.vinylNudgeRadians,
-      ) < FLOAT_TOLERANCE,
-      "Home -> Now Playing entrance must apply controller rotation offset cleanly",
+      Math.abs(startContext.recordedRotations[0] - HOME_HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE,
     );
 
-    const transitionDiscClipArc = transitionContext.recordedClips
+    nowPlayingController.step(0.5 * NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    const midSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(midSnapshot.launchOrigin, "home");
+    assert.equal(midSnapshot.vinylNudgeRadians, 0);
+    const midContext = renderHomeLaunchFrame(midSnapshot);
+    assert.ok(midContext.recordedRotations.length >= 1);
+    assert.ok(
+      Math.abs(midContext.recordedRotations[0] - (HOME_HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS / 2)) <
+        0.002,
+      "Home -> Now Playing entrance must advance +10 deg clockwise at midpoint",
+    );
+
+    nowPlayingController.step(0.5 * NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    const settledSnapshot = nowPlayingController.getRenderSnapshot();
+    const settledContext = renderHomeLaunchFrame(settledSnapshot);
+    assert.ok(settledContext.recordedRotations.length >= 1);
+    assert.ok(
+      Math.abs(settledContext.recordedRotations[0] - (HOME_HANDOFF_ANGLE_RADIANS + TWENTY_DEG_RADIANS)) <
+        0.002,
+      "Home -> Now Playing entrance must advance +20 deg clockwise at completion",
+    );
+
+    const transitionDiscClipArc = midContext.recordedClips
       .flatMap((clipEntry) => clipEntry.arcs)
       .find((arcEntry) => arcEntry.worldRadius >= 45);
     assert.ok(transitionDiscClipArc, "entrance transition should draw vinyl disc clip");
     const scaledLabelRadius = transitionDiscClipArc.worldRadius * 0.28;
     const innerLabelRings = findCenteredStrokedArcs(
-      transitionContext,
+      midContext,
       scaledLabelRadius - 3,
       scaledLabelRadius + 3,
     ).filter(({ strokeEntry }) => /#F5F6F8/i.test(String(strokeEntry.strokeStyle || "")));

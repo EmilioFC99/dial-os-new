@@ -93,6 +93,19 @@ const CRATE_NOTE_BUTTON_CENTER_Y = 325;
 const CRATE_NOTE_BUTTON_RADIUS_PX = 18;
 const CRATE_NOTE_BUTTON_HIT_RADIUS_PX = 22;
 const CRYSTAL_OVERLAY_TOP_Y = HEADER_CLIP_TOP_Y - 2;
+const CRATE_SLEEVE_START_X_PX = DISPLAY_CENTER_PX - 8;
+const CRATE_SLEEVE_EXIT_X_PX = -110;
+const CRATE_DISC_PEEK_X_PX = 219.2;
+const CRATE_DISC_APEX_X_PX = 246;
+const CRATE_DISC_START_RADIUS_PX = 52.8;
+const TRACKLIST_DISC_START_RADIUS_PX = 36;
+const CRATE_SLIP_OUT_SPLIT_PROGRESS = 0.36;
+const CRATE_SLEEVE_SLIDE_END_PROGRESS = 0.72;
+const CRATE_SLEEVE_FADE_START_PROGRESS = 0.38;
+const HALO_VISIBLE_MIN_PROGRESS = 0.12;
+const HALO_VISIBLE_MAX_PROGRESS = 0.96;
+const HALO_FADE_START_PROGRESS = 0.52;
+const EXPANDED_CHROME_MIN_PROGRESS = 0.35;
 
 function resolvePalette(appearance, palette) {
   if (palette && typeof palette === "object") {
@@ -2030,10 +2043,7 @@ function renderLibraryAlbumCrate(
     const centerY =
       LIBRARY_CONSTANTS.CRATE_CENTER_Y + Math.min(absDelta, 1.5) * 6 + bobY;
 
-    const sleeveDissolve = isFocusedTarget
-      ? 1 - easeOutCubic(normalizeRange(vinylLaunchProgress, 0.0, 0.34))
-      : 1;
-    if (sleeveDissolve <= CONTENT_VISIBILITY_THRESHOLD) {
+    if (isFocusedTarget && vinylLaunchProgress > CONTENT_VISIBILITY_THRESHOLD) {
       continue;
     }
 
@@ -2043,7 +2053,7 @@ function renderLibraryAlbumCrate(
       sleeveSize,
       focusWeight,
       delta,
-      baseAlpha: baseAlpha * sleeveDissolve,
+      baseAlpha,
       vinylRotationRadians: libraryState.vinylRotationRadians,
       showPeekingDisc: isAlbumCurrentlyPlaying,
       isDiscPlaying: isAlbumCurrentlyPlaying && isDiscPlaying,
@@ -2901,16 +2911,35 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
       catalogAlbums[0] || { motif: "prism" };
     const launchEase = easeInOutCubic(launchProgress);
     const fromAlbumsCrate = libraryState.vinylLaunchSource === "albums";
-    const startCenterX = fromAlbumsCrate ? DISPLAY_CENTER_PX - 6 : DISPLAY_CENTER_PX;
-    const startCenterY = fromAlbumsCrate ? LIBRARY_CONSTANTS.CRATE_CENTER_Y : DISPLAY_CENTER_PX;
-    const startRadius = fromAlbumsCrate ? 56 : 36;
-    const discCenterX = lerp(startCenterX, DISPLAY_CENTER_PX, launchEase);
-    const discCenterY = lerp(startCenterY, DISPLAY_CENTER_PX, launchEase);
-    const discRadius = lerp(startRadius, DISPLAY_CENTER_PX, launchEase);
-    const discAlpha = easeOutCubic(normalizeRange(launchProgress, 0.04, 0.24));
     const totalRotation =
       (Number.isFinite(libraryState.vinylRotationRadians) ? libraryState.vinylRotationRadians : 0) +
       (Number.isFinite(libraryState.vinylNudgeRadians) ? libraryState.vinylNudgeRadians : 0);
+
+    let discCenterX = DISPLAY_CENTER_PX;
+    let discCenterY = DISPLAY_CENTER_PX;
+    let discRadius = lerp(TRACKLIST_DISC_START_RADIUS_PX, DISPLAY_CENTER_PX, launchEase);
+    let discAlpha = easeOutCubic(normalizeRange(launchProgress, 0.04, 0.24));
+
+    if (fromAlbumsCrate) {
+      discCenterX =
+        launchProgress <= CRATE_SLIP_OUT_SPLIT_PROGRESS
+          ? lerp(
+              CRATE_DISC_PEEK_X_PX,
+              CRATE_DISC_APEX_X_PX,
+              easeOutCubic(launchProgress / CRATE_SLIP_OUT_SPLIT_PROGRESS),
+            )
+          : lerp(
+              CRATE_DISC_APEX_X_PX,
+              DISPLAY_CENTER_PX,
+              easeInOutCubic(
+                (launchProgress - CRATE_SLIP_OUT_SPLIT_PROGRESS) /
+                  (1 - CRATE_SLIP_OUT_SPLIT_PROGRESS),
+              ),
+            );
+      discCenterY = lerp(LIBRARY_CONSTANTS.CRATE_CENTER_Y, DISPLAY_CENTER_PX, launchEase);
+      discRadius = lerp(CRATE_DISC_START_RADIUS_PX, DISPLAY_CENTER_PX, launchEase);
+      discAlpha = 1;
+    }
 
     drawLibraryVinylDisc(
       drawingContext,
@@ -2926,8 +2955,46 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
       { showCenterLabel: false },
     );
 
-    if (launchProgress > 0.12 && launchProgress < 0.96) {
-      const haloAlpha = (1 - normalizeRange(launchProgress, 0.52, 0.96)) * 0.72;
+    if (fromAlbumsCrate) {
+      const sleeveSlideEase = easeInOutCubic(
+        normalizeRange(launchProgress, 0.0, CRATE_SLEEVE_SLIDE_END_PROGRESS),
+      );
+      const sleeveCenterX = lerp(
+        CRATE_SLEEVE_START_X_PX,
+        CRATE_SLEEVE_EXIT_X_PX,
+        sleeveSlideEase,
+      );
+      const sleeveAlpha =
+        1 -
+        easeOutCubic(
+          normalizeRange(
+            launchProgress,
+            CRATE_SLEEVE_FADE_START_PROGRESS,
+            CRATE_SLEEVE_SLIDE_END_PROGRESS,
+          ),
+        );
+      if (sleeveAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+        drawCrateAlbumSleeveBox(drawingContext, vinylLaunchAlbum, {
+          centerX: sleeveCenterX,
+          centerY: LIBRARY_CONSTANTS.CRATE_CENTER_Y,
+          sleeveSize: CRATE_MAX_SLEEVE_PX,
+          focusWeight: 1,
+          delta: 0,
+          alpha: sleeveAlpha,
+          palette,
+          appearance,
+          coverCache,
+        });
+      }
+    }
+
+    if (
+      launchProgress > HALO_VISIBLE_MIN_PROGRESS &&
+      launchProgress < HALO_VISIBLE_MAX_PROGRESS
+    ) {
+      const haloAlpha =
+        (1 - normalizeRange(launchProgress, HALO_FADE_START_PROGRESS, HALO_VISIBLE_MAX_PROGRESS)) *
+        0.72;
       drawingContext.save();
       drawingContext.globalAlpha = haloAlpha;
       drawingContext.strokeStyle = palette.signalHighlight;
@@ -2938,7 +3005,7 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
       drawingContext.restore();
     }
 
-    if (launchProgress > 0.35) {
+    if (launchProgress > EXPANDED_CHROME_MIN_PROGRESS) {
       drawNowPlayingExpandedChrome(
         drawingContext,
         launchProgress,

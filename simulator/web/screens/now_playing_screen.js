@@ -56,10 +56,17 @@ const VOLUME_ARC_END_RADIANS = 0.48;
 const BACK_SWIPE_ARC_RADIUS_PX = 168;
 const BACK_SWIPE_ARC_SPAN_RADIANS = 0.34;
 const DISC_SKIP_SLIDE_DISTANCE_PX = 370;
+const HOME_ENTRANCE_START_DISC_RADIUS_PX = 54;
 const ALBUM_CRATE_SLEEVE_START_X_PX = 172;
+const ALBUM_CRATE_SLEEVE_EXIT_X_PX = -110;
 const ALBUM_CRATE_SLEEVE_CENTER_Y_PX = 152;
 const ALBUM_CRATE_SLEEVE_SIZE_PX = 120;
 const ALBUM_CRATE_START_DISC_RADIUS_PX = 52.8;
+const ALBUM_CRATE_DISC_PEEK_X_PX = 218;
+const ALBUM_CRATE_DISC_APEX_X_PX = 246;
+const ALBUM_CRATE_SLIP_OUT_SPLIT_PROGRESS = 0.36;
+const ALBUM_CRATE_SLEEVE_SLIDE_END_PROGRESS = 0.72;
+const ALBUM_CRATE_SLEEVE_FADE_START_PROGRESS = 0.38;
 
 const IDLE_CTA_LEFT_X_PX = 96;
 const IDLE_CTA_RIGHT_X_PX = 264;
@@ -2255,7 +2262,7 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
     const isAlbumCrateEntrance = nowPlayingState.launchOrigin === "album-crate" && openProgress < 1;
     const discRadius = isAlbumCrateEntrance
       ? lerp(ALBUM_CRATE_START_DISC_RADIUS_PX, DISPLAY_CENTER_PX, openEase)
-      : lerp(54, DISPLAY_CENTER_PX, openEase);
+      : lerp(HOME_ENTRANCE_START_DISC_RADIUS_PX, DISPLAY_CENTER_PX, openEase);
     const rotationRadians =
       Number(nowPlayingState.vinylRotationRadians ?? 0) +
       Number(nowPlayingState.vinylNudgeRadians ?? nowPlayingState.vinylTransitionAngleRadians ?? 0);
@@ -2303,21 +2310,47 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
         coverCache,
       );
     } else if (isAlbumCrateEntrance) {
-      const sleeveSlideEase = easeInOutCubic(normalizeRange(openProgress, 0.0, 0.72));
-      const sleeveCenterX = lerp(ALBUM_CRATE_SLEEVE_START_X_PX, -110, sleeveSlideEase);
-      const sleeveAlpha = 1 - easeOutCubic(normalizeRange(openProgress, 0.38, 0.72));
+      const sleeveSlideEase = easeInOutCubic(
+        normalizeRange(openProgress, 0.0, ALBUM_CRATE_SLEEVE_SLIDE_END_PROGRESS),
+      );
+      const sleeveCenterX = lerp(
+        ALBUM_CRATE_SLEEVE_START_X_PX,
+        ALBUM_CRATE_SLEEVE_EXIT_X_PX,
+        sleeveSlideEase,
+      );
+      const sleeveAlpha =
+        1 -
+        easeOutCubic(
+          normalizeRange(
+            openProgress,
+            ALBUM_CRATE_SLEEVE_FADE_START_PROGRESS,
+            ALBUM_CRATE_SLEEVE_SLIDE_END_PROGRESS,
+          ),
+        );
       const discSlipOutX =
-        openProgress <= 0.36
-          ? lerp(218, 246, easeOutCubic(openProgress / 0.36))
-          : lerp(246, DISPLAY_CENTER_PX, easeInOutCubic((openProgress - 0.36) / 0.64));
+        openProgress <= ALBUM_CRATE_SLIP_OUT_SPLIT_PROGRESS
+          ? lerp(
+              ALBUM_CRATE_DISC_PEEK_X_PX,
+              ALBUM_CRATE_DISC_APEX_X_PX,
+              easeOutCubic(openProgress / ALBUM_CRATE_SLIP_OUT_SPLIT_PROGRESS),
+            )
+          : lerp(
+              ALBUM_CRATE_DISC_APEX_X_PX,
+              DISPLAY_CENTER_PX,
+              easeInOutCubic(
+                (openProgress - ALBUM_CRATE_SLIP_OUT_SPLIT_PROGRESS) /
+                  (1 - ALBUM_CRATE_SLIP_OUT_SPLIT_PROGRESS),
+              ),
+            );
+      const discCenterY = lerp(ALBUM_CRATE_SLEEVE_CENTER_Y_PX, DISPLAY_CENTER_PX, openEase);
 
       drawNowPlayingOpticalVinyl(
         drawingContext,
         albumSpec,
         discSlipOutX,
-        DISPLAY_CENTER_PX,
+        discCenterY,
         discRadius,
-        rotationRadians + (1 - openProgress) * 0.45,
+        rotationRadians,
         palette,
         appearance,
         1,

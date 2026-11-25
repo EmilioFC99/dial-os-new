@@ -68,12 +68,16 @@ const QUEUE_LIST_BACK_START_MAX_X_PX = 110;
 const QUEUE_LIST_BACK_MIN_DELTA_X_PX = 28;
 const QUEUE_LIST_BACK_SLOPE_RATIO = 1.45;
 
-const VINYL_SPIN_RADIANS_PER_SECOND = 0.56;
+const TRANSITION_ROTATION_DEGREES = 20;
+const DEGREES_PER_HALF_TURN = 180;
+const TRANSITION_ROTATION_RADIANS = (TRANSITION_ROTATION_DEGREES * Math.PI) / DEGREES_PER_HALF_TURN;
+const OPEN_TRANSITION_DURATION_SECONDS = 0.62;
+const VINYL_SPIN_RADIANS_PER_SECOND =
+  TRANSITION_ROTATION_RADIANS / OPEN_TRANSITION_DURATION_SECONDS;
 const VINYL_SPIN_ATTACK_RATE = 5.2;
 const VINYL_SPIN_COAST_RATE = 3.8;
 const VINYL_SPIN_ZERO_THRESHOLD = 0.002;
 const VINYL_NUDGE_SPRING_RATE = 8.5;
-const HOME_ENTRANCE_ROTATION_RADIANS = (20 * Math.PI) / 180;
 const VINYL_PLAY_NUDGE_RADIANS = 0.24;
 const VINYL_SKIP_CROSSFADE_NUDGE_RADIANS = 0.42;
 const VINYL_SKIP_SAME_ALBUM_NUDGE_RADIANS = 0.14;
@@ -157,7 +161,7 @@ const TOAST_DECAY_RATE = 3.2;
 const BACK_SWIPE_DECAY_RATE = 4.5;
 
 export const NOW_PLAYING_CONSTANTS = Object.freeze({
-  OPEN_DURATION_SECONDS: 0.78,
+  OPEN_DURATION_SECONDS: OPEN_TRANSITION_DURATION_SECONDS,
   SKIP_DURATION_SECONDS: 0.42,
   QUICK_ACTIONS_TIMEOUT_SECONDS: 4.6,
   VOLUME_HOLD_SECONDS: 1.45,
@@ -1010,7 +1014,12 @@ export function createNowPlayingController({
     }
   }
 
-  function enterScreen(resolvedReturnScreen, resolvedLaunchOrigin, audioState) {
+  function enterScreen(
+    resolvedReturnScreen,
+    resolvedLaunchOrigin,
+    audioState,
+    initialVinylRotationRadians,
+  ) {
     returnScreen = resolvedReturnScreen;
     launchOrigin = resolvedLaunchOrigin;
     clearPendingSingleTap();
@@ -1047,19 +1056,24 @@ export function createNowPlayingController({
     if (audioState && typeof audioState === "object") {
       applyAudioSnapshot(audioState, { suppressTransition: true });
     }
+    if (Number.isFinite(initialVinylRotationRadians)) {
+      vinylRotationRadians = initialVinylRotationRadians;
+    }
 
     if (operatingMode === "playing") {
       openTransitionProgress = 0;
       openChromeHoldSeconds = OPEN_CHROME_HOLD_SECONDS;
       openChromeHoldAlpha = 0;
-      vinylNudgeRadians = resolvedLaunchOrigin === "home" ? HOME_ENTRANCE_ROTATION_RADIANS : 0;
+      vinylNudgeRadians = 0;
       vinylNudgeTarget = 0;
+      spinAngularVelocity = isPlaying ? VINYL_SPIN_RADIANS_PER_SECOND : 0;
     } else {
       openTransitionProgress = 1;
       openChromeHoldSeconds = 0;
       openChromeHoldAlpha = 0;
       vinylNudgeRadians = 0;
       vinylNudgeTarget = 0;
+      spinAngularVelocity = 0;
     }
   }
 
@@ -1253,11 +1267,13 @@ export function createNowPlayingController({
    * @param {string} [options.returnScreen="home"] Screen identifier for bare back exits.
    * @param {string} [options.launchOrigin="home"] Launch origin identifier (`home` | `album-crate` | `library`).
    * @param {object | null} [options.audioState] Current audio engine snapshot.
+   * @param {number} [options.vinylRotationRadians] Synchronized vinyl angle in radians.
    */
   function enterFromHome({
     returnScreen: nextReturnScreen = "home",
     launchOrigin: nextLaunchOrigin = "home",
     audioState,
+    vinylRotationRadians: nextVinylRotationRadians,
   } = {}) {
     const resolvedReturn =
       typeof nextReturnScreen === "string" && nextReturnScreen.length > 0
@@ -1267,7 +1283,7 @@ export function createNowPlayingController({
       nextLaunchOrigin === "album-crate" || nextLaunchOrigin === "library"
         ? nextLaunchOrigin
         : "home";
-    enterScreen(resolvedReturn, resolvedOrigin, audioState);
+    enterScreen(resolvedReturn, resolvedOrigin, audioState, nextVinylRotationRadians);
   }
 
   /**
@@ -1277,11 +1293,13 @@ export function createNowPlayingController({
    * @param {string} [options.returnScreen="library"] Screen identifier for bare back exits.
    * @param {string} [options.launchOrigin="library"] Launch origin identifier (`home` | `album-crate` | `library`).
    * @param {object | null} [options.audioState] Current audio engine snapshot.
+   * @param {number} [options.vinylRotationRadians] Synchronized vinyl angle in radians.
    */
   function enterFromLibrary({
     returnScreen: nextReturnScreen = "library",
     launchOrigin: nextLaunchOrigin = "library",
     audioState,
+    vinylRotationRadians: nextVinylRotationRadians,
   } = {}) {
     const resolvedReturn =
       typeof nextReturnScreen === "string" && nextReturnScreen.length > 0
@@ -1291,7 +1309,7 @@ export function createNowPlayingController({
       nextLaunchOrigin === "album-crate" || nextLaunchOrigin === "home"
         ? nextLaunchOrigin
         : "library";
-    enterScreen(resolvedReturn, resolvedOrigin, audioState);
+    enterScreen(resolvedReturn, resolvedOrigin, audioState, nextVinylRotationRadians);
   }
 
   /**

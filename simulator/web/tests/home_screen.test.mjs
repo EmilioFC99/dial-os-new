@@ -394,56 +394,77 @@ function createSettledHomeController() {
 }
 
 describe("home_screen.js Now Playing transition and subtitle marquee", () => {
-  test("renderHomeScreen applies controller 20-degree vinylNudgeRadians rotation offset during Now Playing -> Home exit", () => {
-    const homeController = createSettledHomeController();
-    homeController.syncPlaybackState({
-      playbackState: "playing",
-      hasActiveTrack: true,
-    });
-    homeController.selectAppById("now-playing");
-    homeController.launchFocusedApp();
-    homeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+  test("renderHomeScreen advances vinyl rotation clockwise by 20 degrees during Now Playing -> Home exit when playing and holds angle when paused", () => {
+    const RETURN_START_ANGLE_RADIANS = 1.1;
 
-    homeController.returnFromScreen("now-playing");
-    const returnStartSnapshot = homeController.getRenderSnapshot();
-    assert.ok(
-      Math.abs(returnStartSnapshot.vinylNudgeRadians - RETURN_ROTATION_TWENTY_DEG_RADIANS) <
-        FLOAT_TOLERANCE,
-    );
-
-    homeController.step(0.05);
-    const exitMidSnapshot = homeController.getRenderSnapshot();
-    assert.ok(exitMidSnapshot.launchProgress > 0.5 && exitMidSnapshot.launchProgress < 1);
-    assert.ok(exitMidSnapshot.vinylNudgeRadians > 0.05);
-
-    const exitContext = createRecordingCanvasContext();
-    homeScreen.renderHomeScreen(exitContext, exitMidSnapshot, {
-      appearance: "dark",
-      palette: APPEARANCE_PALETTES.dark,
-      activeAlbum: { id: "a1", title: "Alpha Horizons", motif: "prism" },
-    });
-
-    const baselineContext = createRecordingCanvasContext();
-    homeScreen.renderHomeScreen(
-      baselineContext,
-      { ...exitMidSnapshot, vinylNudgeRadians: 0 },
-      {
+    function renderHomeDiscAngle(homeSnapshot) {
+      const drawingContext = createRecordingCanvasContext();
+      homeScreen.renderHomeScreen(drawingContext, homeSnapshot, {
         appearance: "dark",
         palette: APPEARANCE_PALETTES.dark,
         activeAlbum: { id: "a1", title: "Alpha Horizons", motif: "prism" },
-      },
+      });
+      assert.ok(drawingContext.recordedRotations.length >= 1);
+      return drawingContext.recordedRotations[drawingContext.recordedRotations.length - 1];
+    }
+
+    // 1. Playing track: linear +10 deg at midpoint and +20 deg clockwise at completion
+    const playingHomeController = createSettledHomeController();
+    playingHomeController.syncPlaybackState({
+      playbackState: "playing",
+      hasActiveTrack: true,
+    });
+    playingHomeController.selectAppById("now-playing");
+    playingHomeController.launchFocusedApp();
+    playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+
+    playingHomeController.returnFromScreen("now-playing", {
+      vinylRotationRadians: RETURN_START_ANGLE_RADIANS,
+    });
+    const startSnapshot = playingHomeController.getRenderSnapshot();
+    assert.equal(startSnapshot.vinylNudgeRadians, 0);
+    const startAngle = renderHomeDiscAngle(startSnapshot);
+    assert.ok(Math.abs(startAngle - RETURN_START_ANGLE_RADIANS) < FLOAT_TOLERANCE);
+
+    playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
+    const midSnapshot = playingHomeController.getRenderSnapshot();
+    assert.ok(midSnapshot.launchProgress > 0.4 && midSnapshot.launchProgress < 0.6);
+    assert.equal(midSnapshot.vinylNudgeRadians, 0);
+    const midAngle = renderHomeDiscAngle(midSnapshot);
+    assert.ok(
+      Math.abs(midAngle - (RETURN_START_ANGLE_RADIANS + RETURN_ROTATION_TWENTY_DEG_RADIANS / 2)) <
+        FLOAT_TOLERANCE,
+      "Now Playing -> Home midpoint must rotate +10 degrees clockwise without stalling",
     );
 
-    assert.ok(exitContext.recordedRotations.length >= 1);
-    assert.ok(baselineContext.recordedRotations.length >= 1);
+    playingHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
+    const settledSnapshot = playingHomeController.getRenderSnapshot();
+    assert.equal(settledSnapshot.launchProgress, 0);
+    const endAngle = renderHomeDiscAngle(settledSnapshot);
     assert.ok(
-      Math.abs(
-        exitContext.recordedRotations[0] -
-          baselineContext.recordedRotations[0] -
-          exitMidSnapshot.vinylNudgeRadians,
-      ) < FLOAT_TOLERANCE,
-      "Now Playing -> Home exit must apply controller vinylNudgeRadians rotation offset",
+      Math.abs(endAngle - (RETURN_START_ANGLE_RADIANS + RETURN_ROTATION_TWENTY_DEG_RADIANS)) <
+        FLOAT_TOLERANCE,
+      "Now Playing -> Home completion must rotate +20 degrees clockwise smoothly",
     );
+
+    // 2. Paused track: keeps stationary vinyl angle across the return transition
+    const pausedHomeController = createSettledHomeController();
+    pausedHomeController.syncPlaybackState({
+      playbackState: "paused",
+      hasActiveTrack: true,
+    });
+    pausedHomeController.selectAppById("now-playing");
+    pausedHomeController.launchFocusedApp();
+    pausedHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+    pausedHomeController.returnFromScreen("now-playing", {
+      vinylRotationRadians: RETURN_START_ANGLE_RADIANS,
+    });
+
+    const pausedStartAngle = renderHomeDiscAngle(pausedHomeController.getRenderSnapshot());
+    pausedHomeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+    const pausedEndAngle = renderHomeDiscAngle(pausedHomeController.getRenderSnapshot());
+    assert.ok(Math.abs(pausedStartAngle - RETURN_START_ANGLE_RADIANS) < FLOAT_TOLERANCE);
+    assert.ok(Math.abs(pausedEndAngle - RETURN_START_ANGLE_RADIANS) < FLOAT_TOLERANCE);
   });
 
   test("renderHomeScreen uses drawMarqueeCanvasText when the Home subtitle exceeds bounds and renders statically when fitting", () => {

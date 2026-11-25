@@ -226,6 +226,7 @@ function traceFacePolygon(drawingContext, verticesList, indices) {
  * @param {number} alpha Layer opacity.
  * @param {object | null} [activeAlbum=null] Optional active album spec for real cover art.
  * @param {object | null} [coverCache=null] Optional cover image cache.
+ * @param {object} [vinylOptions={}] Optional vinyl rendering overrides such as `{ showCenterLabel }`.
  */
 function drawAlbumArtworkDisc(
   drawingContext,
@@ -238,6 +239,7 @@ function drawAlbumArtworkDisc(
   alpha,
   activeAlbum = null,
   coverCache = null,
+  vinylOptions = {},
 ) {
   if (alpha <= ALPHA_VISIBILITY_THRESHOLD || radius <= 2) {
     return;
@@ -255,6 +257,7 @@ function drawAlbumArtworkDisc(
       appearance,
       alpha,
       coverCache,
+      vinylOptions,
     );
     return;
   }
@@ -322,23 +325,25 @@ function drawAlbumArtworkDisc(
     drawingContext.stroke();
   }
 
-  const labelRadius = radius * 0.28;
-  drawingContext.beginPath();
-  drawingContext.arc(0, 0, labelRadius, 0, FULL_CIRCLE_RADIANS);
-  drawingContext.fillStyle = discBaseColor;
-  drawingContext.fill();
-  drawingContext.strokeStyle = discStarkBlock;
-  drawingContext.lineWidth = Math.max(1.2, radius * 0.018);
-  drawingContext.stroke();
+  if (vinylOptions?.showCenterLabel !== false) {
+    const labelRadius = radius * 0.28;
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, labelRadius, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = discBaseColor;
+    drawingContext.fill();
+    drawingContext.strokeStyle = discStarkBlock;
+    drawingContext.lineWidth = Math.max(1.2, radius * 0.018);
+    drawingContext.stroke();
 
-  const labelBlockSize = Math.max(3, radius * 0.075);
-  drawingContext.fillStyle = palette.signalHighlight;
-  drawingContext.fillRect(labelRadius * 0.22, -labelBlockSize / 2, labelBlockSize, labelBlockSize);
+    const labelBlockSize = Math.max(3, radius * 0.075);
+    drawingContext.fillStyle = palette.signalHighlight;
+    drawingContext.fillRect(labelRadius * 0.22, -labelBlockSize / 2, labelBlockSize, labelBlockSize);
 
-  drawingContext.beginPath();
-  drawingContext.arc(0, 0, Math.max(2.5, radius * 0.075), 0, FULL_CIRCLE_RADIANS);
-  drawingContext.fillStyle = "#060709";
-  drawingContext.fill();
+    drawingContext.beginPath();
+    drawingContext.arc(0, 0, Math.max(2.5, radius * 0.075), 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = "#060709";
+    drawingContext.fill();
+  }
 
   drawingContext.restore();
 }
@@ -1817,6 +1822,7 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
           easeOutCubic(normalizeRange(launchProgress, 0.06, 0.24)),
           activeAlbum,
           coverCache,
+          { showCenterLabel: false },
         );
 
         if (launchProgress > 0.14 && launchProgress < 0.96) {
