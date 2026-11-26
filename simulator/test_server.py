@@ -611,6 +611,8 @@ class SimulatorBootAndScanTests(SimulatorHttpTestMixin, unittest.TestCase):
                 "artists": 2,
                 "genres": 3,
                 "favorites": 0,
+                "favoriteTracks": 0,
+                "favoriteAlbums": 0,
                 "playlists": 0,
             },
         )
@@ -790,6 +792,14 @@ class SimulatorHttpApiAndStaticTests(SimulatorHttpTestMixin, unittest.TestCase):
             ["PRELUDE", "MOVE", "BONUS"],
         )
         self.assertTrue(solar_echo_album["coverUrl"].startswith("/api/cover/"))
+
+        genres_by_title = {
+            track_entry["title"]: track_entry["genres"] for track_entry in catalog["allTracks"]
+        }
+        self.assertEqual(genres_by_title["MOVE"], ["Electronic", "House"])
+        self.assertEqual(genres_by_title["PRELUDE"], ["Electronic"])
+        self.assertEqual(genres_by_title["BONUS"], ["Electronic"])
+        self.assertEqual(genres_by_title["Opening Signal"], ["Synthwave"])
 
         prelude_id = solar_echo_album["tracks"][0]["id"]
         self.assertEqual(catalog["lyricsCatalog"][prelude_id]["kind"], "timed")
@@ -971,6 +981,310 @@ class SimulatorHttpApiAndStaticTests(SimulatorHttpTestMixin, unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as http_error_context:
                 urllib.request.urlopen(bad_request)
             self.assertEqual(http_error_context.exception.code, HTTP_BAD_REQUEST)
+
+    def test_album_added_at_and_independent_album_favorites_persist(self) -> None:
+        import os
+
+        _status_code, catalog = self.fetch_json("/api/library")
+        solar_album = next(
+            album_entry for album_entry in catalog["albums"] if album_entry["title"] == "SOLAR ECHO"
+        )
+        signal_album = next(
+            album_entry for album_entry in catalog["albums"] if album_entry["title"] == "Signal Tape"
+        )
+        self.assertIs(solar_album["isFavorite"], False)
+        self.assertIs(signal_album["isFavorite"], False)
+        self.assertIsInstance(solar_album["addedAt"], float)
+        self.assertGreater(solar_album["addedAt"], 0)
+
+        # Update one track mtime in Signal Tape to verify addedAt tracks newest audio file mtime.
+        signal_track_path = self.music_directory / "Vector Unit" / "Signal Tape" / "01 - Opening Signal.mp3"
+        self.assertTrue(signal_track_path.is_file())
+        newer_timestamp = 1_900_000_000.0
+        os.utime(signal_track_path, (newer_timestamp, newer_timestamp))
+        _rescan_status, rescanned_catalog = self.fetch_json("/api/rescan", method="POST", payload={})
+        rescanned_signal = next(
+            album_entry
+            for album_entry in rescanned_catalog["albums"]
+            if album_entry["id"] == signal_album["id"]
+        )
+        self.assertAlmostEqual(rescanned_signal["addedAt"], newer_timestamp, places=2)
+
+        # Like album explicitly, then toggle track inside that album -> completely independent.
+        album_status, album_response = self.fetch_json(
+            f"/api/favorite-albums/{solar_album['id']}",
+            method="POST",
+            payload={"isFavorite": True},
+        )
+        self.assertEqual(album_status, HTTP_OK)
+        self.assertEqual(album_response, {"albumId": solar_album["id"], "isFavorite": True})
+
+        _lib_status, after_album_like = self.fetch_json("/api/library")
+        updated_solar = next(
+            album_entry
+            for album_entry in after_album_like["albums"]
+            if album_entry["id"] == solar_album["id"]
+        )
+        self.assertIs(updated_solar["isFavorite"], True)
+        self.assertTrue(all(not track_entry["isFavorite"] for track_entry in updated_solar["tracks"]))
+        self.assertEqual(after_album_like["counts"]["favoriteAlbums"], 1)
+        self.assertEqual(after_album_like["counts"]["favoriteTracks"], 0)
+        self.assertEqual(after_album_like["counts"]["favorites"], 1)
+
+        # Like a song inside the already-liked album -> both are independently favorited.
+        solar_track_id = updated_solar["tracks"][0]["id"]
+        track_status, _track_response = self.fetch_json(
+            f"/api/favorites/{solar_track_id}",
+            method="POST",
+            payload={"isFavorite": True},
+        )
+        self.assertEqual(track_status, HTTP_OK)
+        _lib_status2, after_both_liked = self.fetch_json("/api/library")
+        self.assertEqual(after_both_liked["counts"]["favoriteAlbums"], 1)
+        self.assertEqual(after_both_liked["counts"]["favoriteTracks"], 1)
+        self.assertEqual(after_both_liked["counts"]["favorites"], 2)
+
+        # Toggle album favorite off without body -> album unliked, track stays liked.
+        toggle_status, toggle_response = self.fetch_json(
+            f"/api/favorite-albums/{solar_album['id']}",
+            method="POST",
+            payload={},
+        )
+        self.assertEqual(toggle_status, HTTP_OK)
+        self.assertIs(toggle_response["isFavorite"], False)
+        _lib_status3, after_album_unliked = self.fetch_json("/api/library")
+        unliked_solar = next(
+            album_entry
+            for album_entry in after_album_unliked["albums"]
+            if album_entry["id"] == solar_album["id"]
+        )
+        self.assertIs(unliked_solar["isFavorite"], False)
+        self.assertIs(unliked_solar["tracks"][0]["isFavorite"], True)
+        self.assertEqual(after_album_unliked["counts"]["favoriteAlbums"], 0)
+        self.assertEqual(after_album_unliked["counts"]["favoriteTracks"], 1)
+        self.assertEqual(after_album_unliked["counts"]["favorites"], 1)
+
+        # Re-like album and verify persistence across store reload & scan.
+        self.fetch_json(
+            f"/api/favorite-albums/{solar_album['id']}",
+            method="POST",
+            payload={"isFavorite": True},
+        )
+        reloaded_store = server.SimulatorLibraryStore(
+            music_directory=self.music_directory,
+            state_file_path=self.state_file_path,
+        )
+        reloaded_store.scan()
+        reloaded_catalog = reloaded_store.serialize_catalog()
+        reloaded_solar = next(
+            album_entry
+            for album_entry in reloaded_catalog["albums"]
+            if album_entry["id"] == solar_album["id"]
+        )
+        self.assertIs(reloaded_solar["isFavorite"], True)
+        self.assertEqual(reloaded_catalog["counts"]["favoriteAlbums"], 1)
+        self.assertEqual(reloaded_catalog["counts"]["favoriteTracks"], 1)
+        self.assertEqual(reloaded_catalog["counts"]["favorites"], 2)
+
+    def test_favorite_albums_rejects_invalid_ids_and_payloads(self) -> None:
+        _status_code, catalog = self.fetch_json("/api/library")
+        album_id = catalog["albums"][0]["id"]
+
+        for bad_path in ("/api/favorite-albums/nonexistent-id", "/api/favorite-albums/bad..id"):
+            bad_request = urllib.request.Request(
+                f"{self.base_url}{bad_path}",
+                b"{}",
+                {"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as http_error_context:
+                urllib.request.urlopen(bad_request)
+            self.assertEqual(http_error_context.exception.code, HTTP_NOT_FOUND)
+
+        for bad_body in (b"{invalid", json.dumps({"isFavorite": "yes"}).encode("utf-8")):
+            invalid_request = urllib.request.Request(
+                f"{self.base_url}/api/favorite-albums/{album_id}",
+                bad_body,
+                {"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as http_error_context:
+                urllib.request.urlopen(invalid_request)
+            self.assertEqual(http_error_context.exception.code, HTTP_BAD_REQUEST)
+
+    def test_artist_added_at_uses_newest_album_mtime_and_favorite_artists_persist_outside_favorites(self) -> None:
+        import os
+
+        second_night_album = self.music_directory / "Night Drift" / "LUNAR DRIFT"
+        second_night_album.mkdir(parents=True)
+        newer_track_path = second_night_album / "01 - Lunar.flac"
+        newer_track_path.write_bytes(
+            build_synthetic_flac_bytes(
+                vorbis_tags={
+                    "TITLE": "Lunar",
+                    "ARTIST": "Night Drift",
+                    "ALBUMARTIST": "Night Drift",
+                    "ALBUM": "LUNAR DRIFT",
+                    "GENRE": "Electronic",
+                    "DATE": "2025",
+                    "TRACKNUMBER": "1",
+                }
+            )
+        )
+        newer_timestamp = 1_950_000_000.0
+        os.utime(newer_track_path, (newer_timestamp, newer_timestamp))
+
+        rescan_status, catalog = self.fetch_json("/api/rescan", method="POST", payload={})
+        self.assertEqual(rescan_status, HTTP_OK)
+
+        night_drift_artist = next(
+            artist_entry for artist_entry in catalog["artists"] if artist_entry["name"] == "Night Drift"
+        )
+        self.assertIs(night_drift_artist["isFavorite"], False)
+        self.assertAlmostEqual(night_drift_artist["addedAt"], newer_timestamp, places=2)
+
+        music_snapshot_before = sorted(
+            (
+                str(file_path.relative_to(self.music_directory)),
+                file_path.stat().st_size,
+                file_path.stat().st_mtime_ns,
+            )
+            for file_path in self.music_directory.rglob("*")
+            if file_path.is_file()
+        )
+
+        like_status, like_response = self.fetch_json(
+            f"/api/favorite-artists/{night_drift_artist['id']}",
+            method="POST",
+            payload={"isFavorite": True},
+        )
+        self.assertEqual(like_status, HTTP_OK)
+        self.assertEqual(
+            like_response,
+            {"artistId": night_drift_artist["id"], "isFavorite": True},
+        )
+
+        _lib_status, after_like = self.fetch_json("/api/library")
+        updated_artist = next(
+            artist_entry
+            for artist_entry in after_like["artists"]
+            if artist_entry["id"] == night_drift_artist["id"]
+        )
+        self.assertIs(updated_artist["isFavorite"], True)
+        self.assertEqual(after_like["counts"]["favorites"], 0)
+        self.assertEqual(after_like["counts"]["favoriteTracks"], 0)
+        self.assertEqual(after_like["counts"]["favoriteAlbums"], 0)
+        self.assertTrue(all(not album_entry["isFavorite"] for album_entry in after_like["albums"]))
+        self.assertTrue(all(not track_entry["isFavorite"] for track_entry in after_like["allTracks"]))
+
+        # Toggle off without body
+        toggle_status, toggle_response = self.fetch_json(
+            f"/api/favorite-artists/{night_drift_artist['id']}",
+            method="POST",
+            payload={},
+        )
+        self.assertEqual(toggle_status, HTTP_OK)
+        self.assertIs(toggle_response["isFavorite"], False)
+
+        # Re-like and verify persistence across store reload & scan
+        self.fetch_json(
+            f"/api/favorite-artists/{night_drift_artist['id']}",
+            method="POST",
+            payload={"isFavorite": True},
+        )
+        reloaded_store = server.SimulatorLibraryStore(
+            music_directory=self.music_directory,
+            state_file_path=self.state_file_path,
+        )
+        reloaded_store.scan()
+        reloaded_catalog = reloaded_store.serialize_catalog()
+        reloaded_artist = next(
+            artist_entry
+            for artist_entry in reloaded_catalog["artists"]
+            if artist_entry["id"] == night_drift_artist["id"]
+        )
+        self.assertIs(reloaded_artist["isFavorite"], True)
+        self.assertEqual(reloaded_catalog["counts"]["favorites"], 0)
+
+        music_snapshot_after = sorted(
+            (
+                str(file_path.relative_to(self.music_directory)),
+                file_path.stat().st_size,
+                file_path.stat().st_mtime_ns,
+            )
+            for file_path in self.music_directory.rglob("*")
+            if file_path.is_file()
+        )
+        self.assertEqual(music_snapshot_before, music_snapshot_after)
+
+    def test_favorite_artists_rejects_invalid_ids_and_payloads(self) -> None:
+        _status_code, catalog = self.fetch_json("/api/library")
+        artist_id = catalog["artists"][0]["id"]
+
+        for bad_path in ("/api/favorite-artists/nonexistent-id", "/api/favorite-artists/bad..id"):
+            bad_request = urllib.request.Request(
+                f"{self.base_url}{bad_path}",
+                b"{}",
+                {"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as http_error_context:
+                urllib.request.urlopen(bad_request)
+            self.assertEqual(http_error_context.exception.code, HTTP_NOT_FOUND)
+
+        for bad_body in (b"{invalid", json.dumps({"isFavorite": "yes"}).encode("utf-8")):
+            invalid_request = urllib.request.Request(
+                f"{self.base_url}/api/favorite-artists/{artist_id}",
+                bad_body,
+                {"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as http_error_context:
+                urllib.request.urlopen(invalid_request)
+            self.assertEqual(http_error_context.exception.code, HTTP_BAD_REQUEST)
+
+    def test_http11_keepalive_post_routes_do_not_corrupt_subsequent_audio_stream(self) -> None:
+        _status_code, catalog = self.fetch_json("/api/library")
+        album_id = catalog["albums"][0]["id"]
+        track_id = catalog["allTracks"][0]["id"]
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.server_port, timeout=3)
+        self.addCleanup(connection.close)
+
+        keepalive_post_cases = [
+            ("/api/rescan", json.dumps({"trigger": True}).encode("utf-8"), HTTP_OK),
+            (f"/api/favorite-albums/{album_id}", json.dumps({"isFavorite": True}).encode("utf-8"), HTTP_OK),
+            ("/api/favorite-albums/bad..id", json.dumps({"isFavorite": True}).encode("utf-8"), HTTP_NOT_FOUND),
+            ("/api/nonexistent-endpoint", json.dumps({"isFavorite": True}).encode("utf-8"), HTTP_NOT_FOUND),
+        ]
+
+        for route_path, body_bytes, expected_status in keepalive_post_cases:
+            connection.request(
+                "POST",
+                route_path,
+                body=body_bytes,
+                headers={"Content-Type": "application/json"},
+            )
+            post_response = connection.getresponse()
+            post_response.read()
+            self.assertEqual(post_response.status, expected_status)
+
+            connection.request("GET", f"/api/audio/{track_id}")
+            audio_response = connection.getresponse()
+            audio_payload = audio_response.read()
+            self.assertEqual(audio_response.status, HTTP_OK)
+            self.assertGreater(len(audio_payload), 0)
+
+        oversized_connection = http.client.HTTPConnection("127.0.0.1", self.server_port, timeout=3)
+        self.addCleanup(oversized_connection.close)
+        oversized_connection.putrequest("POST", f"/api/favorite-albums/{album_id}")
+        oversized_connection.putheader("Content-Type", "application/json")
+        oversized_connection.putheader("Content-Length", str(server.HTTP_MAX_REQUEST_BODY_BYTES + 1))
+        oversized_connection.endheaders()
+        oversized_response = oversized_connection.getresponse()
+        oversized_response.read()
+        self.assertEqual(oversized_response.status, HTTP_BAD_REQUEST)
+        self.assertEqual(oversized_response.getheader("Connection"), "close")
 
 
 if __name__ == "__main__":

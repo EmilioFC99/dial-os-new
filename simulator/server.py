@@ -227,6 +227,7 @@ class ParsedAudioMetadata:
 
     file_path: pathlib.Path
     file_size_bytes: int
+    file_mtime_seconds: float
     title: str
     artist: str
     album_artist: str
@@ -252,6 +253,8 @@ def build_empty_counts() -> dict[str, int]:
         "artists": 0,
         "genres": 0,
         "favorites": 0,
+        "favoriteTracks": 0,
+        "favoriteAlbums": 0,
         "playlists": 0,
     }
 
@@ -463,7 +466,11 @@ def parse_flac_vorbis_comment_block(payload_bytes: bytes, tags: dict[str, list[s
             tags.setdefault(field_name.strip().upper(), []).append(field_value.strip())
 
 
-def parse_flac_metadata(audio_file_path: pathlib.Path, file_size_bytes: int) -> ParsedAudioMetadata | None:
+def parse_flac_metadata(
+    audio_file_path: pathlib.Path,
+    file_size_bytes: int,
+    file_mtime_seconds: float = 0.0,
+) -> ParsedAudioMetadata | None:
     """Read STREAMINFO, VORBIS_COMMENT, and PICTURE headers from a FLAC file."""
     try:
         with audio_file_path.open("rb") as audio_stream:
@@ -563,6 +570,7 @@ def parse_flac_metadata(audio_file_path: pathlib.Path, file_size_bytes: int) -> 
     return ParsedAudioMetadata(
         file_path=audio_file_path,
         file_size_bytes=file_size_bytes,
+        file_mtime_seconds=file_mtime_seconds,
         title=title,
         artist=artist,
         album_artist=album_artist,
@@ -691,7 +699,11 @@ def parse_id3v2_tags(
     return tags, chosen_cover
 
 
-def parse_mp3_metadata(audio_file_path: pathlib.Path, file_size_bytes: int) -> ParsedAudioMetadata | None:
+def parse_mp3_metadata(
+    audio_file_path: pathlib.Path,
+    file_size_bytes: int,
+    file_mtime_seconds: float = 0.0,
+) -> ParsedAudioMetadata | None:
     """Parse ID3v2 tags and MPEG Layer III frame headers from an MP3 file."""
     tags: dict[str, list[str]] = {}
     chosen_cover: EmbeddedCoverReference | None = None
@@ -800,6 +812,7 @@ def parse_mp3_metadata(audio_file_path: pathlib.Path, file_size_bytes: int) -> P
     return ParsedAudioMetadata(
         file_path=audio_file_path,
         file_size_bytes=file_size_bytes,
+        file_mtime_seconds=file_mtime_seconds,
         title=title,
         artist=artist,
         album_artist=album_artist,
@@ -821,7 +834,9 @@ def parse_mp3_metadata(audio_file_path: pathlib.Path, file_size_bytes: int) -> P
 def parse_audio_file_metadata(audio_file_path: pathlib.Path) -> ParsedAudioMetadata | None:
     """Dispatch audio metadata extraction based on file extension."""
     try:
-        file_size_bytes = audio_file_path.stat().st_size
+        stat_result = audio_file_path.stat()
+        file_size_bytes = stat_result.st_size
+        file_mtime_seconds = float(stat_result.st_mtime)
     except OSError:
         return None
     if file_size_bytes <= 0:
@@ -829,9 +844,9 @@ def parse_audio_file_metadata(audio_file_path: pathlib.Path) -> ParsedAudioMetad
 
     extension = audio_file_path.suffix.lower()
     if extension == ".flac":
-        return parse_flac_metadata(audio_file_path, file_size_bytes)
+        return parse_flac_metadata(audio_file_path, file_size_bytes, file_mtime_seconds)
     if extension == ".mp3":
-        return parse_mp3_metadata(audio_file_path, file_size_bytes)
+        return parse_mp3_metadata(audio_file_path, file_size_bytes, file_mtime_seconds)
     return None
 
 
@@ -895,10 +910,14 @@ class SimulatorLibraryStore:
         self._scan_condition = threading.Condition(self._lock)
         self._scan_mutex = threading.Lock()
         self._track_paths_by_id: dict[str, pathlib.Path] = {}
+        self._album_ids: set[str] = set()
+        self._artist_ids: set[str] = set()
         self._covers_by_album_id: dict[str, SidecarCoverReference | EmbeddedCoverReference] = {}
         self._catalog: dict[str, Any] = {}
         self._has_catalog = False
         self._favorite_track_ids: set[str] = set()
+        self._favorite_album_ids: set[str] = set()
+        self._favorite_artist_ids: set[str] = set()
         self._playlists: list[dict[str, Any]] = []
 
         self._scan_id = 0
@@ -924,6 +943,12 @@ class SimulatorLibraryStore:
         favorites = saved_state.get("favorites")
         if isinstance(favorites, list):
             self._favorite_track_ids = {str(track_id) for track_id in favorites}
+        favorite_albums = saved_state.get("favoriteAlbums")
+        if isinstance(favorite_albums, list):
+            self._favorite_album_ids = {str(album_id) for album_id in favorite_albums}
+        favorite_artists = saved_state.get("favoriteArtists")
+        if isinstance(favorite_artists, list):
+            self._favorite_artist_ids = {str(artist_id) for artist_id in favorite_artists}
         playlists = saved_state.get("playlists")
         if isinstance(playlists, list):
             sanitized_playlists: list[dict[str, Any]] = []
@@ -944,6 +969,8 @@ class SimulatorLibraryStore:
         payload_text = json.dumps(
             {
                 "favorites": sorted(self._favorite_track_ids),
+                "favoriteAlbums": sorted(self._favorite_album_ids),
+                "favoriteArtists": sorted(self._favorite_artist_ids),
                 "playlists": self._playlists,
             },
             indent=2,
@@ -980,6 +1007,8 @@ class SimulatorLibraryStore:
         self,
         parsed_tracks: list[tuple[str, ParsedAudioMetadata]],
         favorite_track_ids: set[str],
+        favorite_album_ids: set[str],
+        favorite_artist_ids: set[str],
         stored_playlists: list[dict[str, Any]],
     ) -> tuple[
         dict[str, Any],
@@ -1026,6 +1055,8 @@ class SimulatorLibraryStore:
                 "artists": 0,
                 "genres": 0,
                 "favorites": 0,
+                "favoriteTracks": 0,
+                "favoriteAlbums": 0,
                 "playlists": len(stored_playlists),
             }
 
@@ -1034,6 +1065,7 @@ class SimulatorLibraryStore:
         album_tech_specs: dict[str, dict[str, Any]] = {}
         lyrics_catalog: dict[str, dict[str, Any]] = {}
         artist_album_ids: dict[str, tuple[str, set[str]]] = {}
+        album_added_at_by_id: dict[str, float] = {}
         genre_albums: dict[str, tuple[str, set[str], int]] = {}
 
         sorted_album_ids = sorted(
@@ -1070,6 +1102,7 @@ class SimulatorLibraryStore:
                         "id": track_id,
                         "title": track_metadata.title,
                         "artist": track_metadata.artist,
+                        "genres": list(track_metadata.genres),
                         "duration": duration_label,
                         "durationSeconds": round(track_metadata.duration_seconds, 2),
                         "isFavorite": is_favorite,
@@ -1088,6 +1121,7 @@ class SimulatorLibraryStore:
                         "albumId": album_id,
                         "albumTitle": current_album["title"],
                         "genre": track_metadata.genres[0],
+                        "genres": list(track_metadata.genres),
                         "duration": duration_label,
                         "durationSeconds": round(track_metadata.duration_seconds, 2),
                         "isFavorite": is_favorite,
@@ -1124,6 +1158,11 @@ class SimulatorLibraryStore:
                 "mbPerMin": round(mb_per_minute, 1),
             }
 
+            added_at = round(
+                max(track_metadata.file_mtime_seconds for _track_id, track_metadata in album_track_entries),
+                3,
+            )
+            album_added_at_by_id[album_id] = added_at
             albums_list.append(
                 {
                     "id": album_id,
@@ -1133,6 +1172,8 @@ class SimulatorLibraryStore:
                     "year": current_album["year"],
                     "motif": motif,
                     "coverUrl": cover_url,
+                    "isFavorite": album_id in favorite_album_ids,
+                    "addedAt": added_at,
                     "tracks": album_tracks_payload,
                 }
             )
@@ -1145,18 +1186,29 @@ class SimulatorLibraryStore:
 
         all_tracks_list.sort(key=lambda track_entry: track_entry["title"].casefold())
 
-        artists_list = [
-            {
-                "id": compute_stable_id(f"artist:{artist_key}"),
-                "name": canonical_name,
-                "countLabel": str(len(album_set)),
-                "albumIds": sorted(album_set, key=lambda current_id: album_metadata[current_id]["title"].casefold()),
-            }
-            for artist_key, (canonical_name, album_set) in sorted(
-                artist_album_ids.items(),
-                key=lambda artist_pair: artist_pair[1][0].casefold(),
+        artists_list = []
+        for artist_key, (canonical_name, album_set) in sorted(
+            artist_album_ids.items(),
+            key=lambda artist_pair: artist_pair[1][0].casefold(),
+        ):
+            artist_id = compute_stable_id(f"artist:{artist_key}")
+            artist_added_at = round(
+                max((album_added_at_by_id.get(current_id, 0.0) for current_id in album_set), default=0.0),
+                3,
             )
-        ]
+            artists_list.append(
+                {
+                    "id": artist_id,
+                    "name": canonical_name,
+                    "countLabel": str(len(album_set)),
+                    "albumIds": sorted(
+                        album_set,
+                        key=lambda current_id: album_metadata[current_id]["title"].casefold(),
+                    ),
+                    "isFavorite": artist_id in favorite_artist_ids,
+                    "addedAt": artist_added_at,
+                }
+            )
 
         genres_list = [
             {
@@ -1181,6 +1233,8 @@ class SimulatorLibraryStore:
             for playlist_entry in stored_playlists
         ]
 
+        favorite_tracks_count = sum(1 for track_entry in all_tracks_list if track_entry["isFavorite"])
+        favorite_albums_count = sum(1 for album_entry in albums_list if album_entry["isFavorite"])
         catalog_snapshot = {
             "source": "local",
             "musicRoot": str(self.music_directory),
@@ -1189,7 +1243,9 @@ class SimulatorLibraryStore:
                 "albums": len(albums_list),
                 "artists": len(artists_list),
                 "genres": len(genres_list),
-                "favorites": sum(1 for track_entry in all_tracks_list if track_entry["isFavorite"]),
+                "favorites": favorite_tracks_count + favorite_albums_count,
+                "favoriteTracks": favorite_tracks_count,
+                "favoriteAlbums": favorite_albums_count,
                 "playlists": len(active_playlists),
             },
             "albums": albums_list,
@@ -1216,6 +1272,8 @@ class SimulatorLibraryStore:
             self._scanned_files = 0
             self._boot_error = None
             favorite_snapshot = set(self._favorite_track_ids)
+            favorite_album_snapshot = set(self._favorite_album_ids)
+            favorite_artist_snapshot = set(self._favorite_artist_ids)
             playlists_snapshot = list(self._playlists)
 
         discovered_paths: list[pathlib.Path] = []
@@ -1255,11 +1313,15 @@ class SimulatorLibraryStore:
         catalog_snapshot, track_paths_by_id, covers_by_album_id = self._build_catalog_snapshot(
             parsed_tracks,
             favorite_snapshot,
+            favorite_album_snapshot,
+            favorite_artist_snapshot,
             playlists_snapshot,
         )
 
         with self._scan_condition:
             self._track_paths_by_id = track_paths_by_id
+            self._album_ids = {album_entry["id"] for album_entry in catalog_snapshot["albums"]}
+            self._artist_ids = {artist_entry["id"] for artist_entry in catalog_snapshot["artists"]}
             self._covers_by_album_id = covers_by_album_id
             self._catalog = catalog_snapshot
             self._has_catalog = True
@@ -1368,19 +1430,69 @@ class SimulatorLibraryStore:
                 self._favorite_track_ids.discard(track_id)
             self._persist_user_state_atomically()
 
-            favorite_count = 0
+            favorite_tracks_count = 0
             for track_entry in self._catalog.get("allTracks", []):
                 if track_entry["id"] == track_id:
                     track_entry["isFavorite"] = next_state
                 if track_entry["isFavorite"]:
-                    favorite_count += 1
+                    favorite_tracks_count += 1
+            favorite_albums_count = 0
             for album_entry in self._catalog.get("albums", []):
+                if album_entry.get("isFavorite"):
+                    favorite_albums_count += 1
                 for album_track in album_entry["tracks"]:
                     if album_track["id"] == track_id:
                         album_track["isFavorite"] = next_state
             if "counts" in self._catalog:
-                self._catalog["counts"]["favorites"] = favorite_count
+                self._catalog["counts"]["favoriteTracks"] = favorite_tracks_count
+                self._catalog["counts"]["favoriteAlbums"] = favorite_albums_count
+                self._catalog["counts"]["favorites"] = favorite_tracks_count + favorite_albums_count
                 self._boot_counts = dict(self._catalog["counts"])
+            return next_state
+
+    def set_album_favorite(self, album_id: str, is_favorite: bool | None) -> bool | None:
+        """Toggle or explicitly set an album's favorite flag independently of track favorites."""
+        with self._lock:
+            if album_id not in self._album_ids:
+                return None
+            next_state = (album_id not in self._favorite_album_ids) if is_favorite is None else bool(is_favorite)
+            if next_state:
+                self._favorite_album_ids.add(album_id)
+            else:
+                self._favorite_album_ids.discard(album_id)
+            self._persist_user_state_atomically()
+
+            favorite_albums_count = 0
+            for album_entry in self._catalog.get("albums", []):
+                if album_entry["id"] == album_id:
+                    album_entry["isFavorite"] = next_state
+                if album_entry.get("isFavorite"):
+                    favorite_albums_count += 1
+            favorite_tracks_count = sum(
+                1 for track_entry in self._catalog.get("allTracks", []) if track_entry.get("isFavorite")
+            )
+            if "counts" in self._catalog:
+                self._catalog["counts"]["favoriteTracks"] = favorite_tracks_count
+                self._catalog["counts"]["favoriteAlbums"] = favorite_albums_count
+                self._catalog["counts"]["favorites"] = favorite_tracks_count + favorite_albums_count
+                self._boot_counts = dict(self._catalog["counts"])
+            return next_state
+
+    def set_artist_favorite(self, artist_id: str, is_favorite: bool | None) -> bool | None:
+        """Toggle or explicitly set an artist's favorite flag without affecting Library/Favorites."""
+        with self._lock:
+            if artist_id not in self._artist_ids:
+                return None
+            next_state = (artist_id not in self._favorite_artist_ids) if is_favorite is None else bool(is_favorite)
+            if next_state:
+                self._favorite_artist_ids.add(artist_id)
+            else:
+                self._favorite_artist_ids.discard(artist_id)
+            self._persist_user_state_atomically()
+
+            for artist_entry in self._catalog.get("artists", []):
+                if artist_entry["id"] == artist_id:
+                    artist_entry["isFavorite"] = next_state
             return next_state
 
     def replace_playlists(self, playlists_payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1433,6 +1545,32 @@ def create_simulator_http_server(
         def log_message(self, format_string: str, *arguments: Any) -> None:
             return
 
+        def ensure_request_body_settled(self) -> None:
+            if self.command != "POST" or getattr(self, "_request_body_consumed", False):
+                return
+            if self.headers.get("Transfer-Encoding"):
+                self.close_connection = True
+                return
+            content_length_text = self.headers.get("Content-Length", "0").strip()
+            try:
+                content_length = int(content_length_text or "0")
+            except ValueError:
+                self.close_connection = True
+                return
+            if content_length < 0 or content_length > HTTP_MAX_REQUEST_BODY_BYTES:
+                self.close_connection = True
+                return
+            if content_length > 0:
+                try:
+                    remaining_bytes = self.rfile.read(content_length)
+                except OSError:
+                    self.close_connection = True
+                    return
+                if len(remaining_bytes) < content_length:
+                    self.close_connection = True
+                    return
+            self._request_body_consumed = True
+
         def send_json_response(
             self,
             status_code: int,
@@ -1440,12 +1578,15 @@ def create_simulator_http_server(
             *,
             head_only: bool = False,
         ) -> None:
+            self.ensure_request_body_settled()
             encoded_body = json.dumps(body_object, ensure_ascii=False).encode("utf-8")
             try:
                 self.send_response(status_code)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(encoded_body)))
                 self.send_header("Cache-Control", "no-store")
+                if self.close_connection:
+                    self.send_header("Connection", "close")
                 self.end_headers()
                 if not head_only:
                     self.wfile.write(encoded_body)
@@ -1461,11 +1602,14 @@ def create_simulator_http_server(
             cache_control: str = "no-store",
             head_only: bool = False,
         ) -> None:
+            self.ensure_request_body_settled()
             try:
                 self.send_response(status_code)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(payload_bytes)))
                 self.send_header("Cache-Control", cache_control)
+                if self.close_connection:
+                    self.send_header("Connection", "close")
                 self.end_headers()
                 if not head_only:
                     self.wfile.write(payload_bytes)
@@ -1657,23 +1801,64 @@ def create_simulator_http_server(
             self.handle_get_or_head(head_only=True)
 
         def read_json_body(self) -> dict[str, Any] | None:
+            if self.headers.get("Transfer-Encoding"):
+                self.close_connection = True
+                return None
             content_length_text = self.headers.get("Content-Length", "0").strip()
             try:
                 content_length = int(content_length_text or "0")
             except ValueError:
+                self.close_connection = True
                 return None
             if content_length < 0 or content_length > HTTP_MAX_REQUEST_BODY_BYTES:
+                self.close_connection = True
                 return None
             if content_length == 0:
+                self._request_body_consumed = True
                 return {}
-            body_bytes = self.rfile.read(content_length)
+            try:
+                body_bytes = self.rfile.read(content_length)
+            except OSError:
+                self.close_connection = True
+                return None
+            if len(body_bytes) < content_length:
+                self.close_connection = True
+                return None
+            self._request_body_consumed = True
             try:
                 decoded = json.loads(body_bytes.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 return None
             return decoded if isinstance(decoded, dict) else None
 
+        def handle_favorite_entity_post(
+            self,
+            route_path: str,
+            prefix: str,
+            not_found_error: str,
+            id_field_name: str,
+            setter: Any,
+        ) -> None:
+            entity_id = self.extract_safe_identifier(route_path, prefix)
+            if entity_id is None:
+                self.send_json_response(HTTP_NOT_FOUND, {"error": not_found_error})
+                return
+            request_body = self.read_json_body()
+            if request_body is None:
+                self.send_json_response(HTTP_BAD_REQUEST, {"error": "invalid_json"})
+                return
+            requested_state = request_body.get("isFavorite")
+            if requested_state is not None and not isinstance(requested_state, bool):
+                self.send_json_response(HTTP_BAD_REQUEST, {"error": "invalid_favorite_payload"})
+                return
+            updated_state = setter(entity_id, requested_state)
+            if updated_state is None:
+                self.send_json_response(HTTP_NOT_FOUND, {"error": not_found_error})
+                return
+            self.send_json_response(HTTP_OK, {id_field_name: entity_id, "isFavorite": updated_state})
+
         def do_POST(self) -> None:
+            self._request_body_consumed = False
             parsed_url = urllib.parse.urlsplit(self.path)
             route_path = parsed_url.path
 
@@ -1698,23 +1883,33 @@ def create_simulator_http_server(
                 return
 
             if route_path.startswith("/api/favorites/"):
-                track_id = self.extract_safe_identifier(route_path, "/api/favorites/")
-                if track_id is None:
-                    self.send_json_response(HTTP_NOT_FOUND, {"error": "track_not_found"})
-                    return
-                request_body = self.read_json_body()
-                if request_body is None:
-                    self.send_json_response(HTTP_BAD_REQUEST, {"error": "invalid_json"})
-                    return
-                requested_state = request_body.get("isFavorite")
-                if requested_state is not None and not isinstance(requested_state, bool):
-                    self.send_json_response(HTTP_BAD_REQUEST, {"error": "invalid_favorite_payload"})
-                    return
-                updated_state = library_store.set_favorite(track_id, requested_state)
-                if updated_state is None:
-                    self.send_json_response(HTTP_NOT_FOUND, {"error": "track_not_found"})
-                    return
-                self.send_json_response(HTTP_OK, {"trackId": track_id, "isFavorite": updated_state})
+                self.handle_favorite_entity_post(
+                    route_path,
+                    "/api/favorites/",
+                    "track_not_found",
+                    "trackId",
+                    library_store.set_favorite,
+                )
+                return
+
+            if route_path.startswith("/api/favorite-albums/"):
+                self.handle_favorite_entity_post(
+                    route_path,
+                    "/api/favorite-albums/",
+                    "album_not_found",
+                    "albumId",
+                    library_store.set_album_favorite,
+                )
+                return
+
+            if route_path.startswith("/api/favorite-artists/"):
+                self.handle_favorite_entity_post(
+                    route_path,
+                    "/api/favorite-artists/",
+                    "artist_not_found",
+                    "artistId",
+                    library_store.set_artist_favorite,
+                )
                 return
 
             if route_path == "/api/playlists":
