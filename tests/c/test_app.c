@@ -263,6 +263,18 @@ static void test_crash_atomic_files_and_readonly_fallback(void) {
     rmdir(temp_directory);
 }
 
+static void advance_runtime_ticks(struct app_runtime *runtime, struct fake_platform_context *fake,
+                                  uint64_t duration_ms) {
+    uint64_t end_ns = fake->now_ns + duration_ms * NANOSECONDS_PER_MILLISECOND;
+    while (fake->now_ns < end_ns) {
+        fake->now_ns += BOOT_FRAME_PERIOD_NS;
+        if (fake->now_ns > end_ns) {
+            fake->now_ns = end_ns;
+        }
+        app_handle_tick(runtime, fake->now_ns);
+    }
+}
+
 static void test_nominal_boot_aa24_retry_and_a607(void) {
     struct fake_platform_context fake;
     struct platform_operations operations;
@@ -286,26 +298,30 @@ static void test_nominal_boot_aa24_retry_and_a607(void) {
     app_handle_tick(&runtime, fake.now_ns);
     TEST_ASSERT_EQ_U32(2u, runtime.animation_frames);
 
-    /* Simulate transient ENOENT/EAGAIN failure on first 0664 attempt */
+    /* aa24 applies brightness & queues 0664 immediately, while boot choreography continues */
     fake.ipc_fail_remaining = 1u;
     fake.now_ns += 100000000ull;
     struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 22u);
     app_handle_ipc_message(&runtime, &aa24);
 
-    TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
+    TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
     TEST_ASSERT_EQ_U32(22u, fake.last_brightness);
     TEST_ASSERT_FALSE(runtime.idle_poweroff_disabled);
     TEST_ASSERT_TRUE(runtime.pending_disable_idle_poweroff);
-    TEST_ASSERT_EQ_U32(1u, fake.telemetry_writes);
-    TEST_ASSERT_FALSE(fake.last_telemetry.idle_poweroff_disabled);
+    TEST_ASSERT_EQ_U32(0u, fake.telemetry_writes);
 
-    /* Retry at +500 ms succeeds */
-    fake.now_ns += IPC_RETRY_INTERVAL_MS * NANOSECONDS_PER_MILLISECOND;
-    app_handle_tick(&runtime, fake.now_ns);
+    /* Retry at +500 ms succeeds while still in boot animation */
+    advance_runtime_ticks(&runtime, &fake, IPC_RETRY_INTERVAL_MS);
     TEST_ASSERT_TRUE(runtime.idle_poweroff_disabled);
     TEST_ASSERT_FALSE(runtime.pending_disable_idle_poweroff);
     TEST_ASSERT_EQ_U32(1u, fake.ipc_count);
     TEST_ASSERT_EQ_STR("0664000C0000", fake.ipc_messages[0]);
+
+    /* Complete remaining boot acts (~9.75s total) -> enters READY and writes telemetry */
+    advance_runtime_ticks(&runtime, &fake, 9300u);
+    TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
+    TEST_ASSERT_EQ_U32(1u, fake.telemetry_writes);
+    TEST_ASSERT_TRUE(fake.last_telemetry.idle_poweroff_disabled);
 
     /* a607 triggers one-time re-send of 0664000C0000 */
     struct inbound_ipc_message a607 = {0};
@@ -328,22 +344,25 @@ static void test_warning_timeout_and_late_recovery(void) {
     app_initialize(&runtime, &operations);
 
     /* Just before 12000 ms stays in BOOT_ANIMATION */
-    fake.now_ns = runtime.startup_ns + (AA24_WARNING_TIMEOUT_MS - 1u) * NANOSECONDS_PER_MILLISECOND;
-    app_handle_tick(&runtime, fake.now_ns);
+    advance_runtime_ticks(&runtime, &fake, AA24_WARNING_TIMEOUT_MS - 100u);
     TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
 
-    /* At 12000 ms enters WARNING with -1 indefinite poll timeout */
+    /* At 12000 ms enters WARNING with finite poll timeout for 60 fps animation */
     fake.now_ns = runtime.startup_ns + AA24_WARNING_TIMEOUT_MS * NANOSECONDS_PER_MILLISECOND;
     app_handle_tick(&runtime, fake.now_ns);
     TEST_ASSERT_EQ_I32(UI_STATE_WARNING, runtime.state);
-    TEST_ASSERT_EQ_I32(-1, app_compute_poll_timeout_ms(&runtime, fake.now_ns));
+    int32_t warning_poll_ms = app_compute_poll_timeout_ms(&runtime, fake.now_ns);
+    TEST_ASSERT_TRUE(warning_poll_ms > 0 && warning_poll_ms <= 17);
 
-    /* Late aa24 recovers into READY */
+    /* Late aa24 recovers into BOOT_ANIMATION (Act 02) and finishes into READY */
     fake.now_ns += 3000ull * NANOSECONDS_PER_MILLISECOND;
     struct inbound_ipc_message aa24 = make_aa24_message(30u, 100u, 150u);
     app_handle_ipc_message(&runtime, &aa24);
-    TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
+    TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
     TEST_ASSERT_TRUE(runtime.idle_poweroff_disabled);
+
+    advance_runtime_ticks(&runtime, &fake, 2200u);
+    TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
 }
 
 static void test_aa22_delayed_sd_probes_and_stability_reset(void) {
@@ -359,6 +378,7 @@ static void test_aa22_delayed_sd_probes_and_stability_reset(void) {
 
     struct inbound_ipc_message aa24 = make_aa24_message(20u, 80u, 100u);
     app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 9850u);
     TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
     uint32_t presents_at_ready = fake.present_count;
 
@@ -402,6 +422,8 @@ static void test_volume_lock_wake_ordering_and_shutdown(void) {
 
     struct inbound_ipc_message aa24 = make_aa24_message(0u, 2u, 140u);
     app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 9850u);
+    TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
 
     /* Clamp at 0 on Vol- and max_volume (2) on Vol+ */
     app_handle_button_action(&runtime, BUTTON_ACTION_VOLUME_DOWN);

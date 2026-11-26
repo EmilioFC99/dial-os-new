@@ -5,8 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "boot_sequence.h"
 #include "platform.h"
 #include "protocol.h"
+#include "theme.h"
 
 struct crash_record {
     int32_t signal_number;
@@ -41,7 +43,9 @@ struct app_runtime {
     uint64_t sd_followup_second_ns;
     bool sd_followup_first_pending;
     bool sd_followup_second_pending;
-    uint16_t animation_angle_degrees;
+    struct boot_controller boot;
+    uint64_t last_boot_tick_ns;
+    enum appearance_mode appearance_mode;
     uint32_t animation_frames;
     uint32_t animation_fps_x10;
     uint32_t max_frame_ms;
