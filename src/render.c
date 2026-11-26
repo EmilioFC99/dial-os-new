@@ -12,8 +12,7 @@
 #define MATRIX_GRID_SIZE 5
 #define MATRIX_CELL_SIZE_PX 18.0f
 #define MATRIX_CELL_GAP_PX 5.0f
-#define BUFFER_EXIT_START_PROGRESS 0.92f
-#define BUFFER_EXIT_END_PROGRESS 0.995f
+#define BUFFER_EXIT_HOLD_RATIO 0.43f
 #define SUBCUBE_TOTAL_COUNT 27u
 #define CUBE_FACE_COUNT 6u
 
@@ -174,6 +173,7 @@ static void draw_rotating_matrix_cube(const struct framebuffer_surface *surface,
     float angle_y = elapsed_seconds * 1.15f + 0.65f;
     float angle_x = 0.56f + sinf(elapsed_seconds * 0.85f) * 0.16f;
     float angle_z = 0.10f;
+    struct rotation_matrix_3x3 rotation = render_build_rotation_matrix_3d(angle_x, angle_y, angle_z);
     float cell_pitch = 28.0f * cube_scale;
     float half_cube_size = 10.2f * cube_scale;
     float clamped_fill = render_clamp_f32(fill_progress, 0.0f, 1.0f);
@@ -186,9 +186,9 @@ static void draw_rotating_matrix_cube(const struct framebuffer_surface *surface,
     struct projected_subcube sorted_subcubes[SUBCUBE_TOTAL_COUNT];
     for (uint32_t cube_index = 0u; cube_index < SUBCUBE_TOTAL_COUNT; cube_index++) {
         const struct subcube_spec spec = LATTICE_SUBCUBE_OFFSETS[cube_index];
-        struct point_3d rotated_center = render_rotate_point_3d(
-            (float)spec.grid_x * cell_pitch, (float)spec.grid_y * cell_pitch,
-            (float)spec.grid_z * cell_pitch, angle_x, angle_y, angle_z);
+        struct point_3d rotated_center = render_apply_rotation_matrix_3d(
+            &rotation, (float)spec.grid_x * cell_pitch, (float)spec.grid_y * cell_pitch,
+            (float)spec.grid_z * cell_pitch);
 
         float activation = render_clamp_f32(fill_cursor - (float)spec.fill_order, 0.0f, 1.0f);
         bool is_filled = activation > 0.0f;
@@ -219,17 +219,17 @@ static void draw_rotating_matrix_cube(const struct framebuffer_surface *surface,
 
     struct point_3d rotated_normals[CUBE_FACE_COUNT];
     for (uint32_t face_index = 0u; face_index < CUBE_FACE_COUNT; face_index++) {
-        rotated_normals[face_index] = render_rotate_point_3d(
-            CUBE_FACE_NORMALS[face_index][0], CUBE_FACE_NORMALS[face_index][1],
-            CUBE_FACE_NORMALS[face_index][2], angle_x, angle_y, angle_z);
+        rotated_normals[face_index] = render_apply_rotation_matrix_3d(
+            &rotation, CUBE_FACE_NORMALS[face_index][0], CUBE_FACE_NORMALS[face_index][1],
+            CUBE_FACE_NORMALS[face_index][2]);
     }
 
     struct point_3d rotated_corners[8];
     for (uint32_t vertex_index = 0u; vertex_index < 8u; vertex_index++) {
-        rotated_corners[vertex_index] = render_rotate_point_3d(
-            CUBE_LOCAL_VERTICES[vertex_index][0] * half_cube_size,
+        rotated_corners[vertex_index] = render_apply_rotation_matrix_3d(
+            &rotation, CUBE_LOCAL_VERTICES[vertex_index][0] * half_cube_size,
             CUBE_LOCAL_VERTICES[vertex_index][1] * half_cube_size,
-            CUBE_LOCAL_VERTICES[vertex_index][2] * half_cube_size, angle_x, angle_y, angle_z);
+            CUBE_LOCAL_VERTICES[vertex_index][2] * half_cube_size);
     }
 
     float wire_alpha = ((float)palette->cube_wireframe_alpha / 255.0f) * alpha;
@@ -244,37 +244,48 @@ static void draw_rotating_matrix_cube(const struct framebuffer_surface *surface,
             (subcube.visual_state == SUBCUBE_HIGHLIGHT) ? &palette->cube_highlight_faces
                                                         : &palette->cube_ink_faces;
 
-        for (uint32_t face_index = 0u; face_index < CUBE_FACE_COUNT; face_index++) {
-            struct point_3d rotated_normal = rotated_normals[face_index];
-            if (rotated_normal.z <= 0.01f) {
-                continue;
-            }
-
-            struct point_2d face_vertices[4];
-            for (uint32_t corner_index = 0u; corner_index < 4u; corner_index++) {
-                struct point_3d corner_offset =
-                    rotated_corners[CUBE_FACE_INDICES[face_index][corner_index]];
-                face_vertices[corner_index].x = origin_x + corner_offset.x * scale_factor;
-                face_vertices[corner_index].y = origin_y + corner_offset.y * scale_factor;
-            }
-
-            if (is_lit) {
-                uint32_t face_color = resolve_face_tone(rotated_normal, face_palette);
-                render_draw_filled_convex_polygon_aa(surface, face_vertices, 4u, face_color, alpha);
-                for (uint32_t edge_index = 0u; edge_index < 4u; edge_index++) {
-                    uint32_t next_index = (edge_index + 1u) % 4u;
-                    render_draw_line_aa(surface, face_vertices[edge_index].x,
-                                        face_vertices[edge_index].y, face_vertices[next_index].x,
-                                        face_vertices[next_index].y, 1.0f,
-                                        palette->cube_edge_stroke, alpha);
+        if (is_lit) {
+            for (uint32_t face_index = 0u; face_index < CUBE_FACE_COUNT; face_index++) {
+                struct point_3d rotated_normal = rotated_normals[face_index];
+                if (rotated_normal.z <= 0.01f) {
+                    continue;
                 }
-            } else {
+
+                struct point_2d face_vertices[4];
+                for (uint32_t corner_index = 0u; corner_index < 4u; corner_index++) {
+                    struct point_3d corner_offset =
+                        rotated_corners[CUBE_FACE_INDICES[face_index][corner_index]];
+                    face_vertices[corner_index].x = origin_x + corner_offset.x * scale_factor;
+                    face_vertices[corner_index].y = origin_y + corner_offset.y * scale_factor;
+                }
+
+                uint32_t face_color = resolve_face_tone(rotated_normal, face_palette);
+                render_draw_filled_convex_polygon_edged_aa(
+                    surface, face_vertices, 4u, face_color, palette->cube_edge_stroke, 0.85f,
+                    alpha);
+            }
+        } else {
+            uint8_t drawn_edge_mask[8] = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
+            for (uint32_t face_index = 0u; face_index < CUBE_FACE_COUNT; face_index++) {
+                if (rotated_normals[face_index].z <= 0.01f) {
+                    continue;
+                }
                 for (uint32_t edge_index = 0u; edge_index < 4u; edge_index++) {
-                    uint32_t next_index = (edge_index + 1u) % 4u;
-                    render_draw_line_aa(surface, face_vertices[edge_index].x,
-                                        face_vertices[edge_index].y, face_vertices[next_index].x,
-                                        face_vertices[next_index].y, 0.85f, palette->cube_wireframe,
-                                        wire_alpha);
+                    uint8_t vertex_a = CUBE_FACE_INDICES[face_index][edge_index];
+                    uint8_t vertex_b = CUBE_FACE_INDICES[face_index][(edge_index + 1u) % 4u];
+                    uint8_t low_v = vertex_a < vertex_b ? vertex_a : vertex_b;
+                    uint8_t high_v = vertex_a < vertex_b ? vertex_b : vertex_a;
+                    uint8_t bit = (uint8_t)(1u << high_v);
+                    if ((drawn_edge_mask[low_v] & bit) != 0u) {
+                        continue;
+                    }
+                    drawn_edge_mask[low_v] |= bit;
+
+                    render_draw_line_aa(surface, origin_x + rotated_corners[vertex_a].x,
+                                        origin_y + rotated_corners[vertex_a].y,
+                                        origin_x + rotated_corners[vertex_b].x,
+                                        origin_y + rotated_corners[vertex_b].y, 0.85f,
+                                        palette->cube_wireframe, wire_alpha);
                 }
             }
         }
@@ -421,14 +432,13 @@ static void render_act_wake_matrix(const struct framebuffer_surface *surface, fl
 
 static void render_act_buffer_sweep(const struct framebuffer_surface *surface, float act_progress,
                                     float elapsed_seconds, float sweep_progress,
-                                    const char *status_label,
+                                    float buffer_exit_progress, const char *status_label,
                                     const struct appearance_palette *palette) {
     float clamped_sweep = render_clamp_f32(sweep_progress, 0.0f, 1.0f);
     float entry_scale =
         render_lerp_f32(0.58f, 1.0f, render_ease_out_expo(render_normalize_range(act_progress, 0.0f, 0.14f)));
-    float exit_progress = act_progress < clamped_sweep ? act_progress : clamped_sweep;
     float exit_fade = render_ease_in_out_cubic(
-        render_normalize_range(exit_progress, BUFFER_EXIT_START_PROGRESS, BUFFER_EXIT_END_PROGRESS));
+        render_normalize_range(buffer_exit_progress, BUFFER_EXIT_HOLD_RATIO, 1.0f));
     float exit_alpha = 1.0f - exit_fade;
     if (exit_alpha <= ALPHA_VISIBILITY_THRESHOLD) {
         return;
@@ -439,28 +449,26 @@ static void render_act_buffer_sweep(const struct framebuffer_surface *surface, f
         render_ease_out_cubic(render_normalize_range(act_progress, 0.0f, 0.12f)) * exit_alpha;
 
     uint32_t filled_segment_count = (uint32_t)lroundf(clamped_sweep * (float)RIM_SEGMENT_COUNT);
-    float segment_pitch_angle = FULL_CIRCLE_RADIANS / (float)RIM_SEGMENT_COUNT;
-    float segment_arc_span = segment_pitch_angle * 0.68f;
-
-    for (uint32_t segment_index = 0u; segment_index < RIM_SEGMENT_COUNT; segment_index++) {
-        float start_angle = TOP_ANGLE_RADIANS + (float)segment_index * segment_pitch_angle;
-        float end_angle = start_angle + segment_arc_span;
-        bool is_filled = segment_index < filled_segment_count;
-        bool is_leading = (filled_segment_count > 0u && segment_index == filled_segment_count - 1u);
-
-        if (is_filled) {
-            bool is_highlight_band = (segment_index % 2u) == 0u;
-            render_draw_arc_aa(surface, (float)SCREEN_CENTER_X, (float)SCREEN_CENTER_Y,
-                               (float)OUTER_TICK_RADIUS - 3.0f, is_leading ? 9.0f : 6.5f,
-                               start_angle, end_angle,
-                               is_highlight_band ? palette->signal_highlight : palette->ink_primary,
-                               exit_alpha);
-        } else {
-            render_draw_arc_aa(surface, (float)SCREEN_CENTER_X, (float)SCREEN_CENTER_Y,
-                               (float)OUTER_TICK_RADIUS - 3.0f, 2.5f, start_angle, end_angle,
-                               palette->hairline, 0.85f * exit_alpha);
-        }
-    }
+    struct segmented_ring_params rim_params = {
+        .center_x = (float)SCREEN_CENTER_X,
+        .center_y = (float)SCREEN_CENTER_Y,
+        .radius = (float)OUTER_TICK_RADIUS - 3.0f,
+        .start_angle_offset = TOP_ANGLE_RADIANS,
+        .duty_ratio = 0.68f,
+        .segment_count = RIM_SEGMENT_COUNT,
+        .filled_count = filled_segment_count,
+        .major_stride = 0u,
+        .alternating_colors = true,
+        .filled_width = 6.5f,
+        .leading_width = 9.0f,
+        .unfilled_width = 2.5f,
+        .highlight_color = palette->signal_highlight,
+        .primary_color = palette->ink_primary,
+        .unfilled_color = palette->hairline,
+        .filled_alpha = exit_alpha,
+        .unfilled_alpha = 0.85f * exit_alpha,
+    };
+    render_draw_segmented_ring_aa(surface, &rim_params);
 
     static const float CORNER_ANGLES[4] = {
         -HALF_CIRCLE_RADIANS * 0.75f,
@@ -651,20 +659,26 @@ static void render_act_signal_lock(const struct framebuffer_surface *surface, fl
 static void render_warning_scenario(const struct framebuffer_surface *surface,
                                     float elapsed_seconds, float warning_elapsed_seconds,
                                     const struct appearance_palette *palette) {
-    const uint32_t segment_count = 24u;
-    float rotation_radians = elapsed_seconds * 0.45f;
-
-    for (uint32_t segment_index = 0u; segment_index < segment_count; segment_index++) {
-        float start_angle =
-            rotation_radians + ((float)segment_index / (float)segment_count) * FULL_CIRCLE_RADIANS;
-        float sweep_angle = (FULL_CIRCLE_RADIANS / (float)segment_count) * 0.56f;
-        bool is_hot_segment = (segment_index % 6u) == 0u;
-
-        render_draw_arc_aa(surface, (float)SCREEN_CENTER_X, (float)SCREEN_CENTER_Y,
-                           (float)ORBITAL_ARC_RADIUS, is_hot_segment ? 5.0f : 2.5f, start_angle,
-                           start_angle + sweep_angle,
-                           is_hot_segment ? palette->signal_alert : palette->hairline_strong, 1.0f);
-    }
+    struct segmented_ring_params warning_ring = {
+        .center_x = (float)SCREEN_CENTER_X,
+        .center_y = (float)SCREEN_CENTER_Y,
+        .radius = (float)ORBITAL_ARC_RADIUS,
+        .start_angle_offset = elapsed_seconds * 0.45f,
+        .duty_ratio = 0.56f,
+        .segment_count = 24u,
+        .filled_count = 0u,
+        .major_stride = 6u,
+        .alternating_colors = false,
+        .filled_width = 5.0f,
+        .leading_width = 5.0f,
+        .unfilled_width = 2.5f,
+        .highlight_color = palette->signal_alert,
+        .primary_color = palette->signal_alert,
+        .unfilled_color = palette->hairline_strong,
+        .filled_alpha = 1.0f,
+        .unfilled_alpha = 1.0f,
+    };
+    render_draw_segmented_ring_aa(surface, &warning_ring);
 
     render_draw_hazard_stripe_band(surface, (float)SCREEN_CENTER_X - 68.0f, 72.0f, 136.0f, 12.0f,
                                    elapsed_seconds * 28.0f, palette->signal_alert);
@@ -752,7 +766,8 @@ void render_draw_boot_frame(const struct framebuffer_surface *surface,
 
     if (snapshot->phase == BOOT_PHASE_BUFFER) {
         render_act_buffer_sweep(surface, snapshot->act_progress, snapshot->elapsed_seconds,
-                                snapshot->sweep_progress, snapshot->status_label, palette);
+                                snapshot->sweep_progress, snapshot->buffer_exit_progress,
+                                snapshot->status_label, palette);
         return;
     }
 

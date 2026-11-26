@@ -7,6 +7,33 @@
 
 #define MAX_CONVEX_POLYGON_VERTICES 8u
 
+static int16_t bezel_half_width_table[SCREEN_HEIGHT];
+static bool bezel_table_initialized = false;
+
+static void ensure_bezel_table_initialized(void) {
+    if (bezel_table_initialized) {
+        return;
+    }
+    int32_t radius_sq = DISPLAY_BEZEL_RADIUS * DISPLAY_BEZEL_RADIUS;
+    for (uint32_t logical_y = 0u; logical_y < SCREEN_HEIGHT; logical_y++) {
+        int32_t delta_y = (int32_t)logical_y - SCREEN_CENTER_Y;
+        int32_t rem = radius_sq - delta_y * delta_y;
+        if (rem < 0) {
+            bezel_half_width_table[logical_y] = -1;
+        } else {
+            int32_t half_w = (int32_t)sqrtf((float)rem);
+            while ((half_w + 1) * (half_w + 1) <= rem) {
+                half_w++;
+            }
+            while (half_w * half_w > rem) {
+                half_w--;
+            }
+            bezel_half_width_table[logical_y] = (int16_t)half_w;
+        }
+    }
+    bezel_table_initialized = true;
+}
+
 float render_clamp_f32(float value, float minimum, float maximum) {
     if (value < minimum) {
         return minimum;
@@ -47,31 +74,48 @@ float render_ease_in_out_cubic(float progress) {
     return 1.0f - (tail * tail * tail) * 0.5f;
 }
 
-struct point_3d render_rotate_point_3d(float point_x, float point_y, float point_z, float angle_x,
-                                      float angle_y, float angle_z) {
+struct rotation_matrix_3x3 render_build_rotation_matrix_3d(float angle_x, float angle_y,
+                                                           float angle_z) {
     float cos_y = cosf(angle_y);
     float sin_y = sinf(angle_y);
-    float rotated_x1 = point_x * cos_y + point_z * sin_y;
-    float rotated_z1 = -point_x * sin_y + point_z * cos_y;
-
     float cos_x = cosf(angle_x);
     float sin_x = sinf(angle_x);
-    float rotated_y2 = point_y * cos_x - rotated_z1 * sin_x;
-    float rotated_z2 = point_y * sin_x + rotated_z1 * cos_x;
-
     float cos_z = cosf(angle_z);
     float sin_z = sinf(angle_z);
+
+    /* Combined Rz * Rx * Ry matrix */
+    struct rotation_matrix_3x3 matrix = {
+        .m00 = cos_z * cos_y - sin_z * sin_x * sin_y,
+        .m01 = -sin_z * cos_x,
+        .m02 = cos_z * sin_y + sin_z * sin_x * cos_y,
+        .m10 = sin_z * cos_y + cos_z * sin_x * sin_y,
+        .m11 = cos_z * cos_x,
+        .m12 = sin_z * sin_y - cos_z * sin_x * cos_y,
+        .m20 = -cos_x * sin_y,
+        .m21 = sin_x,
+        .m22 = cos_x * cos_y,
+    };
+    return matrix;
+}
+
+struct point_3d render_apply_rotation_matrix_3d(const struct rotation_matrix_3x3 *matrix,
+                                                float point_x, float point_y, float point_z) {
     struct point_3d result = {
-        .x = rotated_x1 * cos_z - rotated_y2 * sin_z,
-        .y = rotated_x1 * sin_z + rotated_y2 * cos_z,
-        .z = rotated_z2,
+        .x = matrix->m00 * point_x + matrix->m01 * point_y + matrix->m02 * point_z,
+        .y = matrix->m10 * point_x + matrix->m11 * point_y + matrix->m12 * point_z,
+        .z = matrix->m20 * point_x + matrix->m21 * point_y + matrix->m22 * point_z,
     };
     return result;
 }
 
-static uint8_t alpha_to_u8(float alpha) {
+static inline uint8_t alpha_to_u8(float alpha) {
     float clamped = render_clamp_f32(alpha, 0.0f, 1.0f);
     return (uint8_t)lroundf(clamped * 255.0f);
+}
+
+static inline uint32_t div_255_fast(uint32_t value) {
+    uint32_t shifted = value + 128u;
+    return (shifted + (shifted >> 8u)) >> 8u;
 }
 
 static int32_t clamp_pixel_x(float coord) {
@@ -100,13 +144,41 @@ void render_fill_canvas(const struct framebuffer_surface *surface, uint32_t canv
     if (surface == NULL || surface->pixels == NULL) {
         return;
     }
+    ensure_bezel_table_initialized();
+
     for (uint32_t logical_y = 0u; logical_y < SCREEN_HEIGHT; logical_y++) {
         uint32_t physical_y = render_map_coordinate_180(logical_y);
         uint32_t *row_pixels = surface->pixels + physical_y * surface->stride_pixels;
-        for (uint32_t logical_x = 0u; logical_x < SCREEN_WIDTH; logical_x++) {
-            uint32_t physical_x = render_map_coordinate_180(logical_x);
-            bool inside = render_is_inside_bezel_circle((int32_t)logical_x, (int32_t)logical_y);
-            row_pixels[physical_x] = inside ? canvas_color : COLOR_OUTSIDE_BEZEL;
+        int16_t half_w = bezel_half_width_table[logical_y];
+
+        if (half_w < 0) {
+            for (uint32_t col = 0u; col < SCREEN_WIDTH; col++) {
+                row_pixels[col] = COLOR_OUTSIDE_BEZEL;
+            }
+            continue;
+        }
+
+        int32_t logical_min_x = SCREEN_CENTER_X - (int32_t)half_w;
+        int32_t logical_max_x = SCREEN_CENTER_X + (int32_t)half_w;
+        if (logical_min_x < 0) {
+            logical_min_x = 0;
+        }
+        if (logical_max_x > (int32_t)SCREEN_COORDINATE_MAX) {
+            logical_max_x = (int32_t)SCREEN_COORDINATE_MAX;
+        }
+
+        /* 180-degree X flip reverses [logical_min_x .. logical_max_x] to [phys_min .. phys_max] */
+        uint32_t phys_min_x = render_map_coordinate_180((uint32_t)logical_max_x);
+        uint32_t phys_max_x = render_map_coordinate_180((uint32_t)logical_min_x);
+
+        for (uint32_t col = 0u; col < phys_min_x; col++) {
+            row_pixels[col] = COLOR_OUTSIDE_BEZEL;
+        }
+        for (uint32_t col = phys_min_x; col <= phys_max_x; col++) {
+            row_pixels[col] = canvas_color;
+        }
+        for (uint32_t col = phys_max_x + 1u; col < SCREEN_WIDTH; col++) {
+            row_pixels[col] = COLOR_OUTSIDE_BEZEL;
         }
     }
 }
@@ -140,9 +212,9 @@ void render_blend_pixel(const struct framebuffer_surface *surface, int32_t logic
     uint32_t dst_g = (destination >> 8u) & 0xFFu;
     uint32_t dst_b = destination & 0xFFu;
 
-    uint32_t out_r = (src_r * (uint32_t)alpha + dst_r * inv_alpha + 127u) / 255u;
-    uint32_t out_g = (src_g * (uint32_t)alpha + dst_g * inv_alpha + 127u) / 255u;
-    uint32_t out_b = (src_b * (uint32_t)alpha + dst_b * inv_alpha + 127u) / 255u;
+    uint32_t out_r = div_255_fast(src_r * (uint32_t)alpha + dst_r * inv_alpha);
+    uint32_t out_g = div_255_fast(src_g * (uint32_t)alpha + dst_g * inv_alpha);
+    uint32_t out_b = div_255_fast(src_b * (uint32_t)alpha + dst_b * inv_alpha);
 
     *target = 0xFF000000u | (out_r << 16u) | (out_g << 8u) | out_b;
 }
@@ -156,6 +228,8 @@ void render_draw_line_aa(const struct framebuffer_surface *surface, float start_
 
     float half_width = line_width * 0.5f;
     float margin = half_width + 1.5f;
+    float max_dist = half_width + 0.5f;
+    float max_dist_sq = max_dist * max_dist;
     float min_fx = start_x < end_x ? start_x : end_x;
     float max_fx = start_x > end_x ? start_x : end_x;
     float min_fy = start_y < end_y ? start_y : end_y;
@@ -169,24 +243,57 @@ void render_draw_line_aa(const struct framebuffer_surface *surface, float start_
     float delta_x = end_x - start_x;
     float delta_y = end_y - start_y;
     float length_sq = delta_x * delta_x + delta_y * delta_y;
+    float inv_length_sq = length_sq > 1e-6f ? (1.0f / length_sq) : 0.0f;
 
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
+        float rel_y = (float)pixel_y - start_y;
         for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
+            float rel_x = (float)pixel_x - start_x;
             float proj_t = 0.0f;
-            if (length_sq > 1e-6f) {
-                proj_t = ((float)pixel_x - start_x) * delta_x + ((float)pixel_y - start_y) * delta_y;
-                proj_t = render_clamp_f32(proj_t / length_sq, 0.0f, 1.0f);
+            if (inv_length_sq > 0.0f) {
+                proj_t = (rel_x * delta_x + rel_y * delta_y) * inv_length_sq;
+                if (proj_t < 0.0f) {
+                    proj_t = 0.0f;
+                } else if (proj_t > 1.0f) {
+                    proj_t = 1.0f;
+                }
             }
-            float closest_x = start_x + proj_t * delta_x;
-            float closest_y = start_y + proj_t * delta_y;
-            float dist_x = (float)pixel_x - closest_x;
-            float dist_y = (float)pixel_y - closest_y;
-            float distance = sqrtf(dist_x * dist_x + dist_y * dist_y);
-            float coverage = render_clamp_f32(half_width + 0.5f - distance, 0.0f, 1.0f);
-            if (coverage > 0.0f) {
-                render_blend_pixel(surface, pixel_x, pixel_y, color, alpha_to_u8(alpha * coverage));
+            float dist_x = rel_x - proj_t * delta_x;
+            float dist_y = rel_y - proj_t * delta_y;
+            float dist_sq = dist_x * dist_x + dist_y * dist_y;
+            if (dist_sq >= max_dist_sq) {
+                continue;
             }
+            float coverage = max_dist - sqrtf(dist_sq);
+            if (coverage > 1.0f) {
+                coverage = 1.0f;
+            }
+            render_blend_pixel(surface, pixel_x, pixel_y, color, alpha_to_u8(alpha * coverage));
         }
+    }
+}
+
+static void compute_annular_row_spans(float center_x, float offset_y, float inner_r, float outer_r,
+                                      int32_t *left_min_out, int32_t *left_max_out,
+                                      int32_t *right_min_out, int32_t *right_max_out) {
+    float abs_y = fabsf(offset_y);
+    float outer_dx = sqrtf(fmaxf(0.0f, outer_r * outer_r - abs_y * abs_y));
+    if (inner_r > 0.0f && abs_y < inner_r) {
+        float inner_dx = sqrtf(inner_r * inner_r - abs_y * abs_y);
+        *left_min_out = clamp_pixel_x(center_x - outer_dx);
+        *left_max_out = clamp_pixel_x(center_x - inner_dx);
+        *right_min_out = clamp_pixel_x(center_x + inner_dx);
+        *right_max_out = clamp_pixel_x(center_x + outer_dx);
+        if (*left_max_out >= *right_min_out) {
+            *left_max_out = *right_max_out;
+            *right_min_out = 1;
+            *right_max_out = 0;
+        }
+    } else {
+        *left_min_out = clamp_pixel_x(center_x - outer_dx);
+        *left_max_out = clamp_pixel_x(center_x + outer_dx);
+        *right_min_out = 1;
+        *right_max_out = 0;
     }
 }
 
@@ -206,54 +313,190 @@ void render_draw_arc_aa(const struct framebuffer_surface *surface, float center_
 
     float half_width = line_width * 0.5f;
     float outer_margin = radius + half_width + 1.5f;
-    int32_t min_x = clamp_pixel_x(center_x - outer_margin);
-    int32_t max_x = clamp_pixel_x(center_x + outer_margin);
-    int32_t min_y = clamp_pixel_y(center_y - outer_margin);
-    int32_t max_y = clamp_pixel_y(center_y + outer_margin);
-
     float inner_cutoff = radius - half_width - 1.5f;
     float inner_cutoff_sq = inner_cutoff > 0.0f ? inner_cutoff * inner_cutoff : 0.0f;
     float outer_cutoff_sq = outer_margin * outer_margin;
 
+    int32_t min_y = clamp_pixel_y(center_y - outer_margin);
+    int32_t max_y = clamp_pixel_y(center_y + outer_margin);
+
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
         float offset_y = (float)pixel_y - center_y;
-        for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
-            float offset_x = (float)pixel_x - center_x;
-            float dist_sq = offset_x * offset_x + offset_y * offset_y;
-            if (dist_sq < inner_cutoff_sq || dist_sq > outer_cutoff_sq) {
-                continue;
-            }
+        int32_t spans[2][2];
+        compute_annular_row_spans(center_x, offset_y, inner_cutoff, outer_margin, &spans[0][0],
+                                  &spans[0][1], &spans[1][0], &spans[1][1]);
 
-            float dist = sqrtf(dist_sq);
-            float radial_cov = render_clamp_f32(half_width + 0.5f - fabsf(dist - radius), 0.0f, 1.0f);
-            if (radial_cov <= 0.0f) {
-                continue;
-            }
+        for (int32_t span_index = 0; span_index < 2; span_index++) {
+            for (int32_t pixel_x = spans[span_index][0]; pixel_x <= spans[span_index][1];
+                 pixel_x++) {
+                float offset_x = (float)pixel_x - center_x;
+                float dist_sq = offset_x * offset_x + offset_y * offset_y;
+                if (dist_sq < inner_cutoff_sq || dist_sq > outer_cutoff_sq) {
+                    continue;
+                }
 
-            float coverage = radial_cov;
-            if (!is_full_circle) {
+                float dist = sqrtf(dist_sq);
+                float radial_cov =
+                    render_clamp_f32(half_width + 0.5f - fabsf(dist - radius), 0.0f, 1.0f);
+                if (radial_cov <= 0.0f) {
+                    continue;
+                }
+
+                float coverage = radial_cov;
+                if (!is_full_circle) {
+                    float angle = atan2f(offset_y, offset_x);
+                    float relative = angle - start_angle;
+                    while (relative < 0.0f) {
+                        relative += FULL_CIRCLE_RADIANS;
+                    }
+                    while (relative >= FULL_CIRCLE_RADIANS) {
+                        relative -= FULL_CIRCLE_RADIANS;
+                    }
+
+                    float angular_dist;
+                    if (relative <= sweep) {
+                        float dist_start = relative * radius;
+                        float dist_end = (sweep - relative) * radius;
+                        angular_dist = dist_start < dist_end ? dist_start : dist_end;
+                    } else {
+                        float dist_past_end = (relative - sweep) * radius;
+                        float dist_before_start = (FULL_CIRCLE_RADIANS - relative) * radius;
+                        angular_dist = -(dist_past_end < dist_before_start ? dist_past_end
+                                                                           : dist_before_start);
+                    }
+                    float angular_cov = render_clamp_f32(angular_dist + 0.5f, 0.0f, 1.0f);
+                    coverage *= angular_cov;
+                }
+
+                if (coverage > 0.0f) {
+                    render_blend_pixel(surface, pixel_x, pixel_y, color,
+                                       alpha_to_u8(alpha * coverage));
+                }
+            }
+        }
+    }
+}
+
+void render_draw_segmented_ring_aa(const struct framebuffer_surface *surface,
+                                   const struct segmented_ring_params *params) {
+    if (surface == NULL || surface->pixels == NULL || params == NULL ||
+        params->segment_count == 0u || params->radius <= 0.0f) {
+        return;
+    }
+
+    float max_width = params->filled_width;
+    if (params->leading_width > max_width) {
+        max_width = params->leading_width;
+    }
+    if (params->unfilled_width > max_width) {
+        max_width = params->unfilled_width;
+    }
+    if (max_width <= 0.0f) {
+        return;
+    }
+
+    float max_half_w = max_width * 0.5f;
+    float outer_margin = params->radius + max_half_w + 1.5f;
+    float inner_cutoff = params->radius - max_half_w - 1.5f;
+    float inner_cutoff_sq = inner_cutoff > 0.0f ? inner_cutoff * inner_cutoff : 0.0f;
+    float outer_cutoff_sq = outer_margin * outer_margin;
+
+    float pitch = FULL_CIRCLE_RADIANS / (float)params->segment_count;
+    float inv_pitch = (float)params->segment_count / FULL_CIRCLE_RADIANS;
+    float arc_span = pitch * params->duty_ratio;
+
+    int32_t min_y = clamp_pixel_y(params->center_y - outer_margin);
+    int32_t max_y = clamp_pixel_y(params->center_y + outer_margin);
+
+    for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
+        float offset_y = (float)pixel_y - params->center_y;
+        int32_t spans[2][2];
+        compute_annular_row_spans(params->center_x, offset_y, inner_cutoff, outer_margin,
+                                  &spans[0][0], &spans[0][1], &spans[1][0], &spans[1][1]);
+
+        for (int32_t span_index = 0; span_index < 2; span_index++) {
+            for (int32_t pixel_x = spans[span_index][0]; pixel_x <= spans[span_index][1];
+                 pixel_x++) {
+                float offset_x = (float)pixel_x - params->center_x;
+                float dist_sq = offset_x * offset_x + offset_y * offset_y;
+                if (dist_sq < inner_cutoff_sq || dist_sq > outer_cutoff_sq) {
+                    continue;
+                }
+
+                float dist = sqrtf(dist_sq);
                 float angle = atan2f(offset_y, offset_x);
-                float relative = fmodf(angle - start_angle, FULL_CIRCLE_RADIANS);
-                if (relative < 0.0f) {
+                float relative = angle - params->start_angle_offset;
+                while (relative < 0.0f) {
                     relative += FULL_CIRCLE_RADIANS;
                 }
+                while (relative >= FULL_CIRCLE_RADIANS) {
+                    relative -= FULL_CIRCLE_RADIANS;
+                }
+
+                float segment_pos = relative * inv_pitch;
+                uint32_t segment_index = (uint32_t)segment_pos;
+                if (segment_index >= params->segment_count) {
+                    segment_index = params->segment_count - 1u;
+                }
+                float in_seg_angle = relative - (float)segment_index * pitch;
+
+                float seg_width;
+                uint32_t seg_color;
+                float seg_alpha;
+
+                if (params->major_stride > 0u) {
+                    bool is_major = (segment_index % params->major_stride) == 0u;
+                    seg_width = is_major ? params->filled_width : params->unfilled_width;
+                    seg_color = is_major ? params->highlight_color : params->unfilled_color;
+                    seg_alpha = is_major ? params->filled_alpha : params->unfilled_alpha;
+                } else {
+                    bool is_filled = segment_index < params->filled_count;
+                    if (is_filled) {
+                        bool is_leading =
+                            (params->filled_count > 0u && segment_index == params->filled_count - 1u);
+                        seg_width = is_leading ? params->leading_width : params->filled_width;
+                        if (params->alternating_colors) {
+                            seg_color = ((segment_index % 2u) == 0u) ? params->highlight_color
+                                                                     : params->primary_color;
+                        } else {
+                            seg_color = params->highlight_color;
+                        }
+                        seg_alpha = params->filled_alpha;
+                    } else {
+                        seg_width = params->unfilled_width;
+                        seg_color = params->unfilled_color;
+                        seg_alpha = params->unfilled_alpha;
+                    }
+                }
+
+                if (seg_alpha <= ALPHA_VISIBILITY_THRESHOLD) {
+                    continue;
+                }
+
+                float radial_cov =
+                    render_clamp_f32(seg_width * 0.5f + 0.5f - fabsf(dist - params->radius), 0.0f,
+                                     1.0f);
+                if (radial_cov <= 0.0f) {
+                    continue;
+                }
+
                 float angular_dist;
-                if (relative <= sweep) {
-                    float dist_start = relative * radius;
-                    float dist_end = (sweep - relative) * radius;
+                if (in_seg_angle <= arc_span) {
+                    float dist_start = in_seg_angle * params->radius;
+                    float dist_end = (arc_span - in_seg_angle) * params->radius;
                     angular_dist = dist_start < dist_end ? dist_start : dist_end;
                 } else {
-                    float dist_past_end = (relative - sweep) * radius;
-                    float dist_before_start = (FULL_CIRCLE_RADIANS - relative) * radius;
+                    float dist_past_end = (in_seg_angle - arc_span) * params->radius;
+                    float dist_before_start = (pitch - in_seg_angle) * params->radius;
                     angular_dist = -(dist_past_end < dist_before_start ? dist_past_end
                                                                        : dist_before_start);
                 }
                 float angular_cov = render_clamp_f32(angular_dist + 0.5f, 0.0f, 1.0f);
-                coverage *= angular_cov;
-            }
-
-            if (coverage > 0.0f) {
-                render_blend_pixel(surface, pixel_x, pixel_y, color, alpha_to_u8(alpha * coverage));
+                float coverage = radial_cov * angular_cov;
+                if (coverage > 0.0f) {
+                    render_blend_pixel(surface, pixel_x, pixel_y, seg_color,
+                                       alpha_to_u8(seg_alpha * coverage));
+                }
             }
         }
     }
@@ -331,14 +574,9 @@ void render_draw_stroked_rect_alpha(const struct framebuffer_surface *surface, f
     render_draw_line_aa(surface, left_x, bottom_y, left_x, top_y, line_width, color, alpha);
 }
 
-void render_draw_filled_convex_polygon_aa(const struct framebuffer_surface *surface,
-                                          const struct point_2d *vertices, uint32_t vertex_count,
-                                          uint32_t color, float alpha) {
-    if (surface == NULL || surface->pixels == NULL || vertices == NULL || vertex_count < 3u ||
-        vertex_count > MAX_CONVEX_POLYGON_VERTICES || alpha <= ALPHA_VISIBILITY_THRESHOLD) {
-        return;
-    }
-
+static bool prepare_convex_polygon(const struct point_2d *vertices, uint32_t vertex_count,
+                                   float *normal_x, float *normal_y, int32_t *min_x_out,
+                                   int32_t *max_x_out, int32_t *min_y_out, int32_t *max_y_out) {
     float signed_area = 0.0f;
     float min_fx = vertices[0].x;
     float max_fx = vertices[0].x;
@@ -364,14 +602,10 @@ void render_draw_filled_convex_polygon_aa(const struct framebuffer_surface *surf
     }
 
     if (fabsf(signed_area) < 1e-4f) {
-        return;
+        return false;
     }
 
-    /* Ensure outward normal points away from polygon interior regardless of winding */
     float winding_sign = signed_area > 0.0f ? 1.0f : -1.0f;
-    float normal_x[MAX_CONVEX_POLYGON_VERTICES];
-    float normal_y[MAX_CONVEX_POLYGON_VERTICES];
-
     for (uint32_t index = 0u; index < vertex_count; index++) {
         uint32_t next_index = (index + 1u) % vertex_count;
         float edge_x = vertices[next_index].x - vertices[index].x;
@@ -386,10 +620,32 @@ void render_draw_filled_convex_polygon_aa(const struct framebuffer_surface *surf
         }
     }
 
-    int32_t min_x = clamp_pixel_x(min_fx - 1.5f);
-    int32_t max_x = clamp_pixel_x(max_fx + 1.5f);
-    int32_t min_y = clamp_pixel_y(min_fy - 1.5f);
-    int32_t max_y = clamp_pixel_y(max_fy + 1.5f);
+    *min_x_out = clamp_pixel_x(min_fx - 1.5f);
+    *max_x_out = clamp_pixel_x(max_fx + 1.5f);
+    *min_y_out = clamp_pixel_y(min_fy - 1.5f);
+    *max_y_out = clamp_pixel_y(max_fy + 1.5f);
+    return true;
+}
+
+void render_draw_filled_convex_polygon_aa(const struct framebuffer_surface *surface,
+                                          const struct point_2d *vertices, uint32_t vertex_count,
+                                          uint32_t color, float alpha) {
+    if (surface == NULL || surface->pixels == NULL || vertices == NULL || vertex_count < 3u ||
+        vertex_count > MAX_CONVEX_POLYGON_VERTICES || alpha <= ALPHA_VISIBILITY_THRESHOLD) {
+        return;
+    }
+
+    float normal_x[MAX_CONVEX_POLYGON_VERTICES];
+    float normal_y[MAX_CONVEX_POLYGON_VERTICES];
+    int32_t min_x = 0;
+    int32_t max_x = 0;
+    int32_t min_y = 0;
+    int32_t max_y = 0;
+
+    if (!prepare_convex_polygon(vertices, vertex_count, normal_x, normal_y, &min_x, &max_x, &min_y,
+                                &max_y)) {
+        return;
+    }
 
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
         for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
@@ -404,6 +660,71 @@ void render_draw_filled_convex_polygon_aa(const struct framebuffer_surface *surf
             float coverage = render_clamp_f32(0.5f - max_signed_dist, 0.0f, 1.0f);
             if (coverage > 0.0f) {
                 render_blend_pixel(surface, pixel_x, pixel_y, color, alpha_to_u8(alpha * coverage));
+            }
+        }
+    }
+}
+
+void render_draw_filled_convex_polygon_edged_aa(const struct framebuffer_surface *surface,
+                                                const struct point_2d *vertices,
+                                                uint32_t vertex_count, uint32_t fill_color,
+                                                uint32_t edge_color, float edge_width,
+                                                float alpha) {
+    if (surface == NULL || surface->pixels == NULL || vertices == NULL || vertex_count < 3u ||
+        vertex_count > MAX_CONVEX_POLYGON_VERTICES || alpha <= ALPHA_VISIBILITY_THRESHOLD) {
+        return;
+    }
+
+    float normal_x[MAX_CONVEX_POLYGON_VERTICES];
+    float normal_y[MAX_CONVEX_POLYGON_VERTICES];
+    int32_t min_x = 0;
+    int32_t max_x = 0;
+    int32_t min_y = 0;
+    int32_t max_y = 0;
+
+    if (!prepare_convex_polygon(vertices, vertex_count, normal_x, normal_y, &min_x, &max_x, &min_y,
+                                &max_y)) {
+        return;
+    }
+
+    uint32_t fill_r = (fill_color >> 16u) & 0xFFu;
+    uint32_t fill_g = (fill_color >> 8u) & 0xFFu;
+    uint32_t fill_b = fill_color & 0xFFu;
+    uint32_t edge_r = (edge_color >> 16u) & 0xFFu;
+    uint32_t edge_g = (edge_color >> 8u) & 0xFFu;
+    uint32_t edge_b = edge_color & 0xFFu;
+
+    for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
+        for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
+            float max_signed_dist = -1e6f;
+            for (uint32_t index = 0u; index < vertex_count; index++) {
+                float dist = ((float)pixel_x - vertices[index].x) * normal_x[index] +
+                             ((float)pixel_y - vertices[index].y) * normal_y[index];
+                if (dist > max_signed_dist) {
+                    max_signed_dist = dist;
+                }
+            }
+
+            float outer_cov = render_clamp_f32(0.5f - max_signed_dist, 0.0f, 1.0f);
+            if (outer_cov <= 0.0f) {
+                continue;
+            }
+            float inner_cov = render_clamp_f32(0.5f - edge_width - max_signed_dist, 0.0f, 1.0f);
+            if (inner_cov >= 1.0f) {
+                render_blend_pixel(surface, pixel_x, pixel_y, fill_color, alpha_to_u8(alpha));
+            } else if (inner_cov <= 0.0f) {
+                render_blend_pixel(surface, pixel_x, pixel_y, edge_color,
+                                   alpha_to_u8(alpha * outer_cov));
+            } else {
+                float edge_ratio = (outer_cov - inner_cov) / outer_cov;
+                uint32_t edge_u8 = (uint32_t)lroundf(edge_ratio * 255.0f);
+                uint32_t fill_u8 = 255u - edge_u8;
+                uint32_t mix_r = div_255_fast(fill_r * fill_u8 + edge_r * edge_u8);
+                uint32_t mix_g = div_255_fast(fill_g * fill_u8 + edge_g * edge_u8);
+                uint32_t mix_b = div_255_fast(fill_b * fill_u8 + edge_b * edge_u8);
+                uint32_t mixed_color = (mix_r << 16u) | (mix_g << 8u) | mix_b;
+                render_blend_pixel(surface, pixel_x, pixel_y, mixed_color,
+                                   alpha_to_u8(alpha * outer_cov));
             }
         }
     }
@@ -497,7 +818,8 @@ void render_draw_text_alpha(const struct framebuffer_surface *surface, enum font
                 if (coverage_u8 == 0u) {
                     continue;
                 }
-                uint8_t blended_alpha = (uint8_t)lroundf(((float)coverage_u8 / 255.0f) * alpha * 255.0f);
+                uint8_t blended_alpha =
+                    (uint8_t)lroundf(((float)coverage_u8 / 255.0f) * alpha * 255.0f);
                 render_blend_pixel(surface, draw_x + (int32_t)col_index,
                                    draw_y + (int32_t)row_index, color, blended_alpha);
             }
