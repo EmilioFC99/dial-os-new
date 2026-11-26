@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "render.h"
+#include "theme.h"
 
 struct telemetry_snapshot {
     uint64_t takeover_ms;
@@ -20,12 +21,18 @@ struct telemetry_snapshot {
     uint64_t uptime_ms;
     uint32_t rss_shutdown_kb;
     uint32_t watchdog_restarts;
+    uint32_t home_frames;
+    uint32_t home_fps_x10;
+    uint32_t home_max_frame_ms;
 };
 
 struct hardware_status {
     bool battery_valid;
     uint8_t battery_percent;
     bool sd_mounted;
+    bool usb_storage_active;
+    bool sd_free_valid;
+    uint64_t sd_free_megabytes;
 };
 
 struct platform_operations {
@@ -45,6 +52,8 @@ struct platform_operations {
     void (*execute_shutdown)(void *context, bool screen_was_locked,
                              const struct telemetry_snapshot *final_snapshot);
     void (*update_crash_state_mirror)(void *context, int32_t ui_state);
+    bool (*appearance_mode_read)(void *context, enum appearance_mode *mode_out);
+    void (*appearance_mode_write)(void *context, enum appearance_mode mode);
 };
 
 #endif

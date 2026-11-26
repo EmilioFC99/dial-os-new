@@ -239,6 +239,18 @@ void boot_controller_mark_audio_ready(struct boot_controller *controller, bool s
     }
 }
 
+void boot_controller_retry_from_warning(struct boot_controller *controller) {
+    if (controller == NULL || controller->phase != BOOT_PHASE_WARNING) {
+        return;
+    }
+    controller->phase = BOOT_PHASE_BUFFER;
+    controller->warning_elapsed_seconds = 0.0f;
+    controller->stall_timer_seconds = BOOT_WAKE_DURATION_SECONDS;
+    if (controller->sweep_progress > BOOT_SWEEP_HOLD_CAP_BEFORE_READY) {
+        controller->sweep_progress = BOOT_SWEEP_HOLD_CAP_BEFORE_READY;
+    }
+}
+
 void boot_controller_update_sd_mounted(struct boot_controller *controller, bool sd_mounted) {
     if (controller == NULL) {
         return;

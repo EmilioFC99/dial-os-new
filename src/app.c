@@ -1,10 +1,12 @@
 #include "app.h"
 
 #include "constants.h"
+#include "render_home.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -265,20 +267,45 @@ static void render_boot_snapshot_frame(struct app_runtime *runtime) {
     runtime->platform->display_present_surface(runtime->platform->context);
 }
 
-static void render_ready_screen(struct app_runtime *runtime) {
+static void sync_home_telemetry(struct app_runtime *runtime) {
+    if (runtime->hardware.sd_free_valid) {
+        runtime->cached_sd_free_valid = true;
+        runtime->cached_sd_free_megabytes = runtime->hardware.sd_free_megabytes;
+    }
+
+    struct home_telemetry *telemetry = &runtime->home.telemetry;
+    telemetry->volume_percent = home_normalize_volume_percent(runtime->volume_level);
+    telemetry->volume_limit_percent = home_normalize_volume_percent(runtime->max_volume);
+    telemetry->battery_valid = runtime->hardware.battery_valid;
+    telemetry->battery_percent = runtime->hardware.battery_percent;
+    telemetry->sd_mounted = runtime->hardware.sd_mounted;
+    telemetry->sd_free_valid = runtime->cached_sd_free_valid;
+    telemetry->sd_free_megabytes = runtime->cached_sd_free_megabytes;
+
+    if (runtime->hardware.usb_storage_active) {
+        telemetry->playback_mode = HOME_PLAYBACK_STORAGE;
+    } else if (telemetry->playback_mode == HOME_PLAYBACK_STORAGE) {
+        telemetry->playback_mode = runtime->non_storage_playback_mode;
+    }
+}
+
+static void render_home_screen(struct app_runtime *runtime) {
+    uint64_t frame_start_ns = runtime->platform->monotonic_ns(runtime->platform->context);
     struct framebuffer_surface surface;
     if (!runtime->platform->display_acquire_surface(runtime->platform->context, &surface)) {
         return;
     }
-    struct ready_screen_status status = {
-        .battery_valid = runtime->hardware.battery_valid,
-        .battery_percent = runtime->hardware.battery_percent,
-        .volume_level = runtime->volume_level,
-        .max_volume = runtime->max_volume,
-        .sd_mounted = runtime->hardware.sd_mounted,
-    };
-    render_draw_ready_frame(&surface, &status, runtime->appearance_mode);
+    struct home_render_snapshot snapshot;
+    home_controller_get_snapshot(&runtime->home, runtime->appearance_mode, &snapshot);
+    render_draw_home_frame(&surface, &snapshot);
     runtime->platform->display_present_surface(runtime->platform->context);
+
+    uint64_t frame_end_ns = runtime->platform->monotonic_ns(runtime->platform->context);
+    uint32_t frame_ms = (uint32_t)elapsed_ms_since(frame_end_ns, frame_start_ns);
+    if (frame_ms > runtime->home_max_frame_ms) {
+        runtime->home_max_frame_ms = frame_ms;
+    }
+    runtime->home_frames++;
 }
 
 static void build_telemetry_snapshot(const struct app_runtime *runtime, bool is_shutdown_update,
@@ -292,8 +319,18 @@ static void build_telemetry_snapshot(const struct app_runtime *runtime, bool is_
     snapshot_out->idle_poweroff_disabled = runtime->idle_poweroff_disabled;
     snapshot_out->sd_mounted = runtime->hardware.sd_mounted;
     snapshot_out->is_shutdown_update = is_shutdown_update;
+    snapshot_out->home_frames = runtime->home_frames;
+    snapshot_out->home_max_frame_ms = runtime->home_max_frame_ms;
     if (is_shutdown_update) {
         snapshot_out->uptime_ms = elapsed_ms_since(now_ns, runtime->startup_ns);
+        if (runtime->home_frames > 0u && runtime->ready_entered_ns > 0ull) {
+            uint64_t home_elapsed_ms = elapsed_ms_since(now_ns, runtime->ready_entered_ns);
+            if (home_elapsed_ms == 0ull) {
+                home_elapsed_ms = 1ull;
+            }
+            snapshot_out->home_fps_x10 =
+                (uint32_t)(((uint64_t)runtime->home_frames * 10000ull) / home_elapsed_ms);
+        }
     }
 }
 
@@ -331,14 +368,18 @@ static void attempt_send_disable_idle_poweroff(struct app_runtime *runtime, uint
     runtime->next_ipc_retry_ns = now_ns + (uint64_t)IPC_RETRY_INTERVAL_MS * NANOSECONDS_PER_MILLISECOND;
 }
 
-static void enter_ready_from_boot_complete(struct app_runtime *runtime, uint64_t now_ns) {
+static void enter_home_from_boot_complete(struct app_runtime *runtime, uint64_t now_ns) {
     freeze_animation_metrics(runtime, now_ns);
     runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
-    set_ui_state(runtime, UI_STATE_READY);
+    sync_home_telemetry(runtime);
+    home_controller_enter_from_boot(&runtime->home);
+    set_ui_state(runtime, UI_STATE_HOME);
     runtime->ready_entered_ns = now_ns;
     runtime->last_battery_poll_ns = now_ns;
+    runtime->last_home_tick_ns = now_ns;
+    runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
 
-    render_ready_screen(runtime);
+    render_home_screen(runtime);
 
     if (runtime->platform->telemetry_write != NULL) {
         struct telemetry_snapshot snapshot;
@@ -385,12 +426,20 @@ void app_initialize(struct app_runtime *runtime, const struct platform_operation
     memset(runtime, 0, sizeof(*runtime));
     runtime->platform = platform;
     runtime->appearance_mode = APPEARANCE_MODE_DARK;
+    if (platform->appearance_mode_read != NULL) {
+        enum appearance_mode saved_mode = APPEARANCE_MODE_DARK;
+        if (platform->appearance_mode_read(platform->context, &saved_mode)) {
+            runtime->appearance_mode = saved_mode;
+        }
+    }
     runtime->volume_level = VOLUME_DEFAULT;
     runtime->max_volume = MAX_VOLUME_DEFAULT;
     runtime->saved_brightness = BRIGHTNESS_BOOT_DEFAULT;
     runtime->startup_ns = platform->monotonic_ns(platform->context);
     runtime->last_boot_tick_ns = runtime->startup_ns;
     boot_controller_initialize(&runtime->boot);
+    home_controller_initialize(&runtime->home);
+    sync_home_telemetry(runtime);
 
     runtime->initial_crash_count =
         platform->crash_count_read != NULL ? platform->crash_count_read(platform->context) : 0u;
@@ -439,9 +488,10 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
         case IPC_INBOUND_BOOT_CONFIG:
             if (runtime->state == UI_STATE_BOOT_ANIMATION || runtime->state == UI_STATE_WARNING) {
                 handle_aa24_during_boot(runtime, &message->boot_config, now_ns);
-            } else if (runtime->state == UI_STATE_READY || runtime->state == UI_STATE_LOCKED) {
+                sync_home_telemetry(runtime);
+            } else if (runtime->state == UI_STATE_HOME || runtime->state == UI_STATE_LOCKED) {
                 runtime->saved_brightness = message->boot_config.brightness;
-                if (runtime->state == UI_STATE_READY) {
+                if (runtime->state == UI_STATE_HOME) {
                     runtime->platform->display_set_brightness(runtime->platform->context,
                                                               runtime->saved_brightness);
                 }
@@ -462,13 +512,11 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
                 runtime->platform->probe_hardware_status(runtime->platform->context,
                                                          &runtime->hardware);
                 boot_controller_update_sd_mounted(&runtime->boot, runtime->hardware.sd_mounted);
-            } else if (runtime->state == UI_STATE_READY) {
-                bool previous_sd_mounted = runtime->hardware.sd_mounted;
+                sync_home_telemetry(runtime);
+            } else if (runtime->state == UI_STATE_HOME) {
                 runtime->platform->probe_hardware_status(runtime->platform->context,
                                                          &runtime->hardware);
-                if (runtime->hardware.sd_mounted != previous_sd_mounted) {
-                    render_ready_screen(runtime);
-                }
+                sync_home_telemetry(runtime);
                 runtime->sd_followup_first_pending = true;
                 runtime->sd_followup_first_ns =
                     now_ns + (uint64_t)SD_MOUNT_FOLLOWUP_FIRST_MS * NANOSECONDS_PER_MILLISECOND;
@@ -476,6 +524,60 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
                 runtime->sd_followup_second_ns =
                     now_ns + (uint64_t)SD_MOUNT_FOLLOWUP_SECOND_MS * NANOSECONDS_PER_MILLISECOND;
             }
+            break;
+
+        case IPC_INBOUND_PLAYBACK_STATUS:
+            if (message->playback_status.has_track_metadata) {
+                snprintf(runtime->home.telemetry.track_title,
+                         sizeof(runtime->home.telemetry.track_title), "%s",
+                         message->playback_status.track_title);
+                runtime->home.telemetry.duration_ms = message->playback_status.duration_ms;
+                runtime->home.telemetry.elapsed_ms = 0u;
+                runtime->home.elapsed_fractional_ms = 0.0f;
+            }
+            if (message->playback_status.has_state) {
+                enum home_playback_mode mode = HOME_PLAYBACK_IDLE;
+                if (message->playback_status.state == IPC_PLAYBACK_PLAYING) {
+                    mode = HOME_PLAYBACK_PLAYING;
+                } else if (message->playback_status.state == IPC_PLAYBACK_PAUSED) {
+                    mode = HOME_PLAYBACK_PAUSED;
+                }
+                runtime->non_storage_playback_mode = mode;
+                if (!runtime->hardware.usb_storage_active) {
+                    runtime->home.telemetry.playback_mode = mode;
+                }
+            }
+            break;
+
+        case IPC_INBOUND_PLAYBACK_ELAPSED:
+            runtime->home.telemetry.elapsed_ms = message->elapsed_ms;
+            runtime->home.elapsed_fractional_ms = 0.0f;
+            break;
+
+        case IPC_INBOUND_PLAYBACK_STOP:
+            runtime->non_storage_playback_mode = HOME_PLAYBACK_IDLE;
+            runtime->home.telemetry.elapsed_ms = 0u;
+            runtime->home.telemetry.duration_ms = 0u;
+            runtime->home.telemetry.track_title[0] = '\0';
+            if (!runtime->hardware.usb_storage_active) {
+                runtime->home.telemetry.playback_mode = HOME_PLAYBACK_IDLE;
+            }
+            break;
+
+        case IPC_INBOUND_VOLUME_UPDATE: {
+            uint8_t next_volume = message->volume_level;
+            if (next_volume > runtime->max_volume) {
+                next_volume = runtime->max_volume;
+            }
+            runtime->volume_level = next_volume;
+            sync_home_telemetry(runtime);
+            break;
+        }
+
+        case IPC_INBOUND_USB_CABLE_EVENT:
+        case IPC_INBOUND_BATTERY_EVENT:
+            runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
+            sync_home_telemetry(runtime);
             break;
 
         default:
@@ -517,7 +619,7 @@ void app_handle_button_action(struct app_runtime *runtime, enum physical_button_
         return;
     }
 
-    if (runtime->state == UI_STATE_READY) {
+    if (runtime->state == UI_STATE_HOME) {
         if (action == BUTTON_ACTION_POWER_SHORT) {
             set_ui_state(runtime, UI_STATE_LOCKED);
             runtime->platform->display_enter_sleep(runtime->platform->context);
@@ -534,23 +636,82 @@ void app_handle_button_action(struct app_runtime *runtime, enum physical_button_
 
             if (next_volume != runtime->volume_level) {
                 runtime->volume_level = next_volume;
+                sync_home_telemetry(runtime);
                 char command[IPC_COMMAND_BUFFER_BYTES];
                 size_t length = protocol_format_set_volume(next_volume, command, sizeof(command));
                 if (length > 0u) {
                     (void)runtime->platform->ipc_send_player(runtime->platform->context, command,
                                                              length);
                 }
-                render_ready_screen(runtime);
+                render_home_screen(runtime);
             }
         }
     } else if (runtime->state == UI_STATE_LOCKED && action == BUTTON_ACTION_POWER_SHORT) {
         uint64_t now_ns = runtime->platform->monotonic_ns(runtime->platform->context);
         runtime->platform->display_begin_wake(runtime->platform->context);
         runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
+        sync_home_telemetry(runtime);
         runtime->last_battery_poll_ns = now_ns;
-        set_ui_state(runtime, UI_STATE_READY);
-        render_ready_screen(runtime);
+        runtime->last_home_tick_ns = now_ns;
+        runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
+        set_ui_state(runtime, UI_STATE_HOME);
+        render_home_screen(runtime);
         runtime->platform->display_finish_wake(runtime->platform->context, runtime->saved_brightness);
+    }
+}
+
+static bool is_inside_warning_retry_button(int32_t x, int32_t y) {
+    return abs(x - SCREEN_CENTER_X) <= 92 && y >= 238 && y <= 290;
+}
+
+void app_handle_touch_event(struct app_runtime *runtime, const struct touch_event *event) {
+    if (runtime == NULL || event == NULL || runtime->platform == NULL || runtime->shutting_down ||
+        event->kind == TOUCH_EVENT_NONE) {
+        return;
+    }
+
+    if (runtime->state == UI_STATE_CRASH_SCREEN || runtime->state == UI_STATE_SHUTTING_DOWN ||
+        runtime->state == UI_STATE_LOCKED) {
+        return;
+    }
+
+    if (runtime->state == UI_STATE_WARNING) {
+        if (event->kind == TOUCH_EVENT_DOWN) {
+            runtime->warning_retry_pressed = is_inside_warning_retry_button(event->x, event->y);
+            runtime->warning_retry_start_x = event->x;
+            runtime->warning_retry_start_y = event->y;
+            return;
+        }
+        if (event->kind == TOUCH_EVENT_UP && runtime->warning_retry_pressed) {
+            runtime->warning_retry_pressed = false;
+            int32_t delta_x = event->x - runtime->warning_retry_start_x;
+            int32_t delta_y = event->y - runtime->warning_retry_start_y;
+            float drift_sq = (float)(delta_x * delta_x + delta_y * delta_y);
+            if (drift_sq <= BOOT_RETRY_TAP_DRIFT_LIMIT_PX * BOOT_RETRY_TAP_DRIFT_LIMIT_PX &&
+                is_inside_warning_retry_button(event->x, event->y)) {
+                uint64_t now_ns = runtime->platform->monotonic_ns(runtime->platform->context);
+                boot_controller_retry_from_warning(&runtime->boot);
+                set_ui_state(runtime, UI_STATE_BOOT_ANIMATION);
+                runtime->last_boot_tick_ns = now_ns;
+                runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
+                render_boot_snapshot_frame(runtime);
+            }
+        }
+        return;
+    }
+
+    if (runtime->state == UI_STATE_HOME) {
+        enum home_controller_event home_event =
+            home_controller_handle_touch(&runtime->home, event);
+        if (home_event == HOME_EVENT_TOGGLE_APPEARANCE) {
+            runtime->appearance_mode = (runtime->appearance_mode == APPEARANCE_MODE_DARK)
+                                           ? APPEARANCE_MODE_LIGHT
+                                           : APPEARANCE_MODE_DARK;
+            if (runtime->platform->appearance_mode_write != NULL) {
+                runtime->platform->appearance_mode_write(runtime->platform->context,
+                                                         runtime->appearance_mode);
+            }
+        }
     }
 }
 
@@ -577,7 +738,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
             boot_controller_step(&runtime->boot, delta_seconds);
 
             if (runtime->boot.phase == BOOT_PHASE_COMPLETED) {
-                enter_ready_from_boot_complete(runtime, now_ns);
+                enter_home_from_boot_complete(runtime, now_ns);
                 return;
             }
 
@@ -607,7 +768,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
         return;
     }
 
-    if (runtime->state != UI_STATE_READY && runtime->state != UI_STATE_LOCKED) {
+    if (runtime->state != UI_STATE_HOME && runtime->state != UI_STATE_LOCKED) {
         return;
     }
 
@@ -619,40 +780,41 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
         }
     }
 
-    if (runtime->state == UI_STATE_READY) {
-        bool needs_redraw = false;
-
+    if (runtime->state == UI_STATE_HOME) {
         if (runtime->sd_followup_first_pending && now_ns >= runtime->sd_followup_first_ns) {
             runtime->sd_followup_first_pending = false;
-            bool previous_sd = runtime->hardware.sd_mounted;
             runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
-            if (runtime->hardware.sd_mounted != previous_sd) {
-                needs_redraw = true;
-            }
+            sync_home_telemetry(runtime);
         }
 
         if (runtime->sd_followup_second_pending && now_ns >= runtime->sd_followup_second_ns) {
             runtime->sd_followup_second_pending = false;
-            bool previous_sd = runtime->hardware.sd_mounted;
             runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
-            if (runtime->hardware.sd_mounted != previous_sd) {
-                needs_redraw = true;
-            }
+            sync_home_telemetry(runtime);
         }
 
         if (elapsed_ms_since(now_ns, runtime->last_battery_poll_ns) >= BATTERY_POLL_INTERVAL_MS) {
-            struct hardware_status previous = runtime->hardware;
             runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
             runtime->last_battery_poll_ns = now_ns;
-            if (runtime->hardware.battery_valid != previous.battery_valid ||
-                runtime->hardware.battery_percent != previous.battery_percent ||
-                runtime->hardware.sd_mounted != previous.sd_mounted) {
-                needs_redraw = true;
-            }
+            sync_home_telemetry(runtime);
         }
 
-        if (needs_redraw) {
-            render_ready_screen(runtime);
+        if (now_ns >= runtime->next_frame_ns) {
+            float delta_seconds =
+                (now_ns > runtime->last_home_tick_ns)
+                    ? (float)(now_ns - runtime->last_home_tick_ns) / (float)NANOSECONDS_PER_SECOND
+                    : 0.0f;
+            if (delta_seconds > 0.05f) {
+                delta_seconds = 0.05f;
+            }
+            runtime->last_home_tick_ns = now_ns;
+            home_controller_step(&runtime->home, delta_seconds);
+            render_home_screen(runtime);
+
+            runtime->next_frame_ns += BOOT_FRAME_PERIOD_NS;
+            if (runtime->next_frame_ns <= now_ns) {
+                runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
+            }
         }
     }
 }
@@ -685,7 +847,7 @@ int32_t app_compute_poll_timeout_ms(const struct app_runtime *runtime, uint64_t 
         if (runtime->pending_disable_idle_poweroff) {
             next_deadline = min_deadline_ns(next_deadline, runtime->next_ipc_retry_ns);
         }
-    } else if (runtime->state == UI_STATE_READY || runtime->state == UI_STATE_LOCKED) {
+    } else if (runtime->state == UI_STATE_HOME || runtime->state == UI_STATE_LOCKED) {
         if (runtime->pending_disable_idle_poweroff) {
             next_deadline = min_deadline_ns(next_deadline, runtime->next_ipc_retry_ns);
         }
@@ -695,7 +857,8 @@ int32_t app_compute_poll_timeout_ms(const struct app_runtime *runtime, uint64_t 
                 (uint64_t)READY_STABILITY_WINDOW_MS * NANOSECONDS_PER_MILLISECOND;
             next_deadline = min_deadline_ns(next_deadline, reset_deadline);
         }
-        if (runtime->state == UI_STATE_READY) {
+        if (runtime->state == UI_STATE_HOME) {
+            next_deadline = min_deadline_ns(next_deadline, runtime->next_frame_ns);
             uint64_t battery_deadline =
                 runtime->last_battery_poll_ns +
                 (uint64_t)BATTERY_POLL_INTERVAL_MS * NANOSECONDS_PER_MILLISECOND;

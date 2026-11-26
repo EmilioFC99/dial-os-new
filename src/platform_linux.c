@@ -17,6 +17,7 @@
 #include <sys/prctl.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <ucontext.h>
@@ -376,6 +377,27 @@ static void linux_probe_hardware_status(void *context, struct hardware_status *s
             status_out->battery_percent = (uint8_t)percent;
         }
     }
+
+    if (status_out->sd_mounted) {
+        struct statvfs fs_stats;
+        if (statvfs(PATH_SDCARD_MOUNT, &fs_stats) == 0 && fs_stats.f_frsize > 0u) {
+            uint64_t free_bytes = (uint64_t)fs_stats.f_bavail * (uint64_t)fs_stats.f_frsize;
+            status_out->sd_free_valid = true;
+            status_out->sd_free_megabytes = free_bytes / (1024ull * 1024ull);
+        }
+    }
+
+    char udc_text[64];
+    size_t udc_length = 0u;
+    if (read_text_file_small(PATH_USB_STORAGE_UDC, udc_text, sizeof(udc_text), &udc_length)) {
+        for (size_t index = 0u; index < udc_length; index++) {
+            char character = udc_text[index];
+            if (character != ' ' && character != '\t' && character != '\n' && character != '\r') {
+                status_out->usb_storage_active = true;
+                break;
+            }
+        }
+    }
 }
 
 static uint32_t linux_crash_count_read(void *context) {
@@ -411,7 +433,7 @@ static void linux_telemetry_write(void *context, const struct telemetry_snapshot
     uint32_t ready_rss_kb = state->rss_ready_kb > 0u ? state->rss_ready_kb : current_rss_kb;
     bool sd_mounted_now = is_sdcard_mounted();
 
-    char telemetry_buffer[512];
+    char telemetry_buffer[768];
     int written = 0;
     if (snapshot->is_shutdown_update) {
         uint32_t total_watchdog_restarts = count_watchdog_restart_lines();
@@ -431,12 +453,16 @@ static void linux_telemetry_write(void *context, const struct telemetry_snapshot
             "rss_ready_kb=%u\n"
             "uptime_ms=%llu\n"
             "rss_shutdown_kb=%u\n"
-            "watchdog_restarts=%u\n",
+            "watchdog_restarts=%u\n"
+            "home_frames=%u\n"
+            "home_fps_x10=%u\n"
+            "home_max_frame_ms=%u\n",
             (unsigned long long)snapshot->takeover_ms, snapshot->animation_frames,
             snapshot->animation_fps_x10, snapshot->max_frame_ms,
             (unsigned long long)snapshot->aa24_ms, snapshot->idle_poweroff_disabled ? 1u : 0u,
             sd_mounted_now ? 1u : 0u, ready_rss_kb, (unsigned long long)snapshot->uptime_ms,
-            current_rss_kb, watchdog_restarts);
+            current_rss_kb, watchdog_restarts, snapshot->home_frames, snapshot->home_fps_x10,
+            snapshot->home_max_frame_ms);
     } else {
         written = snprintf(
             telemetry_buffer, sizeof(telemetry_buffer),
@@ -497,6 +523,34 @@ static void linux_execute_shutdown(void *context, bool screen_was_locked,
 static void linux_update_crash_state_mirror(void *context, int32_t ui_state) {
     (void)context;
     crash_ui_state_mirror = (sig_atomic_t)ui_state;
+}
+
+static bool linux_appearance_mode_read(void *context, enum appearance_mode *mode_out) {
+    (void)context;
+    if (mode_out == NULL) {
+        return false;
+    }
+    char mode_text[16];
+    size_t length = 0u;
+    if (!read_text_file_small(PATH_APPEARANCE_CONFIG, mode_text, sizeof(mode_text), &length)) {
+        return false;
+    }
+    if (length >= 5u && memcmp(mode_text, "light", 5u) == 0) {
+        *mode_out = APPEARANCE_MODE_LIGHT;
+        return true;
+    }
+    if (length >= 4u && memcmp(mode_text, "dark", 4u) == 0) {
+        *mode_out = APPEARANCE_MODE_DARK;
+        return true;
+    }
+    return false;
+}
+
+static void linux_appearance_mode_write(void *context, enum appearance_mode mode) {
+    (void)context;
+    const char *text = (mode == APPEARANCE_MODE_LIGHT) ? "light\n" : "dark\n";
+    (void)write_file_atomic_synced(PATH_INTERNAL_DIALOS_DIRECTORY, PATH_APPEARANCE_CONFIG_TEMP,
+                                   PATH_APPEARANCE_CONFIG, text, strlen(text));
 }
 
 void platform_linux_set_process_name(void) {
@@ -609,6 +663,7 @@ bool platform_linux_initialize(struct platform_linux_state *state,
     memset(state, 0, sizeof(*state));
     state->fb_fd = -1;
     state->event0_fd = -1;
+    state->event1_fd = -1;
     state->ui_queue = (mqd_t)-1;
     state->player_queue = (mqd_t)-1;
 
@@ -627,6 +682,11 @@ bool platform_linux_initialize(struct platform_linux_state *state,
         (void)ioctl(state->event0_fd, EVIOCGRAB, 1);
     }
 
+    state->event1_fd = open(PATH_TOUCH_INPUT_EVENTS, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (state->event1_fd >= 0) {
+        (void)ioctl(state->event1_fd, EVIOCGRAB, 1);
+    }
+
     operations_out->context = state;
     operations_out->monotonic_ns = linux_monotonic_ns;
     operations_out->display_acquire_surface = linux_display_acquire_surface;
@@ -642,11 +702,14 @@ bool platform_linux_initialize(struct platform_linux_state *state,
     operations_out->telemetry_write = linux_telemetry_write;
     operations_out->execute_shutdown = linux_execute_shutdown;
     operations_out->update_crash_state_mirror = linux_update_crash_state_mirror;
+    operations_out->appearance_mode_read = linux_appearance_mode_read;
+    operations_out->appearance_mode_write = linux_appearance_mode_write;
     return true;
 }
 
 void platform_linux_get_poll_descriptors(const struct platform_linux_state *state,
-                                         int *ui_queue_fd_out, int *input_event_fd_out) {
+                                         int *ui_queue_fd_out, int *input_event_fd_out,
+                                         int *touch_event_fd_out) {
     if (state == NULL) {
         return;
     }
@@ -655,6 +718,9 @@ void platform_linux_get_poll_descriptors(const struct platform_linux_state *stat
     }
     if (input_event_fd_out != NULL) {
         *input_event_fd_out = state->event0_fd;
+    }
+    if (touch_event_fd_out != NULL) {
+        *touch_event_fd_out = state->event1_fd;
     }
 }
 
@@ -670,20 +736,36 @@ ssize_t platform_linux_receive_ipc(struct platform_linux_state *state,
     return received;
 }
 
-size_t platform_linux_read_input_events(struct platform_linux_state *state,
-                                        struct kernel_input_event *events, size_t max_events) {
-    if (state == NULL || state->event0_fd < 0 || events == NULL || max_events == 0u) {
+static size_t read_evdev_events(int event_fd, struct kernel_input_event *events,
+                                size_t max_events) {
+    if (event_fd < 0 || events == NULL || max_events == 0u) {
         return 0u;
     }
     ssize_t bytes_read = -1;
     do {
-        bytes_read = read(state->event0_fd, events, max_events * sizeof(struct kernel_input_event));
+        bytes_read = read(event_fd, events, max_events * sizeof(struct kernel_input_event));
     } while (bytes_read < 0 && errno == EINTR);
 
     if (bytes_read <= 0) {
         return 0u;
     }
     return (size_t)bytes_read / sizeof(struct kernel_input_event);
+}
+
+size_t platform_linux_read_input_events(struct platform_linux_state *state,
+                                        struct kernel_input_event *events, size_t max_events) {
+    if (state == NULL) {
+        return 0u;
+    }
+    return read_evdev_events(state->event0_fd, events, max_events);
+}
+
+size_t platform_linux_read_touch_events(struct platform_linux_state *state,
+                                        struct kernel_input_event *events, size_t max_events) {
+    if (state == NULL) {
+        return 0u;
+    }
+    return read_evdev_events(state->event1_fd, events, max_events);
 }
 
 void platform_linux_shutdown_cleanup(struct platform_linux_state *state) {
@@ -694,6 +776,11 @@ void platform_linux_shutdown_cleanup(struct platform_linux_state *state) {
         (void)ioctl(state->event0_fd, EVIOCGRAB, 0);
         close(state->event0_fd);
         state->event0_fd = -1;
+    }
+    if (state->event1_fd >= 0) {
+        (void)ioctl(state->event1_fd, EVIOCGRAB, 0);
+        close(state->event1_fd);
+        state->event1_fd = -1;
     }
     if (state->ui_queue != (mqd_t)-1) {
         mq_close(state->ui_queue);

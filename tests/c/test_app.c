@@ -43,6 +43,9 @@ struct fake_platform_context {
     bool shutdown_screen_was_locked;
     struct telemetry_snapshot shutdown_telemetry;
     int32_t crash_state_mirror;
+    bool has_saved_appearance;
+    enum appearance_mode saved_appearance;
+    uint32_t appearance_writes;
     enum call_event_kind trace[64];
     uint32_t trace_count;
 };
@@ -150,6 +153,22 @@ static void fake_update_crash_state_mirror(void *context, int32_t ui_state) {
     fake->crash_state_mirror = ui_state;
 }
 
+static bool fake_appearance_mode_read(void *context, enum appearance_mode *mode_out) {
+    struct fake_platform_context *fake = (struct fake_platform_context *)context;
+    if (!fake->has_saved_appearance || mode_out == NULL) {
+        return false;
+    }
+    *mode_out = fake->saved_appearance;
+    return true;
+}
+
+static void fake_appearance_mode_write(void *context, enum appearance_mode mode) {
+    struct fake_platform_context *fake = (struct fake_platform_context *)context;
+    fake->has_saved_appearance = true;
+    fake->saved_appearance = mode;
+    fake->appearance_writes++;
+}
+
 static void init_fake_platform(struct fake_platform_context *fake,
                                struct platform_operations *operations) {
     memset(fake, 0, sizeof(*fake));
@@ -173,6 +192,8 @@ static void init_fake_platform(struct fake_platform_context *fake,
     operations->telemetry_write = fake_telemetry_write;
     operations->execute_shutdown = fake_execute_shutdown;
     operations->update_crash_state_mirror = fake_update_crash_state_mirror;
+    operations->appearance_mode_read = fake_appearance_mode_read;
+    operations->appearance_mode_write = fake_appearance_mode_write;
 }
 
 static struct inbound_ipc_message make_aa24_message(uint8_t volume, uint8_t max_volume,
@@ -393,13 +414,14 @@ static void test_aa22_delayed_sd_probes_and_stability_reset(void) {
     fake.hardware.sd_mounted = true;
     fake.now_ns += SD_MOUNT_FOLLOWUP_FIRST_MS * NANOSECONDS_PER_MILLISECOND;
     app_handle_tick(&runtime, fake.now_ns);
-    TEST_ASSERT_EQ_U32(presents_at_ready + 1u, fake.present_count);
     TEST_ASSERT_TRUE(runtime.hardware.sd_mounted);
+    TEST_ASSERT_TRUE(runtime.home.telemetry.sd_mounted);
+    TEST_ASSERT_FALSE(runtime.sd_followup_first_pending);
 
-    /* +1500 ms probe runs without redundant redraw because state unchanged */
+    /* +1500 ms probe clears second pending follow-up */
     fake.now_ns += 1000ull * NANOSECONDS_PER_MILLISECOND;
     app_handle_tick(&runtime, fake.now_ns);
-    TEST_ASSERT_EQ_U32(presents_at_ready + 1u, fake.present_count);
+    TEST_ASSERT_FALSE(runtime.sd_followup_second_pending);
 
     /* Stability reset at 9999 ms has not reset yet; at 10000 ms resets to 0 */
     fake.now_ns = runtime.ready_entered_ns + (READY_STABILITY_WINDOW_MS - 1u) * NANOSECONDS_PER_MILLISECOND;
@@ -492,6 +514,107 @@ static void test_crash_screen_gate_and_ipc_ignoring(void) {
     TEST_ASSERT_EQ_U32(presents_before + 1u, fake.present_count);
 }
 
+static void test_home_touch_appearance_persistence_and_live_telemetry(void) {
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+    fake.has_saved_appearance = true;
+    fake.saved_appearance = APPEARANCE_MODE_LIGHT;
+    fake.hardware.sd_free_valid = true;
+    fake.hardware.sd_free_megabytes = 43622ull;
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+    TEST_ASSERT_EQ_I32(APPEARANCE_MODE_LIGHT, runtime.appearance_mode);
+
+    /* Finish boot into UI_STATE_HOME */
+    struct inbound_ipc_message aa24 = make_aa24_message(60u, 102u, 180u);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 9850u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(50u, runtime.home.telemetry.volume_percent);
+    TEST_ASSERT_EQ_U32(85u, runtime.home.telemetry.volume_limit_percent);
+
+    /* Advance 60 FPS frames on Home */
+    uint32_t presents_before = fake.present_count;
+    advance_runtime_ticks(&runtime, &fake, 850u);
+    TEST_ASSERT_TRUE(fake.present_count > presents_before + 40u);
+    TEST_ASSERT_TRUE(runtime.home_frames > 40u);
+
+    /* Live IPC playback, elapsed, volume, and stop updates */
+    const char *play_json =
+        "{\"song\":\"{\\\"song_name\\\":\\\"Test Track\\\",\\\"song_duration_time\\\":180000}\",\"state\":0}";
+    char play_frame[256];
+    size_t play_total = 8u + strlen(play_json);
+    snprintf(play_frame, sizeof(play_frame), "a202%04X%s", (unsigned)play_total, play_json);
+    struct inbound_ipc_message play_msg;
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc(play_frame, play_total, &play_msg));
+    app_handle_ipc_message(&runtime, &play_msg);
+    TEST_ASSERT_EQ_I32(HOME_PLAYBACK_PLAYING, runtime.home.telemetry.playback_mode);
+    TEST_ASSERT_EQ_STR("Test Track", runtime.home.telemetry.track_title);
+    TEST_ASSERT_EQ_U32(180000u, runtime.home.telemetry.duration_ms);
+
+    struct inbound_ipc_message elapsed_msg;
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a103001000004A38", 16u, &elapsed_msg));
+    app_handle_ipc_message(&runtime, &elapsed_msg);
+    TEST_ASSERT_EQ_U32(19000u, runtime.home.telemetry.elapsed_ms);
+
+    struct inbound_ipc_message vol_msg;
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a714000C0078", 12u, &vol_msg));
+    app_handle_ipc_message(&runtime, &vol_msg);
+    TEST_ASSERT_EQ_U32(102u, runtime.volume_level);
+    TEST_ASSERT_EQ_U32(85u, runtime.home.telemetry.volume_percent);
+
+    /* Drag to Settings (slot 3), tap to open inline preview, tap row 0 to toggle Light -> Dark */
+    struct touch_event drag_down = {TOUCH_EVENT_DOWN, 120, 150, 10000ull};
+    struct touch_event drag_move = {TOUCH_EVENT_MOVE, 232, 150, 10026ull};
+    struct touch_event drag_up = {TOUCH_EVENT_UP, 232, 150, 10052ull};
+    app_handle_touch_event(&runtime, &drag_down);
+    app_handle_touch_event(&runtime, &drag_move);
+    app_handle_touch_event(&runtime, &drag_up);
+    advance_runtime_ticks(&runtime, &fake, 600u);
+    TEST_ASSERT_EQ_I32(HOME_APP_SETTINGS, home_wrap_app_slot(runtime.home.focused_slot));
+
+    struct touch_event tap_hero_down = {TOUCH_EVENT_DOWN, 180, 148, 10700ull};
+    struct touch_event tap_hero_up = {TOUCH_EVENT_UP, 180, 148, 10730ull};
+    app_handle_touch_event(&runtime, &tap_hero_down);
+    app_handle_touch_event(&runtime, &tap_hero_up);
+    advance_runtime_ticks(&runtime, &fake, 650u);
+
+    struct touch_event row0_down = {TOUCH_EVENT_DOWN, 180, 182, 11400ull};
+    struct touch_event row0_up = {TOUCH_EVENT_UP, 180, 182, 11430ull};
+    app_handle_touch_event(&runtime, &row0_down);
+    app_handle_touch_event(&runtime, &row0_up);
+    TEST_ASSERT_EQ_I32(APPEARANCE_MODE_DARK, runtime.appearance_mode);
+    TEST_ASSERT_EQ_I32(APPEARANCE_MODE_DARK, fake.saved_appearance);
+    TEST_ASSERT_EQ_U32(1u, fake.appearance_writes);
+
+    /* Power long-press logs Home FPS telemetry */
+    app_handle_button_action(&runtime, BUTTON_ACTION_POWER_LONG);
+    TEST_ASSERT_TRUE(fake.shutdown_called);
+    TEST_ASSERT_TRUE(fake.shutdown_telemetry.home_frames > 0u);
+    TEST_ASSERT_TRUE(fake.shutdown_telemetry.home_fps_x10 > 0u);
+}
+
+static void test_warning_tap_to_retry_recovery(void) {
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+    advance_runtime_ticks(&runtime, &fake, AA24_WARNING_TIMEOUT_MS + 50u);
+    TEST_ASSERT_EQ_I32(UI_STATE_WARNING, runtime.state);
+
+    /* Tap on TAP TO RETRY button (180, 262) returns to BOOT_PHASE_BUFFER */
+    struct touch_event retry_down = {TOUCH_EVENT_DOWN, 180, 262, 13000ull};
+    struct touch_event retry_up = {TOUCH_EVENT_UP, 180, 262, 13030ull};
+    app_handle_touch_event(&runtime, &retry_down);
+    app_handle_touch_event(&runtime, &retry_up);
+    TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, runtime.boot.phase);
+}
+
 void run_app_tests(void) {
     printf("Suite: app\n");
     RUN_TEST(test_crash_formatting_and_count_parsing);
@@ -501,4 +624,6 @@ void run_app_tests(void) {
     RUN_TEST(test_aa22_delayed_sd_probes_and_stability_reset);
     RUN_TEST(test_volume_lock_wake_ordering_and_shutdown);
     RUN_TEST(test_crash_screen_gate_and_ipc_ignoring);
+    RUN_TEST(test_home_touch_appearance_persistence_and_live_telemetry);
+    RUN_TEST(test_warning_tap_to_retry_recovery);
 }
