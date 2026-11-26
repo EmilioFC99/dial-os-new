@@ -97,11 +97,34 @@ static void test_all_screens_dark_and_light_with_custom_stride(void) {
         struct boot_render_snapshot buffer_snapshot = {
             .phase = BOOT_PHASE_BUFFER,
             .act_progress = 0.55f,
-            .elapsed_seconds = 2.02f,
+            .buffer_exit_progress = 0.0f,
+            .elapsed_seconds = 4.72f,
             .sweep_progress = 0.55f,
             .status_label = "WAIT // AUDIO ENGINE",
         };
         render_draw_boot_frame(&surface, &buffer_snapshot, mode);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        struct boot_render_snapshot buffer_full_snapshot = {
+            .phase = BOOT_PHASE_BUFFER,
+            .act_progress = 1.0f,
+            .buffer_exit_progress = 0.0f,
+            .elapsed_seconds = 7.80f,
+            .sweep_progress = 1.0f,
+            .status_label = "LOCK // SYSTEM READY",
+        };
+        render_draw_boot_frame(&surface, &buffer_full_snapshot, mode);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        struct boot_render_snapshot buffer_exit_snapshot = {
+            .phase = BOOT_PHASE_BUFFER,
+            .act_progress = 1.0f,
+            .buffer_exit_progress = 0.7f,
+            .elapsed_seconds = 8.05f,
+            .sweep_progress = 1.0f,
+            .status_label = "LOCK // SYSTEM READY",
+        };
+        render_draw_boot_frame(&surface, &buffer_exit_snapshot, mode);
         assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
 
         struct boot_render_snapshot lock_snapshot = {

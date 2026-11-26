@@ -317,8 +317,8 @@ static void test_nominal_boot_aa24_retry_and_a607(void) {
     TEST_ASSERT_EQ_U32(1u, fake.ipc_count);
     TEST_ASSERT_EQ_STR("0664000C0000", fake.ipc_messages[0]);
 
-    /* Complete remaining boot acts -> enters READY and writes telemetry */
-    advance_runtime_ticks(&runtime, &fake, 4100u);
+    /* Complete remaining boot acts (~9.75s total) -> enters READY and writes telemetry */
+    advance_runtime_ticks(&runtime, &fake, 9300u);
     TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
     TEST_ASSERT_EQ_U32(1u, fake.telemetry_writes);
     TEST_ASSERT_TRUE(fake.last_telemetry.idle_poweroff_disabled);
@@ -361,7 +361,7 @@ static void test_warning_timeout_and_late_recovery(void) {
     TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
     TEST_ASSERT_TRUE(runtime.idle_poweroff_disabled);
 
-    advance_runtime_ticks(&runtime, &fake, 1800u);
+    advance_runtime_ticks(&runtime, &fake, 2200u);
     TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
 }
 
@@ -378,7 +378,7 @@ static void test_aa22_delayed_sd_probes_and_stability_reset(void) {
 
     struct inbound_ipc_message aa24 = make_aa24_message(20u, 80u, 100u);
     app_handle_ipc_message(&runtime, &aa24);
-    advance_runtime_ticks(&runtime, &fake, 4600u);
+    advance_runtime_ticks(&runtime, &fake, 9850u);
     TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
     uint32_t presents_at_ready = fake.present_count;
 
@@ -422,7 +422,7 @@ static void test_volume_lock_wake_ordering_and_shutdown(void) {
 
     struct inbound_ipc_message aa24 = make_aa24_message(0u, 2u, 140u);
     app_handle_ipc_message(&runtime, &aa24);
-    advance_runtime_ticks(&runtime, &fake, 4600u);
+    advance_runtime_ticks(&runtime, &fake, 9850u);
     TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
 
     /* Clamp at 0 on Vol- and max_volume (2) on Vol+ */

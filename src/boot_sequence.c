@@ -6,7 +6,8 @@
 #include <stddef.h>
 #include <string.h>
 
-#define BOOT_BUFFER_WAIT_BAND_START 0.28f
+#define BOOT_BUFFER_AUDIO_INIT_BAND_START 0.25f
+#define BOOT_BUFFER_WAIT_BAND_START 0.60f
 #define BOOT_SWEEP_READY_BAND_START 0.92f
 
 static float clamp_f32(float value, float minimum, float maximum) {
@@ -67,6 +68,7 @@ static float advance_wake_phase(struct boot_controller *controller, float remain
         controller->phase = BOOT_PHASE_BUFFER;
         controller->phase_elapsed_seconds = 0.0f;
         controller->buffer_elapsed_seconds = 0.0f;
+        controller->buffer_exit_elapsed_seconds = 0.0f;
         float overflow = next_wake_elapsed - BOOT_WAKE_DURATION_SECONDS;
         return overflow > 0.0f ? overflow : 0.0f;
     }
@@ -105,17 +107,22 @@ static bool advance_buffer_phase(struct boot_controller *controller, float remai
     if (controller->audio_ready &&
         controller->buffer_elapsed_seconds >= BOOT_BUFFER_MIN_DURATION_SECONDS &&
         controller->sweep_progress >= 1.0f) {
-        float buffer_overflow = 0.0f;
+        float exit_delta = remaining_delta;
         if (previous_buffer_elapsed < BOOT_BUFFER_MIN_DURATION_SECONDS) {
-            buffer_overflow =
-                controller->buffer_elapsed_seconds - BOOT_BUFFER_MIN_DURATION_SECONDS;
-        } else if (previous_sweep_progress >= 1.0f) {
-            buffer_overflow = remaining_delta;
+            exit_delta = controller->buffer_elapsed_seconds - BOOT_BUFFER_MIN_DURATION_SECONDS;
+        } else if (previous_sweep_progress < 1.0f) {
+            exit_delta = 0.0f;
         }
-        controller->phase = BOOT_PHASE_SIGNAL_LOCK;
-        controller->phase_elapsed_seconds = 0.0f;
-        *overflow_out = clamp_f32(buffer_overflow, 0.0f, remaining_delta);
-        return true;
+        controller->buffer_exit_elapsed_seconds += clamp_f32(exit_delta, 0.0f, remaining_delta);
+        if (controller->buffer_exit_elapsed_seconds >= BOOT_BUFFER_EXIT_DURATION_SECONDS) {
+            float exit_overflow =
+                controller->buffer_exit_elapsed_seconds - BOOT_BUFFER_EXIT_DURATION_SECONDS;
+            controller->buffer_exit_elapsed_seconds = BOOT_BUFFER_EXIT_DURATION_SECONDS;
+            controller->phase = BOOT_PHASE_SIGNAL_LOCK;
+            controller->phase_elapsed_seconds = 0.0f;
+            *overflow_out = clamp_f32(exit_overflow, 0.0f, remaining_delta);
+            return true;
+        }
     }
 
     return true;
@@ -148,13 +155,23 @@ static void advance_handoff_phase(struct boot_controller *controller, float rema
 
 static const char *resolve_buffer_status_label(const struct boot_controller *controller) {
     if (controller->audio_ready) {
-        if (controller->sweep_progress >= BOOT_SWEEP_READY_BAND_START) {
+        if (controller->sweep_progress >= BOOT_SWEEP_READY_BAND_START ||
+            controller->buffer_exit_elapsed_seconds > 0.0f) {
             return "LOCK // SYSTEM READY";
+        }
+        if (controller->sweep_progress >= BOOT_BUFFER_WAIT_BAND_START) {
+            return "SYNC // SYSTEM READY";
+        }
+        if (controller->sweep_progress >= BOOT_BUFFER_AUDIO_INIT_BAND_START) {
+            return "INIT // AUDIO ENGINE";
         }
         return "INIT // SYSTEM";
     }
     if (controller->sweep_progress >= BOOT_BUFFER_WAIT_BAND_START) {
         return "WAIT // AUDIO ENGINE";
+    }
+    if (controller->sweep_progress >= BOOT_BUFFER_AUDIO_INIT_BAND_START) {
+        return "INIT // AUDIO ENGINE";
     }
     return "INIT // SYSTEM";
 }
@@ -236,6 +253,7 @@ void boot_controller_get_snapshot(const struct boot_controller *controller,
     }
 
     float act_progress = 0.0f;
+    float buffer_exit_progress = 0.0f;
     float handoff_progress = 0.0f;
     const char *status_label = "MEM // CHECK";
 
@@ -248,21 +266,27 @@ void boot_controller_get_snapshot(const struct boot_controller *controller,
         case BOOT_PHASE_BUFFER:
             act_progress = clamp_f32(
                 controller->buffer_elapsed_seconds / BOOT_BUFFER_MIN_DURATION_SECONDS, 0.0f, 1.0f);
+            buffer_exit_progress = clamp_f32(
+                controller->buffer_exit_elapsed_seconds / BOOT_BUFFER_EXIT_DURATION_SECONDS, 0.0f,
+                1.0f);
             status_label = resolve_buffer_status_label(controller);
             break;
         case BOOT_PHASE_SIGNAL_LOCK:
             act_progress = clamp_f32(
                 controller->phase_elapsed_seconds / BOOT_SIGNAL_LOCK_DURATION_SECONDS, 0.0f, 1.0f);
+            buffer_exit_progress = 1.0f;
             status_label = "LOCK // SYSTEM READY";
             break;
         case BOOT_PHASE_HANDOFF:
             act_progress = 1.0f;
+            buffer_exit_progress = 1.0f;
             handoff_progress = clamp_f32(
                 controller->phase_elapsed_seconds / BOOT_HANDOFF_DURATION_SECONDS, 0.0f, 1.0f);
             status_label = "LOCK // SYSTEM READY";
             break;
         case BOOT_PHASE_COMPLETED:
             act_progress = 1.0f;
+            buffer_exit_progress = 1.0f;
             handoff_progress = 1.0f;
             status_label = "LOCK // SYSTEM READY";
             break;
@@ -275,6 +299,7 @@ void boot_controller_get_snapshot(const struct boot_controller *controller,
 
     snapshot_out->phase = controller->phase;
     snapshot_out->act_progress = act_progress;
+    snapshot_out->buffer_exit_progress = buffer_exit_progress;
     snapshot_out->handoff_progress = handoff_progress;
     snapshot_out->elapsed_seconds = controller->total_elapsed_seconds;
     snapshot_out->warning_elapsed_seconds = controller->warning_elapsed_seconds;

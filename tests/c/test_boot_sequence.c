@@ -35,8 +35,15 @@ static void test_boot_nominal_early_audio_ready(void) {
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
     TEST_ASSERT_EQ_STR("INIT // SYSTEM", snapshot.status_label);
 
-    /* Advance past minimum Act 02 Buffer duration (1.95s) */
-    step_in_increments(&controller, 1.96f, 1.0f / 60.0f);
+    /* Advance through Act 02 Buffer sweep (6.85s) -> hits 100% solid before exit hold */
+    step_in_increments(&controller, 6.855f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
+    TEST_ASSERT_TRUE(snapshot.sweep_progress >= 0.999f);
+    TEST_ASSERT_EQ_STR("LOCK // SYSTEM READY", snapshot.status_label);
+
+    /* Advance through Act 02 post-100% exit hold (0.35s) into Act 03 Signal Lock */
+    step_in_increments(&controller, 0.36f, 1.0f / 60.0f);
     boot_controller_get_snapshot(&controller, &snapshot);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_SIGNAL_LOCK, snapshot.phase);
     TEST_ASSERT_EQ_STR("LOCK // SYSTEM READY", snapshot.status_label);
@@ -59,16 +66,21 @@ static void test_boot_realistic_7_8s_aa24_hold_and_catchup(void) {
     struct boot_render_snapshot snapshot;
     boot_controller_initialize(&controller);
 
-    /* Advance 7.5s without aa24: should hold in BUFFER at 92% cap */
-    step_in_increments(&controller, 7.5f, 1.0f / 60.0f);
+    /* Advance 8.2s without aa24 (past 7.80s): should hold in BUFFER at 95% cap */
+    step_in_increments(&controller, 8.2f, 1.0f / 60.0f);
     boot_controller_get_snapshot(&controller, &snapshot);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
-    TEST_ASSERT_TRUE(snapshot.sweep_progress >= 0.919f && snapshot.sweep_progress <= 0.921f);
+    TEST_ASSERT_TRUE(snapshot.sweep_progress >= 0.949f && snapshot.sweep_progress <= 0.951f);
     TEST_ASSERT_EQ_STR("WAIT // AUDIO ENGINE", snapshot.status_label);
 
-    /* aa24 arrives with no SD mounted */
+    /* aa24 arrives with no SD mounted: catches up smoothly to 100%, then exits to Signal Lock */
     boot_controller_mark_audio_ready(&controller, false);
-    boot_controller_step(&controller, 0.06f);
+    step_in_increments(&controller, 0.15f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
+    TEST_ASSERT_TRUE(snapshot.sweep_progress >= 0.999f);
+
+    step_in_increments(&controller, 0.36f, 1.0f / 60.0f);
     boot_controller_get_snapshot(&controller, &snapshot);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_SIGNAL_LOCK, snapshot.phase);
     TEST_ASSERT_EQ_STR("V1.0 \xC2\xB7 AUDIO OK \xC2\xB7 NO SD", snapshot.summary_line);
@@ -102,7 +114,7 @@ static void test_boot_warning_boundary_and_late_recovery(void) {
     boot_controller_get_snapshot(&controller, &snapshot);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
 
-    step_in_increments(&controller, 2.0f, 1.0f / 60.0f);
+    step_in_increments(&controller, 2.15f, 1.0f / 60.0f);
     boot_controller_get_snapshot(&controller, &snapshot);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_COMPLETED, snapshot.phase);
     TEST_ASSERT_TRUE(snapshot.completed);

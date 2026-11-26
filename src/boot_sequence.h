@@ -19,6 +19,7 @@ struct boot_controller {
     float total_elapsed_seconds;
     float phase_elapsed_seconds;
     float buffer_elapsed_seconds;
+    float buffer_exit_elapsed_seconds;
     float stall_timer_seconds;
     float warning_elapsed_seconds;
     float sweep_progress;
@@ -29,6 +30,7 @@ struct boot_controller {
 struct boot_render_snapshot {
     enum boot_phase phase;
     float act_progress;
+    float buffer_exit_progress;
     float handoff_progress;
     float elapsed_seconds;
     float warning_elapsed_seconds;
