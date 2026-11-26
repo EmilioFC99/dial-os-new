@@ -1,6 +1,6 @@
 /**
  * Semantic color palettes and typography stacks for the DialOS 360x360 display.
- * Uses only Dark Mode and Light Mode tokens locked in docs/design/dialos_northstar.html.
+ * Uses only Dark Mode and Light Mode tokens defined for the DialOS visual system.
  */
 
 export const APPEARANCE_PALETTES = Object.freeze({
