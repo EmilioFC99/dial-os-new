@@ -3,7 +3,10 @@
 #include "boot_sequence.h"
 #include "constants.h"
 #include "font_atlas.h"
+#include "home_screen.h"
 #include "render.h"
+#include "render_home.h"
+#include "render_primitives.h"
 #include "theme.h"
 
 #include <stdlib.h>
@@ -179,9 +182,186 @@ static void test_all_screens_dark_and_light_with_custom_stride(void) {
     free(pixels);
 }
 
+static void test_new_primitives_and_clipping(void) {
+    const uint32_t stride_pixels = 384u;
+    const uint32_t canary_value = 0xDEADBEEFu;
+    size_t buffer_pixels = (size_t)stride_pixels * SCREEN_HEIGHT;
+    uint32_t *pixels = malloc(buffer_pixels * sizeof(uint32_t));
+    TEST_ASSERT_TRUE(pixels != NULL);
+
+    for (size_t index = 0u; index < buffer_pixels; index++) {
+        pixels[index] = canary_value;
+    }
+
+    struct framebuffer_surface surface = {pixels, stride_pixels};
+    const struct appearance_palette *dark = theme_get_palette(APPEARANCE_MODE_DARK);
+
+    /* Clipped text must not write outside [clip_left_x, clip_right_x] */
+    render_fill_canvas(&surface, dark->canvas);
+    render_draw_text_clipped_alpha(&surface, FONT_STYLE_MONO_11, "CLIPPED TEXT TEST", 180.0f,
+                                   180.0f, TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, 160, 200,
+                                   dark->ink_primary, 1.0f);
+    for (uint32_t logical_y = 160u; logical_y < 200u; logical_y++) {
+        uint32_t physical_y = render_map_coordinate_180(logical_y);
+        for (uint32_t logical_x = 120u; logical_x < 160u; logical_x++) {
+            uint32_t physical_x = render_map_coordinate_180(logical_x);
+            TEST_ASSERT_EQ_U32(dark->canvas, pixels[physical_y * stride_pixels + physical_x]);
+        }
+        for (uint32_t logical_x = 201u; logical_x < 240u; logical_x++) {
+            uint32_t physical_x = render_map_coordinate_180(logical_x);
+            TEST_ASSERT_EQ_U32(dark->canvas, pixels[physical_y * stride_pixels + physical_x]);
+        }
+    }
+
+    /* Marquee text (both static and scrolling) + fast polygon + ellipse + 3D box */
+    render_draw_marquee_text(&surface, FONT_STYLE_MONO_10, "SHORT", 180.0f, 120.0f, 232.0f, 0.5f,
+                             dark->ink_secondary, 1.0f);
+    render_draw_marquee_text(&surface, FONT_STYLE_MONO_10,
+                             "VERY LONG MARQUEE SUBTITLE THAT EXCEEDS TWO HUNDRED THIRTY TWO PIXELS",
+                             180.0f, 220.0f, 232.0f, 1.8f, dark->ink_secondary, 1.0f);
+
+    struct point_2d subject[4] = {{140.0f, 140.0f}, {220.0f, 140.0f}, {220.0f, 220.0f}, {140.0f, 220.0f}};
+    struct point_2d clip_quad[4] = {{160.0f, 160.0f}, {200.0f, 160.0f}, {200.0f, 200.0f}, {160.0f, 200.0f}};
+    struct point_2d clipped[8];
+    uint32_t clipped_count = render_clip_polygon_to_convex_quad(subject, 4u, clip_quad, clipped);
+    TEST_ASSERT_EQ_U32(4u, clipped_count);
+
+    render_draw_filled_convex_polygon_fast(&surface, clipped, clipped_count, dark->signal_highlight,
+                                           0.45f);
+    render_draw_filled_ellipse_aa(&surface, 180.0f, 180.0f, 30.0f, 14.0f, 0.25f, dark->surface,
+                                  0.8f);
+    render_draw_stroked_ellipse_aa(&surface, 180.0f, 180.0f, 30.0f, 14.0f, 0.25f, 1.5f,
+                                   dark->signal_highlight, 0.9f);
+
+    struct rotation_matrix_3x3 matrix = render_build_rotation_matrix_3d(0.2f, 0.4f, 0.05f);
+    render_draw_projected_3d_box(&surface, &matrix, 0.0f, 0.0f, 0.0f, 14.0f, 14.0f, 8.0f,
+                                 180.0f, 180.0f, &dark->cube_highlight_faces,
+                                 dark->cube_edge_stroke, 1.0f);
+    assert_bezel_clip_and_content_present(pixels, stride_pixels, dark->canvas);
+    TEST_ASSERT_EQ_U32(canary_value, pixels[SCREEN_WIDTH]);
+
+    free(pixels);
+}
+
+static void test_home_screens_dark_and_light_with_custom_stride(void) {
+    const uint32_t stride_pixels = 384u;
+    const uint32_t canary_value = 0xDEADBEEFu;
+    size_t buffer_pixels = (size_t)stride_pixels * SCREEN_HEIGHT;
+    uint32_t *pixels = malloc(buffer_pixels * sizeof(uint32_t));
+    TEST_ASSERT_TRUE(pixels != NULL);
+
+    for (size_t index = 0u; index < buffer_pixels; index++) {
+        pixels[index] = canary_value;
+    }
+
+    struct framebuffer_surface surface = {pixels, stride_pixels};
+    static const enum appearance_mode MODES[2] = {APPEARANCE_MODE_DARK, APPEARANCE_MODE_LIGHT};
+
+    for (uint32_t mode_index = 0u; mode_index < 2u; mode_index++) {
+        enum appearance_mode mode = MODES[mode_index];
+        uint32_t canvas = theme_get_palette(mode)->canvas;
+
+        struct home_render_snapshot snap;
+        memset(&snap, 0, sizeof(snap));
+        snap.appearance_mode = mode;
+        snap.active_screen = ACTIVE_SCREEN_HOME;
+        snap.entry_progress = 1.0f;
+        snap.elapsed_seconds = 2.4f;
+        snap.telemetry.volume_percent = 52u;
+        snap.telemetry.volume_limit_percent = 85u;
+        snap.telemetry.battery_valid = true;
+        snap.telemetry.battery_percent = 94u;
+
+        /* Boot -> Home cross-dissolve */
+        snap.entry_progress = 0.25f;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        /* All 4 wheel slots (including Playing, Paused, Idle, Storage) */
+        snap.entry_progress = 1.0f;
+        snap.telemetry.playback_mode = HOME_PLAYBACK_PLAYING;
+        snprintf(snap.telemetry.track_title, sizeof(snap.telemetry.track_title), "Shakti Sound");
+        snap.telemetry.elapsed_ms = 34000u;
+        snap.telemetry.duration_ms = 154000u;
+        snap.scroll_position = 0.0f;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        snap.telemetry.playback_mode = HOME_PLAYBACK_PAUSED;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        snap.telemetry.playback_mode = HOME_PLAYBACK_STORAGE;
+        snap.telemetry.sd_free_valid = true;
+        snap.telemetry.sd_free_megabytes = 43622ull;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        for (uint32_t slot = 1u; slot <= 3u; slot++) {
+            snap.scroll_position = (float)slot;
+            render_draw_home_frame(&surface, &snap);
+            assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        }
+
+        /* Mid-drag state */
+        snap.scroll_position = 0.45f;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        /* Modes & Settings inline previews + left-edge back swipe arc */
+        snap.scroll_position = 2.0f;
+        snap.launched_app_id = HOME_APP_MODES;
+        snap.launch_progress = 1.0f;
+        snap.launch_target = 1.0f;
+        snap.back_swipe_progress = 0.5f;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        snap.scroll_position = 3.0f;
+        snap.launched_app_id = HOME_APP_SETTINGS;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        /* Library Acrylic Cube Dive mid-transition + shell */
+        snap.scroll_position = 1.0f;
+        snap.launched_app_id = HOME_APP_LIBRARY;
+        snap.launch_progress = 0.4f;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        snap.active_screen = ACTIVE_SCREEN_LIBRARY_SHELL;
+        snap.launch_progress = 1.0f;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        /* Now Playing Direct Vinyl Zoom + Active Shell + Idle Shell */
+        snap.active_screen = ACTIVE_SCREEN_HOME;
+        snap.scroll_position = 0.0f;
+        snap.launched_app_id = HOME_APP_NOW_PLAYING;
+        snap.telemetry.playback_mode = HOME_PLAYBACK_PLAYING;
+        snap.launch_progress = 0.55f;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        snap.active_screen = ACTIVE_SCREEN_NOW_PLAYING_SHELL;
+        snap.launch_progress = 1.0f;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        snap.telemetry.playback_mode = HOME_PLAYBACK_IDLE;
+        render_draw_home_frame(&surface, &snap);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        TEST_ASSERT_EQ_U32(canary_value, pixels[SCREEN_WIDTH]);
+    }
+
+    free(pixels);
+}
+
 void run_render_tests(void) {
     printf("Suite: render\n");
     RUN_TEST(test_coordinate_mapping_and_circles);
     RUN_TEST(test_theme_palettes_and_font_atlas);
     RUN_TEST(test_all_screens_dark_and_light_with_custom_stride);
+    RUN_TEST(test_new_primitives_and_clipping);
+    RUN_TEST(test_home_screens_dark_and_light_with_custom_stride);
 }

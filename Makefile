@@ -1,7 +1,7 @@
 .PHONY: mq-ui test-tools test-c test clean
 
 BUILD_DIRECTORY := build
-PORTABLE_SOURCES := src/protocol.c src/theme.c src/font_atlas.c src/boot_sequence.c src/home_screen.c src/render_primitives.c src/render.c src/app.c
+PORTABLE_SOURCES := src/protocol.c src/theme.c src/font_atlas.c src/boot_sequence.c src/home_screen.c src/render_primitives.c src/render_home.c src/render.c src/app.c
 TEST_SOURCES := tests/c/test_runner.c tests/c/test_protocol.c tests/c/test_boot_sequence.c tests/c/test_home_screen.c tests/c/test_render.c tests/c/test_app.c
 LINUX_SOURCES := $(PORTABLE_SOURCES) src/platform_linux.c src/main.c
 
