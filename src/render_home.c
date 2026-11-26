@@ -842,10 +842,7 @@ static void draw_home_stage(const struct framebuffer_surface *surface,
                                   21.0f * reflection_scale, 4.2f * reflection_scale, 0.0f,
                                   inner_fill, chrome_alpha * (is_dark ? 0.14f : 0.45f));
 
-    /* Top handle & status beacon */
-    render_draw_filled_rect_alpha(surface, 166.0f, 24.0f, 28.0f, 3.0f, palette->hairline_strong,
-                                  chrome_alpha * 0.65f);
-
+    /* Top status beacon */
     char beacon_text[48];
     char battery_text[12];
     if (snapshot->telemetry.battery_valid) {
@@ -1113,8 +1110,6 @@ static void draw_library_shell_layer(const struct framebuffer_surface *surface,
                             floor_alpha * 0.75f);
     }
 
-    render_draw_filled_rect_alpha(surface, 166.0f, 24.0f + header_drift_y, 28.0f, 3.0f,
-                                  palette->hairline_strong, layer_alpha * 0.65f);
     render_draw_text_alpha(surface, FONT_STYLE_DISPLAY_22, "Library", (float)SCREEN_CENTER_X,
                            54.0f + header_drift_y, TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE,
                            palette->ink_primary, layer_alpha);

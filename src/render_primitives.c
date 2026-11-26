@@ -7,33 +7,6 @@
 
 #define MAX_CONVEX_POLYGON_VERTICES 8u
 
-static int16_t bezel_half_width_table[SCREEN_HEIGHT];
-static bool bezel_table_initialized = false;
-
-static void ensure_bezel_table_initialized(void) {
-    if (bezel_table_initialized) {
-        return;
-    }
-    int32_t radius_sq = DISPLAY_BEZEL_RADIUS * DISPLAY_BEZEL_RADIUS;
-    for (uint32_t logical_y = 0u; logical_y < SCREEN_HEIGHT; logical_y++) {
-        int32_t delta_y = (int32_t)logical_y - SCREEN_CENTER_Y;
-        int32_t rem = radius_sq - delta_y * delta_y;
-        if (rem < 0) {
-            bezel_half_width_table[logical_y] = -1;
-        } else {
-            int32_t half_w = (int32_t)sqrtf((float)rem);
-            while ((half_w + 1) * (half_w + 1) <= rem) {
-                half_w++;
-            }
-            while (half_w * half_w > rem) {
-                half_w--;
-            }
-            bezel_half_width_table[logical_y] = (int16_t)half_w;
-        }
-    }
-    bezel_table_initialized = true;
-}
-
 float render_clamp_f32(float value, float minimum, float maximum) {
     if (value < minimum) {
         return minimum;
@@ -156,41 +129,11 @@ void render_fill_canvas(const struct framebuffer_surface *surface, uint32_t canv
     if (surface == NULL || surface->pixels == NULL) {
         return;
     }
-    ensure_bezel_table_initialized();
-
-    for (uint32_t logical_y = 0u; logical_y < SCREEN_HEIGHT; logical_y++) {
-        uint32_t physical_y = render_map_coordinate_180(logical_y);
+    uint32_t opaque_canvas = 0xFF000000u | (canvas_color & 0x00FFFFFFu);
+    for (uint32_t physical_y = 0u; physical_y < SCREEN_HEIGHT; physical_y++) {
         uint32_t *row_pixels = surface->pixels + physical_y * surface->stride_pixels;
-        int16_t half_w = bezel_half_width_table[logical_y];
-
-        if (half_w < 0) {
-            for (uint32_t col = 0u; col < SCREEN_WIDTH; col++) {
-                row_pixels[col] = COLOR_OUTSIDE_BEZEL;
-            }
-            continue;
-        }
-
-        int32_t logical_min_x = SCREEN_CENTER_X - (int32_t)half_w;
-        int32_t logical_max_x = SCREEN_CENTER_X + (int32_t)half_w;
-        if (logical_min_x < 0) {
-            logical_min_x = 0;
-        }
-        if (logical_max_x > (int32_t)SCREEN_COORDINATE_MAX) {
-            logical_max_x = (int32_t)SCREEN_COORDINATE_MAX;
-        }
-
-        /* 180-degree X flip reverses [logical_min_x .. logical_max_x] to [phys_min .. phys_max] */
-        uint32_t phys_min_x = render_map_coordinate_180((uint32_t)logical_max_x);
-        uint32_t phys_max_x = render_map_coordinate_180((uint32_t)logical_min_x);
-
-        for (uint32_t col = 0u; col < phys_min_x; col++) {
-            row_pixels[col] = COLOR_OUTSIDE_BEZEL;
-        }
-        for (uint32_t col = phys_min_x; col <= phys_max_x; col++) {
-            row_pixels[col] = canvas_color;
-        }
-        for (uint32_t col = phys_max_x + 1u; col < SCREEN_WIDTH; col++) {
-            row_pixels[col] = COLOR_OUTSIDE_BEZEL;
+        for (uint32_t physical_x = 0u; physical_x < SCREEN_WIDTH; physical_x++) {
+            row_pixels[physical_x] = opaque_canvas;
         }
     }
 }
@@ -199,9 +142,6 @@ void render_blend_pixel(const struct framebuffer_surface *surface, int32_t logic
                         int32_t logical_y, uint32_t color, uint8_t alpha) {
     if (alpha == 0u || logical_x < 0 || logical_x >= (int32_t)SCREEN_WIDTH || logical_y < 0 ||
         logical_y >= (int32_t)SCREEN_HEIGHT) {
-        return;
-    }
-    if (!render_is_inside_bezel_circle(logical_x, logical_y)) {
         return;
     }
 
@@ -790,23 +730,9 @@ static void blend_horizontal_span(const struct framebuffer_surface *surface, int
     if (logical_y < 0 || logical_y >= (int32_t)SCREEN_HEIGHT || alpha_u8 == 0u) {
         return;
     }
-    ensure_bezel_table_initialized();
-    int16_t half_width = bezel_half_width_table[logical_y];
-    if (half_width < 0) {
-        return;
-    }
-
-    int32_t bezel_min_x = SCREEN_CENTER_X - (int32_t)half_width;
-    int32_t bezel_max_x = SCREEN_CENTER_X + (int32_t)half_width;
-    if (bezel_min_x < 0) {
-        bezel_min_x = 0;
-    }
-    if (bezel_max_x > (int32_t)SCREEN_COORDINATE_MAX) {
-        bezel_max_x = (int32_t)SCREEN_COORDINATE_MAX;
-    }
-
-    int32_t span_min_x = start_x > bezel_min_x ? start_x : bezel_min_x;
-    int32_t span_max_x = end_x < bezel_max_x ? end_x : bezel_max_x;
+    int32_t span_min_x = start_x > 0 ? start_x : 0;
+    int32_t span_max_x =
+        end_x < (int32_t)SCREEN_COORDINATE_MAX ? end_x : (int32_t)SCREEN_COORDINATE_MAX;
     if (span_min_x > span_max_x) {
         return;
     }

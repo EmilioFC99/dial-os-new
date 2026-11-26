@@ -576,8 +576,11 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
 
         case IPC_INBOUND_USB_CABLE_EVENT:
         case IPC_INBOUND_BATTERY_EVENT:
-            runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
-            sync_home_telemetry(runtime);
+            if (runtime->state == UI_STATE_HOME) {
+                runtime->platform->probe_hardware_status(runtime->platform->context,
+                                                         &runtime->hardware);
+                sync_home_telemetry(runtime);
+            }
             break;
 
         default:
@@ -734,6 +737,9 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                 (now_ns > runtime->last_boot_tick_ns)
                     ? (float)(now_ns - runtime->last_boot_tick_ns) / (float)NANOSECONDS_PER_SECOND
                     : 0.0f;
+            if (!warning_due && delta_seconds > 0.05f) {
+                delta_seconds = 0.05f;
+            }
             runtime->last_boot_tick_ns = now_ns;
             boot_controller_step(&runtime->boot, delta_seconds);
 

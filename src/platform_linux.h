@@ -5,6 +5,7 @@
 #include "protocol.h"
 
 #include <mqueue.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -26,6 +27,11 @@ struct platform_linux_state {
     uint8_t max_brightness;
     uint32_t rss_ready_kb;
     uint32_t initial_watchdog_restarts;
+    pthread_mutex_t sd_free_mutex;
+    bool sd_free_probe_running;
+    bool sd_free_cached_valid;
+    uint64_t sd_free_cached_megabytes;
+    bool sd_was_mounted;
 };
 
 void platform_linux_set_process_name(void);

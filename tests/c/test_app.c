@@ -615,6 +615,50 @@ static void test_warning_tap_to_retry_recovery(void) {
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, runtime.boot.phase);
 }
 
+static void test_boot_large_stall_delta_does_not_skip_signal_lock_and_handoff(void) {
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+
+    /* aa1d/aa1e/aa1f during boot must NOT trigger synchronous hardware probes */
+    uint32_t probes_before_events = 0u;
+    for (uint32_t index = 0u; index < fake.trace_count; index++) {
+        if (fake.trace[index] == CALL_PROBE_HARDWARE) {
+            probes_before_events++;
+        }
+    }
+    struct inbound_ipc_message bat_msg = {0};
+    bat_msg.kind = IPC_INBOUND_BATTERY_EVENT;
+    app_handle_ipc_message(&runtime, &bat_msg);
+    struct inbound_ipc_message usb_msg = {0};
+    usb_msg.kind = IPC_INBOUND_USB_CABLE_EVENT;
+    usb_msg.usb_connected = true;
+    app_handle_ipc_message(&runtime, &usb_msg);
+
+    uint32_t probes_after_events = 0u;
+    for (uint32_t index = 0u; index < fake.trace_count; index++) {
+        if (fake.trace[index] == CALL_PROBE_HARDWARE) {
+            probes_after_events++;
+        }
+    }
+    TEST_ASSERT_EQ_U32(probes_before_events, probes_after_events);
+
+    /* Send aa24 and advance to just before Signal Lock (~7.9s) */
+    struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 7900u);
+    TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
+
+    /* Inject a 3000 ms OS stall: clamped boot delta must NOT skip Acts 03 & 04 into Home */
+    fake.now_ns += 3000ull * NANOSECONDS_PER_MILLISECOND;
+    app_handle_tick(&runtime, fake.now_ns);
+    TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
+    TEST_ASSERT_TRUE(runtime.boot.phase != BOOT_PHASE_COMPLETED);
+}
+
 void run_app_tests(void) {
     printf("Suite: app\n");
     RUN_TEST(test_crash_formatting_and_count_parsing);
@@ -626,4 +670,5 @@ void run_app_tests(void) {
     RUN_TEST(test_crash_screen_gate_and_ipc_ignoring);
     RUN_TEST(test_home_touch_appearance_persistence_and_live_telemetry);
     RUN_TEST(test_warning_tap_to_retry_recovery);
+    RUN_TEST(test_boot_large_stall_delta_does_not_skip_signal_lock_and_handoff);
 }

@@ -348,14 +348,35 @@ static bool linux_ipc_send_player(void *context, const char *message, size_t len
     return false;
 }
 
+static void *sd_free_probe_worker(void *context) {
+    struct platform_linux_state *state = (struct platform_linux_state *)context;
+    struct statvfs fs_stats;
+    bool valid = false;
+    uint64_t free_megabytes = 0ull;
+
+    if (statvfs(PATH_SDCARD_MOUNT, &fs_stats) == 0 && fs_stats.f_frsize > 0u) {
+        uint64_t free_bytes = (uint64_t)fs_stats.f_bavail * (uint64_t)fs_stats.f_frsize;
+        free_megabytes = free_bytes / (1024ull * 1024ull);
+        valid = true;
+    }
+
+    pthread_mutex_lock(&state->sd_free_mutex);
+    if (valid) {
+        state->sd_free_cached_valid = true;
+        state->sd_free_cached_megabytes = free_megabytes;
+    }
+    state->sd_free_probe_running = false;
+    pthread_mutex_unlock(&state->sd_free_mutex);
+    return NULL;
+}
+
 static void linux_probe_hardware_status(void *context, struct hardware_status *status_out) {
-    (void)context;
+    struct platform_linux_state *state = (struct platform_linux_state *)context;
     if (status_out == NULL) {
         return;
     }
+    memset(status_out, 0, sizeof(*status_out));
     status_out->sd_mounted = is_sdcard_mounted();
-    status_out->battery_valid = false;
-    status_out->battery_percent = 0u;
 
     char battery_text[32];
     size_t length = 0u;
@@ -378,13 +399,27 @@ static void linux_probe_hardware_status(void *context, struct hardware_status *s
         }
     }
 
-    if (status_out->sd_mounted) {
-        struct statvfs fs_stats;
-        if (statvfs(PATH_SDCARD_MOUNT, &fs_stats) == 0 && fs_stats.f_frsize > 0u) {
-            uint64_t free_bytes = (uint64_t)fs_stats.f_bavail * (uint64_t)fs_stats.f_frsize;
-            status_out->sd_free_valid = true;
-            status_out->sd_free_megabytes = free_bytes / (1024ull * 1024ull);
+    if (state != NULL) {
+        pthread_mutex_lock(&state->sd_free_mutex);
+        if (status_out->sd_mounted) {
+            bool should_spawn = (!state->sd_was_mounted || !state->sd_free_cached_valid) &&
+                                !state->sd_free_probe_running;
+            state->sd_was_mounted = true;
+            if (should_spawn) {
+                state->sd_free_probe_running = true;
+                pthread_t worker_thread;
+                if (pthread_create(&worker_thread, NULL, sd_free_probe_worker, state) == 0) {
+                    (void)pthread_detach(worker_thread);
+                } else {
+                    state->sd_free_probe_running = false;
+                }
+            }
+        } else {
+            state->sd_was_mounted = false;
         }
+        status_out->sd_free_valid = state->sd_free_cached_valid;
+        status_out->sd_free_megabytes = state->sd_free_cached_megabytes;
+        pthread_mutex_unlock(&state->sd_free_mutex);
     }
 
     char udc_text[64];
@@ -666,6 +701,7 @@ bool platform_linux_initialize(struct platform_linux_state *state,
     state->event1_fd = -1;
     state->ui_queue = (mqd_t)-1;
     state->player_queue = (mqd_t)-1;
+    (void)pthread_mutex_init(&state->sd_free_mutex, NULL);
 
     /* Recover from any prior crash while LOCKED before first frame draw */
     send_panel_ioctl(PATH_LCD_PANEL, IOCTL_LCD_WAKE);
@@ -799,4 +835,5 @@ void platform_linux_shutdown_cleanup(struct platform_linux_state *state) {
         close(state->fb_fd);
         state->fb_fd = -1;
     }
+    (void)pthread_mutex_destroy(&state->sd_free_mutex);
 }

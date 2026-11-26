@@ -12,8 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void assert_bezel_clip_and_content_present(const uint32_t *pixels, uint32_t stride_pixels,
-                                                  uint32_t expected_canvas_color) {
+static void assert_full_canvas_and_content_present(const uint32_t *pixels, uint32_t stride_pixels,
+                                                   uint32_t expected_canvas_color) {
     bool found_foreground = false;
 
     for (uint32_t logical_y = 0u; logical_y < SCREEN_HEIGHT; logical_y++) {
@@ -22,16 +22,24 @@ static void assert_bezel_clip_and_content_present(const uint32_t *pixels, uint32
             uint32_t physical_x = render_map_coordinate_180(logical_x);
             uint32_t pixel = pixels[physical_y * stride_pixels + physical_x];
 
-            if (!render_is_inside_bezel_circle((int32_t)logical_x, (int32_t)logical_y)) {
-                TEST_ASSERT_EQ_U32(COLOR_OUTSIDE_BEZEL, pixel);
-            } else if (pixel != expected_canvas_color) {
+            if (pixel != expected_canvas_color) {
                 found_foreground = true;
             }
         }
     }
 
+    /* Corners must be opaque (no black software bezel cutout) */
+    uint32_t corner_coords[4][2] = {{0u, 0u}, {359u, 0u}, {0u, 359u}, {359u, 359u}};
+    for (uint32_t corner = 0u; corner < 4u; corner++) {
+        uint32_t px = render_map_coordinate_180(corner_coords[corner][0]);
+        uint32_t py = render_map_coordinate_180(corner_coords[corner][1]);
+        TEST_ASSERT_TRUE(pixels[py * stride_pixels + px] != COLOR_OUTSIDE_BEZEL);
+    }
+
     TEST_ASSERT_TRUE(found_foreground);
 }
+
+#define assert_bezel_clip_and_content_present assert_full_canvas_and_content_present
 
 static void test_coordinate_mapping_and_circles(void) {
     TEST_ASSERT_EQ_U32(359u, render_map_coordinate_180(0u));
@@ -285,7 +293,11 @@ static void test_home_screens_dark_and_light_with_custom_stride(void) {
         snap.telemetry.duration_ms = 154000u;
         snap.scroll_position = 0.0f;
         render_draw_home_frame(&surface, &snap);
-        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        assert_full_canvas_and_content_present(pixels, stride_pixels, canvas);
+        /* Top handle bar removed: pixel at (180, 25) must remain canvas */
+        TEST_ASSERT_EQ_U32(
+            canvas,
+            pixels[render_map_coordinate_180(25u) * stride_pixels + render_map_coordinate_180(180u)]);
 
         snap.telemetry.playback_mode = HOME_PLAYBACK_PAUSED;
         render_draw_home_frame(&surface, &snap);
