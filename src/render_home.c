@@ -388,12 +388,15 @@ static void draw_alive_cube_icon(const struct framebuffer_surface *surface,
                                 2.6f) *
                            cube_scale;
             float disc_r = DISC_SPECS[disc_index].radius * cube_scale;
+            uint32_t segment_stride = (cube_scale < 0.75f) ? 2u : 1u;
+            uint32_t segment_count = LIBRARY_DISC_SEGMENTS / segment_stride;
             struct point_2d ring_points[LIBRARY_DISC_SEGMENTS];
 
-            for (uint32_t seg = 0u; seg < LIBRARY_DISC_SEGMENTS; seg++) {
+            for (uint32_t seg = 0u; seg < segment_count; seg++) {
+                uint32_t table_index = seg * segment_stride;
                 struct point_3d rotated = render_apply_rotation_matrix_3d(
-                    &disc_matrix, UNIT_CIRCLE_COS[seg] * disc_r, disc_y,
-                    UNIT_CIRCLE_SIN[seg] * disc_r);
+                    &disc_matrix, UNIT_CIRCLE_COS[table_index] * disc_r, disc_y,
+                    UNIT_CIRCLE_SIN[table_index] * disc_r);
                 struct point_3d projected = render_project_point_3d(
                     rotated.x, rotated.y, rotated.z, layout->center_x, layout->center_y);
                 ring_points[seg] = (struct point_2d){projected.x, projected.y};
@@ -409,13 +412,19 @@ static void draw_alive_cube_icon(const struct framebuffer_surface *surface,
                 stroke_w = 0.9f;
             }
 
-            render_draw_filled_convex_polygon_fast(surface, ring_points, LIBRARY_DISC_SEGMENTS,
+            render_draw_filled_convex_polygon_fast(surface, ring_points, segment_count,
                                                    disc_fill, icon_alpha);
-            for (uint32_t seg = 0u; seg < LIBRARY_DISC_SEGMENTS; seg++) {
-                uint32_t next_seg = (seg + 1u) % LIBRARY_DISC_SEGMENTS;
-                render_draw_line_aa(surface, ring_points[seg].x, ring_points[seg].y,
-                                    ring_points[next_seg].x, ring_points[next_seg].y, stroke_w,
-                                    disc_stroke, icon_alpha);
+            for (uint32_t seg = 0u; seg < segment_count; seg++) {
+                uint32_t next_seg = (seg + 1u) % segment_count;
+                if (!highlight_active) {
+                    render_draw_line_fast(surface, ring_points[seg].x, ring_points[seg].y,
+                                          ring_points[next_seg].x, ring_points[next_seg].y,
+                                          disc_stroke, icon_alpha);
+                } else {
+                    render_draw_line_aa(surface, ring_points[seg].x, ring_points[seg].y,
+                                        ring_points[next_seg].x, ring_points[next_seg].y, stroke_w,
+                                        disc_stroke, icon_alpha);
+                }
             }
 
             /* Rotating radial notch */
@@ -654,8 +663,8 @@ static void draw_glass_app_cube(const struct framebuffer_surface *surface,
     uint32_t front_border_color =
         is_dark ? (layout->focus_weight > 0.5f ? 0xFFF5FAFFu : 0xFFC8D8F0u) : 0xFF2E3238u;
 
-    /* Layer 1: Back translucent chamber walls */
-    if (effective_shell > 0.01f) {
+    /* Layer 1: Back translucent chamber walls (culled during large Library Dive) */
+    if (effective_shell > 0.01f && layout->half_size <= CUBE_LAYER1_SKIP_HALF_SIZE) {
         for (uint32_t index = 0u; index < back_count; index++) {
             uint8_t face = back_faces[index].face_index;
             struct point_2d quad[4];
@@ -663,18 +672,16 @@ static void draw_glass_app_cube(const struct framebuffer_surface *surface,
                 struct point_3d vertex = outer_projected[FACE_INDICES[face][corner]];
                 quad[corner] = (struct point_2d){vertex.x, vertex.y};
             }
-            if (layout->half_size <= CUBE_LAYER1_SKIP_HALF_SIZE) {
-                float shade_factor = 0.55f + 0.45f * fabsf(back_faces[index].normal_y);
-                float fill_alpha = is_dark ? (0.045f + 0.045f * shade_factor)
-                                           : (0.06f + 0.055f * shade_factor);
-                render_draw_filled_convex_polygon_fast(surface, quad, 4u, back_wall_color,
-                                                       effective_shell * fill_alpha);
-            }
+            float shade_factor = 0.55f + 0.45f * fabsf(back_faces[index].normal_y);
+            float fill_alpha =
+                is_dark ? (0.045f + 0.045f * shade_factor) : (0.06f + 0.055f * shade_factor);
+            render_draw_filled_convex_polygon_fast(surface, quad, 4u, back_wall_color,
+                                                   effective_shell * fill_alpha);
             for (uint32_t edge = 0u; edge < 4u; edge++) {
                 uint32_t next_edge = (edge + 1u) & 3u;
-                render_draw_line_aa(surface, quad[edge].x, quad[edge].y, quad[next_edge].x,
-                                    quad[next_edge].y, 0.9f, back_stroke_color,
-                                    effective_shell * 0.16f);
+                render_draw_line_fast(surface, quad[edge].x, quad[edge].y, quad[next_edge].x,
+                                      quad[next_edge].y, back_stroke_color,
+                                      effective_shell * 0.16f);
             }
         }
 
@@ -683,8 +690,8 @@ static void draw_glass_app_cube(const struct framebuffer_surface *surface,
         for (uint32_t edge = 0u; edge < 12u; edge++) {
             struct point_3d p0 = inner_projected[CUBE_EDGES[edge][0]];
             struct point_3d p1 = inner_projected[CUBE_EDGES[edge][1]];
-            render_draw_line_aa(surface, p0.x, p0.y, p1.x, p1.y, 0.75f, inner_wire_color,
-                                inner_wire_alpha);
+            render_draw_line_fast(surface, p0.x, p0.y, p1.x, p1.y, inner_wire_color,
+                                  inner_wire_alpha);
         }
     }
 
@@ -805,9 +812,8 @@ static void draw_home_stage(const struct framebuffer_surface *surface,
         float half_span = render_lerp_f32(96.0f, 134.0f, ratio);
         float row_alpha = chrome_alpha * floor_base_alpha *
                           render_lerp_f32(0.35f, 0.85f, 1.0f - fabsf(ratio - 0.5f) * 1.4f);
-        render_draw_line_aa(surface, (float)SCREEN_CENTER_X - half_span, row_y,
-                            (float)SCREEN_CENTER_X + half_span, row_y, 1.0f, floor_color,
-                            row_alpha);
+        render_draw_line_fast(surface, (float)SCREEN_CENTER_X - half_span, row_y,
+                              (float)SCREEN_CENTER_X + half_span, row_y, floor_color, row_alpha);
     }
 
     float fractional_shift = fmodf(snapshot->scroll_position, 1.0f);
@@ -822,8 +828,8 @@ static void draw_home_stage(const struct framebuffer_surface *surface,
         }
         float top_x = (float)SCREEN_CENTER_X + base_offset * 0.56f;
         float bottom_x = (float)SCREEN_CENTER_X + base_offset * 1.18f;
-        render_draw_line_aa(surface, top_x, 202.0f, bottom_x, 232.0f, 1.0f, floor_color,
-                            chrome_alpha * floor_base_alpha * edge_fade * 0.75f);
+        render_draw_line_fast(surface, top_x, 202.0f, bottom_x, 232.0f, floor_color,
+                              chrome_alpha * floor_base_alpha * edge_fade * 0.75f);
     }
 
     /* Floating caustic reflection */
@@ -1100,14 +1106,14 @@ static void draw_library_shell_layer(const struct framebuffer_surface *surface,
     for (uint32_t row = 0u; row < 3u; row++) {
         float row_y = 228.0f + (float)row * 22.0f;
         float span = 92.0f + (float)row * 24.0f;
-        render_draw_line_aa(surface, (float)SCREEN_CENTER_X - span, row_y,
-                            (float)SCREEN_CENTER_X + span, row_y, 1.0f, floor_color, floor_alpha);
+        render_draw_line_fast(surface, (float)SCREEN_CENTER_X - span, row_y,
+                              (float)SCREEN_CENTER_X + span, row_y, floor_color, floor_alpha);
     }
     for (int32_t rail = -3; rail <= 3; rail++) {
         float offset = (float)rail * 28.0f;
-        render_draw_line_aa(surface, (float)SCREEN_CENTER_X + offset * 0.65f, 228.0f,
-                            (float)SCREEN_CENTER_X + offset * 1.25f, 272.0f, 1.0f, floor_color,
-                            floor_alpha * 0.75f);
+        render_draw_line_fast(surface, (float)SCREEN_CENTER_X + offset * 0.65f, 228.0f,
+                              (float)SCREEN_CENTER_X + offset * 1.25f, 272.0f, floor_color,
+                              floor_alpha * 0.75f);
     }
 
     render_draw_text_alpha(surface, FONT_STYLE_DISPLAY_22, "Library", (float)SCREEN_CENTER_X,

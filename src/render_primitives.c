@@ -709,7 +709,46 @@ void render_draw_chamfer_plate_filled_aa(const struct framebuffer_surface *surfa
                                          uint32_t color, float alpha) {
     struct point_2d vertices[8];
     build_chamfer_vertices(left_x, top_y, width, height, chamfer, vertices);
-    render_draw_filled_convex_polygon_aa(surface, vertices, 8u, color, alpha);
+    render_draw_filled_convex_polygon_fast(surface, vertices, 8u, color, alpha);
+}
+
+void render_draw_line_fast(const struct framebuffer_surface *surface, float start_x, float start_y,
+                           float end_x, float end_y, uint32_t color, float alpha) {
+    if (surface == NULL || surface->pixels == NULL || alpha <= ALPHA_VISIBILITY_THRESHOLD) {
+        return;
+    }
+
+    uint8_t alpha_u8 = alpha_to_u8(alpha);
+    if (alpha_u8 == 0u) {
+        return;
+    }
+
+    int32_t x0 = (int32_t)lroundf(start_x);
+    int32_t y0 = (int32_t)lroundf(start_y);
+    int32_t x1 = (int32_t)lroundf(end_x);
+    int32_t y1 = (int32_t)lroundf(end_y);
+
+    int32_t delta_x = x1 >= x0 ? (x1 - x0) : (x0 - x1);
+    int32_t delta_y = y1 >= y0 ? (y1 - y0) : (y0 - y1);
+    int32_t step_x = (x0 < x1) ? 1 : -1;
+    int32_t step_y = (y0 < y1) ? 1 : -1;
+    int32_t error_term = delta_x - delta_y;
+
+    for (;;) {
+        render_blend_pixel(surface, x0, y0, color, alpha_u8);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int32_t doubled_error = error_term * 2;
+        if (doubled_error > -delta_y) {
+            error_term -= delta_y;
+            x0 += step_x;
+        }
+        if (doubled_error < delta_x) {
+            error_term += delta_x;
+            y0 += step_y;
+        }
+    }
 }
 
 void render_draw_chamfer_plate_stroked_aa(const struct framebuffer_surface *surface, float left_x,
@@ -917,6 +956,35 @@ uint32_t render_clip_polygon_to_convex_quad(const struct point_2d *subject_verti
     return final_count;
 }
 
+static void compute_tight_ellipse_bounds(float center_x, float center_y, float radius_x,
+                                         float radius_y, float angle_radians, float margin,
+                                         int32_t *min_x_out, int32_t *max_x_out,
+                                         int32_t *min_y_out, int32_t *max_y_out) {
+    float bound_x;
+    float bound_y;
+    if (angle_radians == 0.0f) {
+        bound_x = radius_x + margin;
+        bound_y = radius_y + margin;
+    } else {
+        float cos_a = cosf(angle_radians);
+        float sin_a = sinf(angle_radians);
+        bound_x = sqrtf((radius_x * cos_a) * (radius_x * cos_a) +
+                        (radius_y * sin_a) * (radius_y * sin_a)) +
+                  margin;
+        bound_y = sqrtf((radius_x * sin_a) * (radius_x * sin_a) +
+                        (radius_y * cos_a) * (radius_y * cos_a)) +
+                  margin;
+    }
+    int32_t min_x = (int32_t)floorf(center_x - bound_x);
+    int32_t max_x = (int32_t)ceilf(center_x + bound_x);
+    int32_t min_y = (int32_t)floorf(center_y - bound_y);
+    int32_t max_y = (int32_t)ceilf(center_y + bound_y);
+    *min_x_out = min_x < 0 ? 0 : min_x;
+    *max_x_out = max_x > (int32_t)SCREEN_COORDINATE_MAX ? (int32_t)SCREEN_COORDINATE_MAX : max_x;
+    *min_y_out = min_y < 0 ? 0 : min_y;
+    *max_y_out = max_y > (int32_t)SCREEN_COORDINATE_MAX ? (int32_t)SCREEN_COORDINATE_MAX : max_y;
+}
+
 void render_draw_filled_ellipse_aa(const struct framebuffer_surface *surface, float center_x,
                                    float center_y, float radius_x, float radius_y,
                                    float angle_radians, uint32_t color, float alpha) {
@@ -925,39 +993,31 @@ void render_draw_filled_ellipse_aa(const struct framebuffer_surface *surface, fl
         return;
     }
 
-    float cos_a = cosf(angle_radians);
-    float sin_a = sinf(angle_radians);
-    float bound = (radius_x > radius_y ? radius_x : radius_y) + 1.5f;
-    int32_t min_x = (int32_t)floorf(center_x - bound);
-    int32_t max_x = (int32_t)ceilf(center_x + bound);
-    int32_t min_y = (int32_t)floorf(center_y - bound);
-    int32_t max_y = (int32_t)ceilf(center_y + bound);
-    if (min_x < 0) {
-        min_x = 0;
-    }
-    if (max_x > (int32_t)SCREEN_COORDINATE_MAX) {
-        max_x = (int32_t)SCREEN_COORDINATE_MAX;
-    }
-    if (min_y < 0) {
-        min_y = 0;
-    }
-    if (max_y > (int32_t)SCREEN_COORDINATE_MAX) {
-        max_y = (int32_t)SCREEN_COORDINATE_MAX;
-    }
+    int32_t min_x, max_x, min_y, max_y;
+    compute_tight_ellipse_bounds(center_x, center_y, radius_x, radius_y, angle_radians, 1.5f,
+                                 &min_x, &max_x, &min_y, &max_y);
 
+    bool axis_aligned = (angle_radians == 0.0f);
+    float cos_a = axis_aligned ? 1.0f : cosf(angle_radians);
+    float sin_a = axis_aligned ? 0.0f : sinf(angle_radians);
     float inv_rx = 1.0f / radius_x;
     float inv_ry = 1.0f / radius_y;
     float min_r = radius_x < radius_y ? radius_x : radius_y;
+    float max_norm = 1.0f + 0.5f / min_r;
+    float max_norm_sq = max_norm * max_norm;
 
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
         float offset_y = (float)pixel_y + 0.5f - center_y;
         for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
             float offset_x = (float)pixel_x + 0.5f - center_x;
-            float local_x = offset_x * cos_a + offset_y * sin_a;
-            float local_y = -offset_x * sin_a + offset_y * cos_a;
-            float norm_dist = sqrtf((local_x * inv_rx) * (local_x * inv_rx) +
-                                    (local_y * inv_ry) * (local_y * inv_ry));
-            float signed_px = (norm_dist - 1.0f) * min_r;
+            float local_x = axis_aligned ? offset_x : (offset_x * cos_a + offset_y * sin_a);
+            float local_y = axis_aligned ? offset_y : (-offset_x * sin_a + offset_y * cos_a);
+            float norm_sq =
+                (local_x * inv_rx) * (local_x * inv_rx) + (local_y * inv_ry) * (local_y * inv_ry);
+            if (norm_sq >= max_norm_sq) {
+                continue;
+            }
+            float signed_px = (sqrtf(norm_sq) - 1.0f) * min_r;
             if (signed_px < 0.5f) {
                 float coverage = render_clamp_f32(0.5f - signed_px, 0.0f, 1.0f);
                 render_blend_pixel(surface, pixel_x, pixel_y, color,
@@ -976,40 +1036,35 @@ void render_draw_stroked_ellipse_aa(const struct framebuffer_surface *surface, f
         return;
     }
 
-    float cos_a = cosf(angle_radians);
-    float sin_a = sinf(angle_radians);
     float half_w = line_width * 0.5f;
-    float bound = (radius_x > radius_y ? radius_x : radius_y) + half_w + 1.5f;
-    int32_t min_x = (int32_t)floorf(center_x - bound);
-    int32_t max_x = (int32_t)ceilf(center_x + bound);
-    int32_t min_y = (int32_t)floorf(center_y - bound);
-    int32_t max_y = (int32_t)ceilf(center_y + bound);
-    if (min_x < 0) {
-        min_x = 0;
-    }
-    if (max_x > (int32_t)SCREEN_COORDINATE_MAX) {
-        max_x = (int32_t)SCREEN_COORDINATE_MAX;
-    }
-    if (min_y < 0) {
-        min_y = 0;
-    }
-    if (max_y > (int32_t)SCREEN_COORDINATE_MAX) {
-        max_y = (int32_t)SCREEN_COORDINATE_MAX;
-    }
+    int32_t min_x, max_x, min_y, max_y;
+    compute_tight_ellipse_bounds(center_x, center_y, radius_x, radius_y, angle_radians,
+                                 half_w + 1.5f, &min_x, &max_x, &min_y, &max_y);
 
+    bool axis_aligned = (angle_radians == 0.0f);
+    float cos_a = axis_aligned ? 1.0f : cosf(angle_radians);
+    float sin_a = axis_aligned ? 0.0f : sinf(angle_radians);
     float inv_rx = 1.0f / radius_x;
     float inv_ry = 1.0f / radius_y;
     float min_r = radius_x < radius_y ? radius_x : radius_y;
+    float band_norm = (half_w + 0.5f) / min_r;
+    float inner_norm = 1.0f - band_norm;
+    float outer_norm = 1.0f + band_norm;
+    float inner_norm_sq = inner_norm > 0.0f ? (inner_norm * inner_norm) : 0.0f;
+    float outer_norm_sq = outer_norm * outer_norm;
 
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
         float offset_y = (float)pixel_y + 0.5f - center_y;
         for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
             float offset_x = (float)pixel_x + 0.5f - center_x;
-            float local_x = offset_x * cos_a + offset_y * sin_a;
-            float local_y = -offset_x * sin_a + offset_y * cos_a;
-            float norm_dist = sqrtf((local_x * inv_rx) * (local_x * inv_rx) +
-                                    (local_y * inv_ry) * (local_y * inv_ry));
-            float dist_px = fabsf((norm_dist - 1.0f) * min_r);
+            float local_x = axis_aligned ? offset_x : (offset_x * cos_a + offset_y * sin_a);
+            float local_y = axis_aligned ? offset_y : (-offset_x * sin_a + offset_y * cos_a);
+            float norm_sq =
+                (local_x * inv_rx) * (local_x * inv_rx) + (local_y * inv_ry) * (local_y * inv_ry);
+            if (norm_sq <= inner_norm_sq || norm_sq >= outer_norm_sq) {
+                continue;
+            }
+            float dist_px = fabsf((sqrtf(norm_sq) - 1.0f) * min_r);
             if (dist_px < half_w + 0.5f) {
                 float coverage = render_clamp_f32(half_w + 0.5f - dist_px, 0.0f, 1.0f);
                 render_blend_pixel(surface, pixel_x, pixel_y, color,

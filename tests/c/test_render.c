@@ -236,6 +236,7 @@ static void test_new_primitives_and_clipping(void) {
 
     render_draw_filled_convex_polygon_fast(&surface, clipped, clipped_count, dark->signal_highlight,
                                            0.45f);
+    render_draw_line_fast(&surface, 80.0f, 80.0f, 280.0f, 280.0f, dark->hairline_strong, 0.6f);
     render_draw_filled_ellipse_aa(&surface, 180.0f, 180.0f, 30.0f, 14.0f, 0.25f, dark->surface,
                                   0.8f);
     render_draw_stroked_ellipse_aa(&surface, 180.0f, 180.0f, 30.0f, 14.0f, 0.25f, 1.5f,

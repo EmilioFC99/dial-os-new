@@ -88,6 +88,8 @@ void render_blend_pixel(const struct framebuffer_surface *surface, int32_t logic
 
 void render_draw_line_aa(const struct framebuffer_surface *surface, float start_x, float start_y,
                          float end_x, float end_y, float line_width, uint32_t color, float alpha);
+void render_draw_line_fast(const struct framebuffer_surface *surface, float start_x, float start_y,
+                           float end_x, float end_y, uint32_t color, float alpha);
 void render_draw_arc_aa(const struct framebuffer_surface *surface, float center_x, float center_y,
                         float radius, float line_width, float start_angle, float end_angle,
                         uint32_t color, float alpha);
