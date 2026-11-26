@@ -29,8 +29,10 @@ enum font_style_id {
     FONT_STYLE_MONO_13 = 2,
     FONT_STYLE_MONO_18 = 3,
     FONT_STYLE_DISPLAY_18 = 4,
-    FONT_STYLE_DISPLAY_32 = 5,
-    FONT_STYLE_DISPLAY_40 = 6
+    FONT_STYLE_DISPLAY_20 = 5,
+    FONT_STYLE_DISPLAY_22 = 6,
+    FONT_STYLE_DISPLAY_32 = 7,
+    FONT_STYLE_DISPLAY_40 = 8
 };
 
 const struct bitmap_font *font_atlas_get(enum font_style_id style_id);

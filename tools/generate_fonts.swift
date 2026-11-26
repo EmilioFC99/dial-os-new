@@ -45,6 +45,8 @@ let fontSpecs: [FontSpec] = [
     FontSpec(enumName: "FONT_STYLE_MONO_13", symbolPrefix: "mono_13", sizePt: 13.0, weight: 800.0, monospace: true, codepoints: asciiAndMiddleDot),
     FontSpec(enumName: "FONT_STYLE_MONO_18", symbolPrefix: "mono_18", sizePt: 18.0, weight: 800.0, monospace: true, codepoints: asciiAndMiddleDot),
     FontSpec(enumName: "FONT_STYLE_DISPLAY_18", symbolPrefix: "display_18", sizePt: 18.0, weight: 800.0, monospace: false, codepoints: asciiAndMiddleDot),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_20", symbolPrefix: "display_20", sizePt: 20.0, weight: 700.0, monospace: false, codepoints: asciiAndMiddleDot),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_22", symbolPrefix: "display_22", sizePt: 22.0, weight: 700.0, monospace: false, codepoints: asciiAndMiddleDot),
     FontSpec(enumName: "FONT_STYLE_DISPLAY_32", symbolPrefix: "display_32", sizePt: 32.0, weight: 800.0, monospace: false, codepoints: asciiAndMiddleDot),
     FontSpec(enumName: "FONT_STYLE_DISPLAY_40", symbolPrefix: "display_40", sizePt: 40.0, weight: 800.0, monospace: false, codepoints: timerCodepoints),
 ]
@@ -218,8 +220,10 @@ enum font_style_id {
     FONT_STYLE_MONO_13 = 2,
     FONT_STYLE_MONO_18 = 3,
     FONT_STYLE_DISPLAY_18 = 4,
-    FONT_STYLE_DISPLAY_32 = 5,
-    FONT_STYLE_DISPLAY_40 = 6
+    FONT_STYLE_DISPLAY_20 = 5,
+    FONT_STYLE_DISPLAY_22 = 6,
+    FONT_STYLE_DISPLAY_32 = 7,
+    FONT_STYLE_DISPLAY_40 = 8
 };
 
 const struct bitmap_font *font_atlas_get(enum font_style_id style_id);
@@ -294,6 +298,10 @@ const struct bitmap_font *font_atlas_get(enum font_style_id style_id) {
             return &mono_18_font;
         case FONT_STYLE_DISPLAY_18:
             return &display_18_font;
+        case FONT_STYLE_DISPLAY_20:
+            return &display_20_font;
+        case FONT_STYLE_DISPLAY_22:
+            return &display_22_font;
         case FONT_STYLE_DISPLAY_32:
             return &display_32_font;
         case FONT_STYLE_DISPLAY_40:
