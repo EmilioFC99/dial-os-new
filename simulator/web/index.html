@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en" data-mode="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DialOS Simulator</title>
+  <link rel="stylesheet" href="./shell/shell.css" />
+</head>
+<body>
+  <main class="simulator-stage" aria-label="DialOS 360x360 round device simulator">
+    <div class="disc-housing">
+      <div class="disc-bezel-ring">
+        <div class="screen-viewport" id="screen-viewport">
+          <canvas
+            id="display-canvas"
+            width="360"
+            height="360"
+            aria-label="DialOS 360x360 Interactive Display"
+          ></canvas>
+          <div class="glass-sheen is-visible" id="glass-sheen" aria-hidden="true"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="control-dock">
+      <div class="control-bar" role="toolbar" aria-label="Simulator controls">
+        <button
+          type="button"
+          class="control-button"
+          id="reboot-button"
+          title="Reboot simulator (R)"
+        >
+          Reboot
+        </button>
+
+        <button
+          type="button"
+          class="control-button"
+          id="appearance-toggle"
+          aria-pressed="false"
+          title="Toggle Dark / Light Mode (T)"
+        >
+          <span class="mode-swatch" aria-hidden="true"></span>
+          <span id="appearance-label">Dark Mode</span>
+        </button>
+
+        <button
+          type="button"
+          class="control-button"
+          id="zoom-toggle"
+          aria-pressed="false"
+          title="Toggle 1:1 / 1.4x scale (Z)"
+        >
+          1:1
+        </button>
+
+        <div class="dev-menu-anchor" id="dev-menu-anchor">
+          <button
+            type="button"
+            class="control-button"
+            id="dev-menu-button"
+            aria-expanded="false"
+            aria-haspopup="true"
+            aria-controls="dev-popover"
+          >
+            Dev &#9662;
+          </button>
+
+          <div class="dev-popover is-hidden" id="dev-popover" role="dialog" aria-label="Developer tools">
+            <div class="popover-section">
+              <div class="popover-heading">Display &amp; Fault Controls</div>
+
+              <button
+                type="button"
+                class="popover-row"
+                id="safe-guides-toggle"
+                aria-pressed="false"
+              >
+                <span class="popover-row-label">Safe Guides (R174 / R160)</span>
+                <span class="popover-row-meta">
+                  <kbd class="shortcut-key">G</kbd>
+                  <span class="toggle-pill" id="safe-guides-pill">OFF</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="popover-row"
+                id="optical-glass-toggle"
+                aria-pressed="true"
+              >
+                <span class="popover-row-label">Optical Glass</span>
+                <span class="popover-row-meta">
+                  <span class="toggle-pill is-on" id="optical-glass-pill">ON</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="popover-row"
+                id="engine-delay-toggle"
+                aria-pressed="false"
+              >
+                <span class="popover-row-label">Engine Delay Fault</span>
+                <span class="popover-row-meta">
+                  <span class="toggle-pill" id="engine-delay-pill">OFF</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                class="popover-row"
+                id="rescan-library-button"
+              >
+                <span class="popover-row-label">Rescan Library</span>
+                <span class="popover-row-meta">
+                  <span class="action-pill" id="rescan-status-pill">RUN</span>
+                </span>
+              </button>
+            </div>
+
+            <div class="popover-divider" role="separator"></div>
+
+            <div class="popover-section">
+              <div class="popover-heading">Telemetry</div>
+              <dl class="telemetry-grid">
+                <div class="telemetry-row">
+                  <dt class="telemetry-key">PHASE</dt>
+                  <dd class="telemetry-value" id="telemetry-phase">WAKE</dd>
+                </div>
+                <div class="telemetry-row">
+                  <dt class="telemetry-key">MUSIC ROOT</dt>
+                  <dd class="telemetry-value telemetry-path" id="telemetry-music-root" title="--">--</dd>
+                </div>
+                <div class="telemetry-row">
+                  <dt class="telemetry-key">COUNTS</dt>
+                  <dd class="telemetry-value" id="telemetry-counts">0 TRK &middot; 0 ALB &middot; 0 ART</dd>
+                </div>
+              </dl>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

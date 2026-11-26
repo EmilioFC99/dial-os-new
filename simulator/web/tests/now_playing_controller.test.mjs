@@ -1,0 +1,2226 @@
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  PREVIOUS_RESTART_THRESHOLD_SECONDS,
+  REPEAT_MODES,
+  createAudioEngine,
+} from "../core/audio_engine.js";
+import {
+  NOW_PLAYING_CONSTANTS,
+  NOW_PLAYING_LYRICS_MODES,
+  NOW_PLAYING_QUICK_BUTTONS,
+  NOW_PLAYING_REPEAT_MODES,
+  computeNowPlayingQueueRowLayout,
+  createNowPlayingController,
+  enrichTrackDetails,
+  hitTestNowPlayingQueueRow,
+  resolveActiveLyricsFrame,
+  resolveTrackLyricsSource,
+} from "../core/now_playing_controller.js";
+
+const DISPLAY_CENTER_PX = 180;
+const STEP_DELTA_SECONDS = 0.05;
+const SETTLE_STEP_COUNT = 30;
+const FLOAT_TOLERANCE = 1e-6;
+
+const MOCK_AUDIO_DURATION_SECONDS = 180;
+const MOCK_AUDIO_READY_STATE = 4;
+
+const IDLE_BROWSE_CTA_X = 180;
+const IDLE_BROWSE_CTA_Y = 266;
+
+const VINYL_CENTER_TAP_X = 180;
+const VINYL_CENTER_TAP_Y = 180;
+
+const QUICK_FAVORITE_X = 104;
+const QUICK_FAVORITE_Y = 168;
+const QUICK_SHUFFLE_X = 180;
+const QUICK_SHUFFLE_Y = 168;
+const QUICK_REPEAT_X = 256;
+const QUICK_REPEAT_Y = 168;
+const QUICK_PLAYLIST_X = 104;
+const QUICK_PLAYLIST_Y = 238;
+const QUICK_LYRICS_X = 180;
+const QUICK_LYRICS_Y = 238;
+const QUICK_DETAILS_X = 256;
+const QUICK_DETAILS_Y = 238;
+
+const SEEK_HOLD_POINT_X = 180;
+const SEEK_HOLD_POINT_Y = 120;
+const SEEK_ARC_THREE_OCLOCK_X = 240;
+const SEEK_ARC_THREE_OCLOCK_Y = 180;
+const SEEK_ARC_SIX_OCLOCK_X = 180;
+const SEEK_ARC_SIX_OCLOCK_Y = 240;
+const SEEK_SPINDLE_START_X = 172;
+const SEEK_SPINDLE_END_X = 194;
+const SEEK_SPINDLE_Y = 180;
+
+const VOLUME_BEZEL_X = 330;
+const VOLUME_BEZEL_START_Y = 180;
+const VOLUME_BEZEL_UP_END_Y = 97;
+const VOLUME_BEZEL_MAX_UP_Y = 10;
+const VOLUME_BEZEL_MAX_DOWN_Y = 350;
+const RIGHT_BEZEL_RADIUS_PX = 150;
+const RIGHT_BEZEL_SWEEP_STEPS = 20;
+const VOLUME_MIN_START_RADIUS_PX = 135;
+const VOLUME_OUTER_START_RADIUS_PX = 160;
+const VOLUME_INNER_REJECT_RADIUS_PX = 100;
+const VOLUME_MID_REJECT_RADIUS_PX = 120;
+const SEEK_BOUNDARY_RADIUS_PX = 90;
+const SEEK_INSIDE_TEST_RADIUS_PX = 85;
+const SEEK_OUTSIDE_TEST_RADIUS_PX = 110;
+const QUEUE_PULL_ZONE_TOP_Y = 245;
+const ENTRANCE_ROTATION_OFFSET_RADIANS = (20 * Math.PI) / 180;
+
+const SKIP_LEFT_START_X = 230;
+const SKIP_LEFT_END_X = 150;
+const SKIP_RIGHT_START_X = 140;
+const SKIP_RIGHT_END_X = 215;
+
+const QUEUE_PULL_START_Y = 260;
+const QUEUE_PULL_END_Y = 200;
+const QUEUE_CLOSE_START_Y = 140;
+const QUEUE_CLOSE_END_Y = 224;
+
+const BACK_SWIPE_START_X = 24;
+const BACK_SWIPE_PARTIAL_END_X = 50;
+const BACK_SWIPE_COMMIT_END_X = 90;
+const BACK_SWIPE_Y = 180;
+
+const SHUFFLE_TRIAL_ROUNDS = 16;
+
+/**
+ * Create an HTMLAudioElement-compatible stub for deterministic audio engine tests.
+ *
+ * @returns {object} Stub audio element with call counters and event emission helpers.
+ */
+function createMockAudioStub() {
+  const listeners = {};
+  const stubAudioElement = {
+    src: "",
+    preload: "",
+    currentTime: 0,
+    duration: MOCK_AUDIO_DURATION_SECONDS,
+    paused: true,
+    volume: 1,
+    readyState: MOCK_AUDIO_READY_STATE,
+    playCalls: 0,
+    pauseCalls: 0,
+    loadCalls: 0,
+    listeners,
+    addEventListener(eventName, handler) {
+      if (!Array.isArray(listeners[eventName])) {
+        listeners[eventName] = [];
+      }
+      listeners[eventName].push(handler);
+    },
+    load() {
+      stubAudioElement.loadCalls += 1;
+    },
+    play() {
+      stubAudioElement.paused = false;
+      stubAudioElement.playCalls += 1;
+      return Promise.resolve();
+    },
+    pause() {
+      stubAudioElement.paused = true;
+      stubAudioElement.pauseCalls += 1;
+    },
+    emit(eventName) {
+      const eventHandlers = listeners[eventName] || [];
+      for (const handler of eventHandlers) {
+        handler({ type: eventName });
+      }
+    },
+  };
+  return stubAudioElement;
+}
+
+/**
+ * Build a multi-album catalog fixture with rich technical fields and synced lyrics.
+ *
+ * @param {object} [overrides] Optional top-level field overrides such as playlists or lyricsCatalog.
+ * @returns {object} Complete simulator catalog fixture.
+ */
+function buildNowPlayingTestCatalog(overrides = {}) {
+  const trackOne = {
+    id: "t1",
+    title: "01 Dawn",
+    artist: "Aurora Band",
+    albumId: "a1",
+    albumTitle: "Alpha Waves",
+    genre: "Ambient",
+    year: 2024,
+    duration: "03:00",
+    durationSeconds: 180,
+    isFavorite: false,
+    trackNumber: "01",
+    audioUrl: "/api/audio/t1",
+    format: "FLAC 24-BIT",
+    sampleRate: "96.0 KHZ",
+    bitrate: "2,822 KBPS",
+    fileSize: "42.3 MB",
+  };
+  const trackTwo = {
+    id: "t2",
+    title: "02 Dusk",
+    artist: "Aurora Band",
+    albumId: "a1",
+    albumTitle: "Alpha Waves",
+    genre: "Ambient",
+    year: 2024,
+    duration: "03:20",
+    durationSeconds: 200,
+    isFavorite: true,
+    trackNumber: "02",
+    audioUrl: "/api/audio/t2",
+    format: "FLAC 24-BIT",
+    sampleRate: "96.0 KHZ",
+    bitrate: "2,640 KBPS",
+    fileSize: "39.6 MB",
+  };
+  const trackThree = {
+    id: "t3",
+    title: "01 Horizon",
+    artist: "Boreal Quartet",
+    albumId: "a2",
+    albumTitle: "Zenith Echo",
+    genre: "Jazz",
+    year: 2023,
+    duration: "04:00",
+    durationSeconds: 240,
+    isFavorite: false,
+    trackNumber: "01",
+    audioUrl: "/api/audio/t3",
+    format: "MP3 320K",
+    sampleRate: "44.1 KHZ",
+    bitrate: "320 KBPS",
+    fileSize: "9.4 MB",
+  };
+  const trackFour = {
+    id: "t4",
+    title: "02 Midnight",
+    artist: "Boreal Quartet",
+    albumId: "a2",
+    albumTitle: "Zenith Echo",
+    genre: "Jazz",
+    year: 2023,
+    duration: "02:30",
+    durationSeconds: 150,
+    isFavorite: false,
+    trackNumber: "02",
+    audioUrl: "/api/audio/t4",
+    format: "MP3 320K",
+    sampleRate: "44.1 KHZ",
+    bitrate: "320 KBPS",
+    fileSize: "6.0 MB",
+  };
+  const trackFive = {
+    id: "t5",
+    title: "03 Starlight",
+    artist: "Boreal Quartet",
+    albumId: "a2",
+    albumTitle: "Zenith Echo",
+    genre: "Jazz",
+    year: 2023,
+    duration: "02:00",
+    durationSeconds: 120,
+    isFavorite: true,
+    trackNumber: "03",
+    audioUrl: "/api/audio/t5",
+    format: "MP3 320K",
+    sampleRate: "44.1 KHZ",
+    bitrate: "320 KBPS",
+    fileSize: "4.8 MB",
+  };
+
+  const defaultLyricsCatalog = {
+    t1: {
+      kind: "timed",
+      lines: [
+        { timeSeconds: 5.0, text: "First light across the vinyl" },
+        { timeSeconds: 12.5, text: "Spinning quietly in zero gravity" },
+        { timeSeconds: 21.0, text: "Until the final groove fades" },
+      ],
+    },
+    t2: {
+      kind: "untimed",
+      lines: [
+        "Evening shadows settle softly",
+        "Echoes linger over glass",
+        "Steady pulse beneath the dial",
+        "Night unfolds across the turntable",
+      ],
+    },
+  };
+
+  return {
+    albums: [
+      {
+        id: "a1",
+        title: "Alpha Waves",
+        artist: "Aurora Band",
+        genre: "Ambient",
+        year: 2024,
+        tracks: [
+          { ...trackOne },
+          { ...trackTwo },
+        ],
+      },
+      {
+        id: "a2",
+        title: "Zenith Echo",
+        artist: "Boreal Quartet",
+        genre: "Jazz",
+        year: 2023,
+        tracks: [
+          { ...trackThree },
+          { ...trackFour },
+          { ...trackFive },
+        ],
+      },
+    ],
+    allTracks: [trackOne, trackTwo, trackThree, trackFour, trackFive],
+    playlists: [{ id: "p1", name: "Morning Mix", trackIds: ["t2", "t3"] }],
+    lyricsCatalog: defaultLyricsCatalog,
+    ...overrides,
+  };
+}
+
+/**
+ * Tap a point on a controller without drag displacement.
+ *
+ * @param {object} controller Controller instance under test.
+ * @param {number} pointX Display coordinate X in pixels.
+ * @param {number} pointY Display coordinate Y in pixels.
+ */
+function tapPoint(controller, pointX, pointY) {
+  controller.handlePointerDown(pointX, pointY);
+  controller.handlePointerUp(pointX, pointY);
+}
+
+/**
+ * Advance a controller for a fixed number of ticks.
+ *
+ * @param {object} controller Controller instance under test.
+ * @param {number} stepDeltaSeconds Frame delta in seconds.
+ * @param {number} stepCount Number of ticks to simulate.
+ * @returns {object} Final render snapshot.
+ */
+function advanceSteps(controller, stepDeltaSeconds, stepCount) {
+  for (let stepIndex = 0; stepIndex < stepCount; stepIndex += 1) {
+    controller.step(stepDeltaSeconds);
+  }
+  return controller.getRenderSnapshot();
+}
+
+/**
+ * Open the 5-action Quick Menu via single tap past the double-tap window.
+ *
+ * @param {object} nowPlayingController Settled Now Playing controller in playing mode.
+ */
+function openQuickActionsViaTap(nowPlayingController) {
+  tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
+  nowPlayingController.step(NOW_PLAYING_CONSTANTS.DOUBLE_TAP_WINDOW_SECONDS + 0.03);
+}
+
+/**
+ * Trace smooth pointer movement along the right bezel circle (radius 150px) between two waypoints.
+ *
+ * @param {object} controller Controller instance under test.
+ * @param {{ pointX: number, pointY: number }} startWaypoint Starting bezel point.
+ * @param {{ pointX: number, pointY: number }} endWaypoint Ending bezel point.
+ * @param {number} [stepCount=RIGHT_BEZEL_SWEEP_STEPS] Number of arc interpolation steps.
+ */
+function traceRightBezelSweep(
+  controller,
+  startWaypoint,
+  endWaypoint,
+  stepCount = RIGHT_BEZEL_SWEEP_STEPS,
+) {
+  const startAngle = Math.atan2(
+    startWaypoint.pointY - DISPLAY_CENTER_PX,
+    startWaypoint.pointX - DISPLAY_CENTER_PX,
+  );
+  const endAngle = Math.atan2(
+    endWaypoint.pointY - DISPLAY_CENTER_PX,
+    endWaypoint.pointX - DISPLAY_CENTER_PX,
+  );
+  for (let stepIndex = 1; stepIndex < stepCount; stepIndex += 1) {
+    const angleRadians = startAngle + ((endAngle - startAngle) * stepIndex) / stepCount;
+    controller.handlePointerMove(
+      DISPLAY_CENTER_PX + RIGHT_BEZEL_RADIUS_PX * Math.cos(angleRadians),
+      DISPLAY_CENTER_PX + RIGHT_BEZEL_RADIUS_PX * Math.sin(angleRadians),
+    );
+  }
+  controller.handlePointerMove(endWaypoint.pointX, endWaypoint.pointY);
+}
+
+/**
+ * Trace smooth pointer movement around display center at `radiusPx` between two angles.
+ *
+ * @param {object} controller Controller instance under test.
+ * @param {number} radiusPx Arc radius from display center in pixels.
+ * @param {number} startAngleRadians Starting polar angle in radians.
+ * @param {number} endAngleRadians Target polar angle in radians.
+ * @param {number} [stepCount=RIGHT_BEZEL_SWEEP_STEPS] Number of interpolation segments.
+ */
+function traceCircularBezelArc(
+  controller,
+  radiusPx,
+  startAngleRadians,
+  endAngleRadians,
+  stepCount = RIGHT_BEZEL_SWEEP_STEPS,
+) {
+  for (let stepIndex = 1; stepIndex <= stepCount; stepIndex += 1) {
+    const angleRadians =
+      startAngleRadians + ((endAngleRadians - startAngleRadians) * stepIndex) / stepCount;
+    controller.handlePointerMove(
+      DISPLAY_CENTER_PX + radiusPx * Math.cos(angleRadians),
+      DISPLAY_CENTER_PX + radiusPx * Math.sin(angleRadians),
+    );
+  }
+}
+
+/**
+ * Execute a full rightward left-edge back-swipe gesture.
+ *
+ * @param {object} controller Controller instance under test.
+ */
+function performLeftEdgeBackSwipe(controller) {
+  controller.handlePointerDown(BACK_SWIPE_START_X, BACK_SWIPE_Y);
+  controller.handlePointerMove(BACK_SWIPE_COMMIT_END_X, BACK_SWIPE_Y);
+  controller.handlePointerUp(BACK_SWIPE_COMMIT_END_X, BACK_SWIPE_Y);
+}
+
+/**
+ * Create a wired audio engine + Now Playing controller test harness capturing all callbacks.
+ *
+ * @param {object} [options] Harness setup overrides.
+ * @param {object} [options.catalog] Custom catalog fixture.
+ * @param {object} [options.sourceSpec] Initial playback source descriptor; null stays idle.
+ * @param {string} [options.returnScreen="library"] Initial entry return screen.
+ * @param {() => object | null} [options.createAudioElement] Optional audio stub factory.
+ * @returns {object} Harness holding engine, controller, catalog, and callback call logs.
+ */
+function createNowPlayingTestHarness({
+  catalog = buildNowPlayingTestCatalog(),
+  sourceSpec = { trackId: "t1", queueSource: "all-songs" },
+  returnScreen = "library",
+  createAudioElement,
+} = {}) {
+  const audioEngine = createAudioEngine({ createAudioElement });
+  if (sourceSpec) {
+    audioEngine.playTrackFromSource(sourceSpec, catalog);
+  }
+
+  const callbackLogs = {
+    browseLibraryCalls: 0,
+    togglePlayPauseCalls: 0,
+    seekTargets: [],
+    volumeChanges: [],
+    skipDirections: [],
+    favoriteToggles: [],
+    shuffleToggles: [],
+    repeatCycles: [],
+    selectedQueueIndices: [],
+    persistedPlaylists: [],
+    exitReturnScreens: [],
+  };
+
+  let nowPlayingController = null;
+  nowPlayingController = createNowPlayingController({
+    onBrowseLibrary: () => {
+      callbackLogs.browseLibraryCalls += 1;
+    },
+    onTogglePlayPause: () => {
+      callbackLogs.togglePlayPauseCalls += 1;
+      audioEngine.togglePlayPause();
+      nowPlayingController.syncAudioState(audioEngine.getState());
+    },
+    onSeek: (targetSeconds) => {
+      callbackLogs.seekTargets.push(targetSeconds);
+      audioEngine.seekTo(targetSeconds);
+      nowPlayingController.syncAudioState(audioEngine.getState());
+    },
+    onVolumeChange: (nextVolume) => {
+      callbackLogs.volumeChanges.push(nextVolume);
+      audioEngine.setVolume(nextVolume);
+      nowPlayingController.syncAudioState(audioEngine.getState());
+    },
+    onSkipTrack: (direction) => {
+      callbackLogs.skipDirections.push(direction);
+      const outcome = audioEngine.skipTrack(direction);
+      nowPlayingController.syncAudioState(audioEngine.getState());
+      return outcome;
+    },
+    onToggleFavorite: (trackId, nextState) => {
+      callbackLogs.favoriteToggles.push({ trackId, isFavorite: nextState });
+      audioEngine.updateTrackFavorite(trackId, nextState);
+      nowPlayingController.syncAudioState(audioEngine.getState());
+    },
+    onToggleShuffle: () => {
+      const nextShuffleEnabled = audioEngine.toggleShuffle();
+      callbackLogs.shuffleToggles.push(nextShuffleEnabled);
+      nowPlayingController.syncAudioState(audioEngine.getState());
+    },
+    onCycleRepeatMode: () => {
+      const nextRepeatMode = audioEngine.cycleRepeatMode();
+      callbackLogs.repeatCycles.push(nextRepeatMode);
+      nowPlayingController.syncAudioState(audioEngine.getState());
+    },
+    onSelectQueueIndex: (rowIndex) => {
+      callbackLogs.selectedQueueIndices.push(rowIndex);
+      audioEngine.selectQueueIndex(rowIndex);
+      nowPlayingController.syncAudioState(audioEngine.getState());
+    },
+    onPersistPlaylists: (updatedPlaylists) => {
+      callbackLogs.persistedPlaylists.push(updatedPlaylists);
+    },
+    onExit: (screenId) => {
+      callbackLogs.exitReturnScreens.push(screenId);
+    },
+  });
+
+  nowPlayingController.hydrateCatalog(catalog);
+  if (sourceSpec) {
+    if (returnScreen === "home") {
+      nowPlayingController.enterFromHome({
+        returnScreen: "home",
+        audioState: audioEngine.getState(),
+      });
+    } else {
+      nowPlayingController.enterFromLibrary({
+        returnScreen: "library",
+        audioState: audioEngine.getState(),
+      });
+    }
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+  }
+
+  return {
+    audioEngine,
+    nowPlayingController,
+    catalog,
+    callbackLogs,
+  };
+}
+
+describe("audio_engine.js playback modes, queue selection, and metadata preservation", () => {
+  test("REPEAT_MODES, cycleRepeatMode, setRepeatMode, toggleShuffle, and setShuffleEnabled handle valid and invalid inputs", () => {
+    assert.deepEqual(REPEAT_MODES, ["off", "all", "one"]);
+
+    const audioEngine = createAudioEngine();
+    assert.equal(audioEngine.getState().shuffleEnabled, false);
+    assert.equal(audioEngine.getState().repeatMode, "off");
+
+    audioEngine.cycleRepeatMode();
+    assert.equal(audioEngine.getState().repeatMode, "all");
+    audioEngine.cycleRepeatMode();
+    assert.equal(audioEngine.getState().repeatMode, "one");
+    audioEngine.cycleRepeatMode();
+    assert.equal(audioEngine.getState().repeatMode, "off");
+
+    audioEngine.setRepeatMode("all");
+    assert.equal(audioEngine.getState().repeatMode, "all");
+
+    for (const invalidMode of ["unknown", "", null, undefined, 42, {}]) {
+      audioEngine.setRepeatMode(invalidMode);
+      assert.equal(audioEngine.getState().repeatMode, "all");
+    }
+
+    audioEngine.toggleShuffle();
+    assert.equal(audioEngine.getState().shuffleEnabled, true);
+    audioEngine.setShuffleEnabled(false);
+    assert.equal(audioEngine.getState().shuffleEnabled, false);
+    audioEngine.setShuffleEnabled("not-a-bool");
+    assert.equal(audioEngine.getState().shuffleEnabled, false);
+  });
+
+  test("selectQueueIndex jumps cleanly, resets elapsedSeconds, clamps bounds, and guards empty queues", () => {
+    const emptyEngine = createAudioEngine();
+    emptyEngine.selectQueueIndex(0);
+    emptyEngine.selectQueueIndex(-2);
+    emptyEngine.selectQueueIndex(9);
+    emptyEngine.selectQueueIndex(Number.NaN);
+    assert.equal(emptyEngine.getState().playbackState, "idle");
+    assert.equal(emptyEngine.getState().activeTrack, null);
+
+    const stubAudio = createMockAudioStub();
+    const audioEngine = createAudioEngine({ createAudioElement: () => stubAudio });
+    const catalog = buildNowPlayingTestCatalog();
+    audioEngine.playTrackFromSource({ trackId: "t1", queueSource: "all-songs" }, catalog);
+
+    audioEngine.seekTo(48);
+    assert.equal(audioEngine.getState().elapsedSeconds, 48);
+
+    audioEngine.selectQueueIndex(2);
+    const jumpedState = audioEngine.getState();
+    assert.equal(jumpedState.queueIndex, 2);
+    assert.equal(jumpedState.activeTrack.id, "t3");
+    assert.equal(jumpedState.activeAlbum.id, "a2");
+    assert.equal(jumpedState.elapsedSeconds, 0);
+    assert.equal(stubAudio.currentTime, 0);
+    assert.equal(stubAudio.src, "/api/audio/t3");
+
+    audioEngine.selectQueueIndex(-10);
+    assert.equal(audioEngine.getState().queueIndex, 0);
+    assert.equal(audioEngine.getState().activeTrack.id, "t1");
+
+    audioEngine.selectQueueIndex(999);
+    assert.equal(audioEngine.getState().queueIndex, 4);
+    assert.equal(audioEngine.getState().activeTrack.id, "t5");
+
+    audioEngine.selectQueueIndex(Number.NaN);
+    assert.equal(audioEngine.getState().queueIndex, 4);
+  });
+
+  test("updateTrackFavorite updates activeTrack and queueTracks without throwing on invalid ids", () => {
+    const audioEngine = createAudioEngine();
+    const catalog = buildNowPlayingTestCatalog();
+    audioEngine.playTrackFromSource({ trackId: "t1", queueSource: "all-songs" }, catalog);
+
+    assert.equal(audioEngine.getState().activeTrack.isFavorite, false);
+    audioEngine.updateTrackFavorite("t1", true);
+    assert.equal(audioEngine.getState().activeTrack.isFavorite, true);
+    assert.equal(
+      audioEngine.getState().queueTracks.find((trackEntry) => trackEntry.id === "t1").isFavorite,
+      true,
+    );
+
+    audioEngine.updateTrackFavorite("t2", false);
+    assert.equal(
+      audioEngine.getState().queueTracks.find((trackEntry) => trackEntry.id === "t2").isFavorite,
+      false,
+    );
+    assert.equal(audioEngine.getState().activeTrack.isFavorite, true);
+
+    audioEngine.updateTrackFavorite("nonexistent", true);
+    audioEngine.updateTrackFavorite(null, true);
+    assert.equal(audioEngine.getState().activeTrack.id, "t1");
+  });
+
+  test("playTrackFromSource preserves queue context fields and track technical metadata", () => {
+    const audioEngine = createAudioEngine();
+    const catalog = buildNowPlayingTestCatalog();
+
+    audioEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, catalog);
+    const albumState = audioEngine.getState();
+    assert.equal(albumState.queueAlbumId, "a1");
+    assert.equal(albumState.queuePlaylistId, null);
+    assert.equal(albumState.queueGenreTitle, null);
+    assert.equal(albumState.activeTrack.format, "FLAC 24-BIT");
+    assert.equal(albumState.activeTrack.sampleRate, "96.0 KHZ");
+    assert.equal(albumState.activeTrack.bitrate, "2,822 KBPS");
+    assert.equal(albumState.activeTrack.fileSize, "42.3 MB");
+    assert.equal(albumState.activeTrack.year, 2024);
+    assert.equal(albumState.activeTrack.trackNumber, "01");
+    assert.equal(albumState.activeTrack.isFavorite, false);
+
+    audioEngine.playTrackFromSource(
+      { trackId: "t2", queueSource: "playlist", playlistId: "p1" },
+      catalog,
+    );
+    const playlistState = audioEngine.getState();
+    assert.equal(playlistState.queuePlaylistId, "p1");
+    assert.equal(playlistState.activeTrack.isFavorite, true);
+
+    audioEngine.playTrackFromSource(
+      {
+        trackId: "t3",
+        queueSource: "genre",
+        genreTitle: "Jazz",
+        genreAlbumIds: ["a2"],
+      },
+      catalog,
+    );
+    const genreState = audioEngine.getState();
+    assert.equal(genreState.queueGenreTitle, "Jazz");
+    assert.deepEqual(genreState.queueGenreAlbumIds, ["a2"]);
+  });
+
+  test("end-of-track handling follows shuffleEnabled and repeatMode across both DOM ended events and headless step()", () => {
+    const catalog = buildNowPlayingTestCatalog();
+
+    // 1. DOM ended event paths across repeat-one, repeat-off, repeat-all, and shuffle
+    const stubAudio = createMockAudioStub();
+    const domEngine = createAudioEngine({
+      createAudioElement: () => stubAudio,
+      random: () => 0.25,
+    });
+    domEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, catalog);
+
+    domEngine.setRepeatMode("one");
+    domEngine.seekTo(120);
+    stubAudio.emit("ended");
+    assert.equal(domEngine.getState().queueIndex, 0);
+    assert.equal(domEngine.getState().activeTrack.id, "t1");
+    assert.equal(domEngine.getState().elapsedSeconds, 0);
+    assert.equal(domEngine.getState().isPlaying, true);
+
+    domEngine.setRepeatMode("off");
+    stubAudio.emit("ended");
+    assert.equal(domEngine.getState().queueIndex, 1);
+    assert.equal(domEngine.getState().activeTrack.id, "t2");
+    assert.equal(domEngine.getState().isPlaying, true);
+
+    // Repeat Off at end of album resets to track 0 at 0:00 paused
+    stubAudio.emit("ended");
+    assert.equal(domEngine.getState().isPlaying, false);
+    assert.equal(domEngine.getState().playbackState, "paused");
+    assert.equal(domEngine.getState().queueIndex, 0);
+    assert.equal(domEngine.getState().activeTrack.id, "t1");
+    assert.equal(domEngine.getState().elapsedSeconds, 0);
+    assert.equal(domEngine.getState().lastEvent.type, "context-ended");
+
+    domEngine.play();
+    domEngine.skipTrack(1);
+    domEngine.setRepeatMode("all");
+    stubAudio.emit("ended");
+    assert.equal(domEngine.getState().queueIndex, 0);
+    assert.equal(domEngine.getState().activeTrack.id, "t1");
+    assert.equal(domEngine.getState().elapsedSeconds, 0);
+    assert.equal(domEngine.getState().isPlaying, true);
+
+    // Shuffle + Repeat Off plays deck anchored on t1, visits every track once, then ends cleanly
+    domEngine.setRepeatMode("off");
+    domEngine.playTrackFromSource({ trackId: "t1", queueSource: "all-songs" }, catalog);
+    domEngine.setShuffleEnabled(true);
+    const domDeck = domEngine.getState().queueTracks.map((trackEntry) => trackEntry.id);
+    assert.equal(domDeck[0], "t1");
+    assert.equal(domDeck.length, catalog.allTracks.length);
+    for (let stepIndex = 1; stepIndex < domDeck.length; stepIndex += 1) {
+      stubAudio.emit("ended");
+      assert.equal(domEngine.getState().activeTrack.id, domDeck[stepIndex]);
+      assert.equal(domEngine.getState().isPlaying, true);
+    }
+    stubAudio.emit("ended");
+    assert.equal(domEngine.getState().isPlaying, false);
+    assert.equal(domEngine.getState().queueIndex, 0);
+    assert.equal(domEngine.getState().activeTrack.id, domDeck[0]);
+
+    // 2. Headless step() reaching durationSeconds across repeat/shuffle modes
+    const headlessEngine = createAudioEngine({ random: () => 0.4 });
+    headlessEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, catalog);
+
+    headlessEngine.setRepeatMode("one");
+    headlessEngine.step(180);
+    assert.equal(headlessEngine.getState().queueIndex, 0);
+    assert.equal(headlessEngine.getState().elapsedSeconds, 0);
+    assert.equal(headlessEngine.getState().isPlaying, true);
+
+    headlessEngine.setRepeatMode("off");
+    headlessEngine.step(180);
+    assert.equal(headlessEngine.getState().queueIndex, 1);
+    assert.equal(headlessEngine.getState().activeTrack.id, "t2");
+    assert.equal(headlessEngine.getState().isPlaying, true);
+
+    headlessEngine.step(200);
+    assert.equal(headlessEngine.getState().isPlaying, false);
+    assert.equal(headlessEngine.getState().playbackState, "paused");
+    assert.equal(headlessEngine.getState().queueIndex, 0);
+    assert.equal(headlessEngine.getState().elapsedSeconds, 0);
+
+    headlessEngine.play();
+    headlessEngine.skipTrack(1);
+    headlessEngine.setRepeatMode("all");
+    headlessEngine.step(200);
+    assert.equal(headlessEngine.getState().queueIndex, 0);
+    assert.equal(headlessEngine.getState().elapsedSeconds, 0);
+    assert.equal(headlessEngine.getState().isPlaying, true);
+
+    // Shuffle + Repeat All wraps across full deck and reshuffles avoiding repeating finished track first
+    headlessEngine.playTrackFromSource({ trackId: "t1", queueSource: "all-songs" }, catalog);
+    headlessEngine.setShuffleEnabled(true);
+    let previousHeadlessId = headlessEngine.getState().activeTrack.id;
+    for (let roundIndex = 0; roundIndex < SHUFFLE_TRIAL_ROUNDS; roundIndex += 1) {
+      const currentDuration = headlessEngine.getState().durationSeconds;
+      headlessEngine.step(currentDuration);
+      const nextHeadlessState = headlessEngine.getState();
+      assert.equal(nextHeadlessState.isPlaying, true);
+      assert.equal(nextHeadlessState.elapsedSeconds, 0);
+      assert.notEqual(nextHeadlessState.activeTrack.id, previousHeadlessId);
+      previousHeadlessId = nextHeadlessState.activeTrack.id;
+    }
+
+    // Single-track queue under shuffle + repeat all keeps playing queueIndex 0
+    const singleTrackCatalog = buildNowPlayingTestCatalog({
+      albums: [
+        {
+          id: "single-album",
+          title: "Solo",
+          artist: "Solo Artist",
+          genre: "Ambient",
+          year: 2024,
+          tracks: [catalog.allTracks[0]],
+        },
+      ],
+      allTracks: [catalog.allTracks[0]],
+    });
+    headlessEngine.playTrackFromSource(
+      { trackId: "t1", queueSource: "album", albumId: "single-album" },
+      singleTrackCatalog,
+    );
+    headlessEngine.setShuffleEnabled(true);
+    headlessEngine.setRepeatMode("all");
+    headlessEngine.step(180);
+    assert.equal(headlessEngine.getState().queueIndex, 0);
+    assert.equal(headlessEngine.getState().isPlaying, true);
+  });
+
+  test("defers seekTo until loadedmetadata when readyState is 0 and locks clock to attached audio element", () => {
+    const catalog = buildNowPlayingTestCatalog();
+    const stubAudio = createMockAudioStub();
+    stubAudio.readyState = 0;
+
+    const audioEngine = createAudioEngine({ createAudioElement: () => stubAudio });
+    audioEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, catalog);
+
+    // Attached element at currentTime === 0 must not drift synthetically during buffering or pause
+    audioEngine.step(0.5);
+    assert.equal(audioEngine.getState().elapsedSeconds, 0);
+
+    stubAudio.paused = true;
+    audioEngine.step(0.5);
+    assert.equal(audioEngine.getState().elapsedSeconds, 0);
+
+    // Seeking while readyState === 0 defers audioElement.currentTime until loadedmetadata
+    audioEngine.seekTo(42);
+    assert.equal(audioEngine.getState().elapsedSeconds, 42);
+    assert.equal(stubAudio.currentTime, 0);
+
+    audioEngine.step(0.5);
+    assert.equal(audioEngine.getState().elapsedSeconds, 42);
+    assert.equal(stubAudio.currentTime, 0);
+
+    stubAudio.readyState = 1;
+    stubAudio.duration = 180;
+    stubAudio.emit("loadedmetadata");
+    assert.equal(stubAudio.currentTime, 42);
+    assert.equal(audioEngine.getState().elapsedSeconds, 42);
+
+    // Deferred seek also clamps against updated loadedmetadata duration and resets on track switch
+    stubAudio.readyState = 0;
+    stubAudio.currentTime = 0;
+    audioEngine.seekTo(160);
+    assert.equal(audioEngine.getState().elapsedSeconds, 160);
+    assert.equal(stubAudio.currentTime, 0);
+
+    stubAudio.readyState = 1;
+    stubAudio.duration = 120;
+    stubAudio.emit("loadedmetadata");
+    assert.equal(stubAudio.currentTime, 120);
+    assert.equal(audioEngine.getState().elapsedSeconds, 120);
+
+    // Pending seek is cleared when loading another track via skipTrack or playTrackFromSource
+    stubAudio.readyState = 0;
+    audioEngine.seekTo(55);
+    audioEngine.skipTrack(1);
+    stubAudio.readyState = 1;
+    stubAudio.duration = 200;
+    stubAudio.emit("loadedmetadata");
+    assert.equal(stubAudio.currentTime, 0);
+    assert.equal(audioEngine.getState().elapsedSeconds, 0);
+
+    // Live playback syncs elapsedSeconds from attached element once currentTime > 0
+    stubAudio.paused = false;
+    stubAudio.currentTime = 17.5;
+    audioEngine.step(0.5);
+    assert.equal(audioEngine.getState().elapsedSeconds, 17.5);
+  });
+});
+
+describe("now_playing_controller.js constants and pure helpers", () => {
+  test("exports exact NOW_PLAYING_CONSTANTS, play modes, quick buttons, and lyrics modes", () => {
+    assert.equal(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS, 0.62);
+    assert.equal(NOW_PLAYING_CONSTANTS.SKIP_DURATION_SECONDS, 0.42);
+    assert.equal(NOW_PLAYING_CONSTANTS.QUICK_ACTIONS_TIMEOUT_SECONDS, 4.6);
+    assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_HOLD_SECONDS, 1.45);
+    assert.equal(NOW_PLAYING_CONSTANTS.SPINDLE_BASE_RADIUS_PX, 13.5);
+    assert.equal(NOW_PLAYING_CONSTANTS.SPINDLE_SEEK_RADIUS_PX, 62);
+    assert.equal(NOW_PLAYING_CONSTANTS.SEEK_HOLD_RADIUS_PX, 90);
+    assert.equal(NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS, 0.42);
+    assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_LIMIT_RATIO, 0.85);
+    assert.equal(NOW_PLAYING_CONSTANTS.VOLUME_FULL_ARC_RADIANS, Math.PI);
+    assert.equal(NOW_PLAYING_CONSTANTS.DOUBLE_TAP_WINDOW_SECONDS, 0.25);
+    assert.equal(NOW_PLAYING_CONSTANTS.QUEUE_ROW_PITCH_PX, 58);
+    assert.equal(NOW_PLAYING_CONSTANTS.QUEUE_ROW_HEIGHT_PX, 48);
+    assert.equal(NOW_PLAYING_CONSTANTS.QUEUE_TOP_Y, 136);
+    assert.equal(NOW_PLAYING_CONSTANTS.LYRICS_TRANSITION_DURATION_SECONDS, 0.44);
+    assert.equal(NOW_PLAYING_CONSTANTS.SKIP_DRAG_COMMIT_PX, 56);
+    assert.equal(NOW_PLAYING_CONSTANTS.QUEUE_PULL_COMMIT_DELTA_Y, -38);
+    assert.equal(NOW_PLAYING_CONSTANTS.BACK_SWIPE_DISTANCE_PX, 96);
+    assert.equal(NOW_PLAYING_CONSTANTS.BACK_SWIPE_COMMIT_THRESHOLD, 0.45);
+    assert.equal(NOW_PLAYING_CONSTANTS.TAP_DRIFT_LIMIT_PX, 10);
+
+    assert.deepEqual(
+      NOW_PLAYING_REPEAT_MODES.map((modeEntry) => modeEntry.id),
+      ["off", "all", "one"],
+    );
+    for (const modeEntry of NOW_PLAYING_REPEAT_MODES) {
+      assert.equal(typeof modeEntry.label, "string");
+      assert.ok(modeEntry.label.length > 0);
+    }
+
+    assert.deepEqual(
+      NOW_PLAYING_QUICK_BUTTONS.map((buttonEntry) => ({
+        id: buttonEntry.id,
+        centerX: buttonEntry.centerX,
+        centerY: buttonEntry.centerY,
+      })),
+      [
+        { id: "favorite", centerX: QUICK_FAVORITE_X, centerY: QUICK_FAVORITE_Y },
+        { id: "shuffle", centerX: QUICK_SHUFFLE_X, centerY: QUICK_SHUFFLE_Y },
+        { id: "repeat", centerX: QUICK_REPEAT_X, centerY: QUICK_REPEAT_Y },
+        { id: "playlist", centerX: QUICK_PLAYLIST_X, centerY: QUICK_PLAYLIST_Y },
+        { id: "lyrics", centerX: QUICK_LYRICS_X, centerY: QUICK_LYRICS_Y },
+        { id: "info", centerX: QUICK_DETAILS_X, centerY: QUICK_DETAILS_Y },
+      ],
+    );
+    for (const buttonEntry of NOW_PLAYING_QUICK_BUTTONS) {
+      assert.equal(typeof buttonEntry.label, "string");
+      assert.ok(buttonEntry.label.length > 0);
+      assert.ok(Number.isFinite(buttonEntry.radius) && buttonEntry.radius > 0);
+    }
+
+    assert.deepEqual(NOW_PLAYING_LYRICS_MODES, ["auto", "timed", "untimed", "none"]);
+  });
+
+  test("computeNowPlayingQueueRowLayout and hitTestNowPlayingQueueRow calculate finite geometry and row hits", () => {
+    const firstRowLayout = computeNowPlayingQueueRowLayout(0, 0);
+    const secondRowLayout = computeNowPlayingQueueRowLayout(1, 0);
+    const distantRowLayout = computeNowPlayingQueueRowLayout(6, 0);
+
+    assert.equal(firstRowLayout.centerX, DISPLAY_CENTER_PX);
+    assert.equal(firstRowLayout.centerY, NOW_PLAYING_CONSTANTS.QUEUE_TOP_Y);
+    assert.equal(firstRowLayout.height, NOW_PLAYING_CONSTANTS.QUEUE_ROW_HEIGHT_PX);
+    assert.ok(firstRowLayout.width > 0);
+    assert.equal(firstRowLayout.alpha, 1);
+
+    assert.equal(
+      secondRowLayout.centerY - firstRowLayout.centerY,
+      NOW_PLAYING_CONSTANTS.QUEUE_ROW_PITCH_PX,
+    );
+
+    for (const rowLayout of [firstRowLayout, secondRowLayout, distantRowLayout]) {
+      assert.ok(Number.isFinite(rowLayout.centerX));
+      assert.ok(Number.isFinite(rowLayout.centerY));
+      assert.ok(Number.isFinite(rowLayout.width) && rowLayout.width > 0);
+      assert.ok(Number.isFinite(rowLayout.height) && rowLayout.height > 0);
+      assert.ok(Number.isFinite(rowLayout.alpha) && rowLayout.alpha >= 0 && rowLayout.alpha <= 1);
+    }
+
+    const sampleTracks = buildNowPlayingTestCatalog().allTracks;
+    assert.equal(
+      hitTestNowPlayingQueueRow(firstRowLayout.centerX, firstRowLayout.centerY, 0, sampleTracks),
+      0,
+    );
+    assert.equal(
+      hitTestNowPlayingQueueRow(secondRowLayout.centerX, secondRowLayout.centerY, 0, sampleTracks),
+      1,
+    );
+    assert.equal(hitTestNowPlayingQueueRow(DISPLAY_CENTER_PX, 24, 0, sampleTracks), null);
+    assert.equal(hitTestNowPlayingQueueRow(12, DISPLAY_CENTER_PX, 0, sampleTracks), null);
+    assert.equal(hitTestNowPlayingQueueRow(firstRowLayout.centerX, firstRowLayout.centerY, 0, []), null);
+    assert.equal(hitTestNowPlayingQueueRow(Number.NaN, firstRowLayout.centerY, 0, sampleTracks), null);
+  });
+
+  test("resolveTrackLyricsSource and resolveActiveLyricsFrame handle timed, untimed, and missing lyrics", () => {
+    const catalog = buildNowPlayingTestCatalog();
+    const timedTrack = catalog.allTracks[0];
+    const timedEntry = catalog.lyricsCatalog.t1;
+    const untimedTrack = catalog.allTracks[1];
+    const untimedEntry = catalog.lyricsCatalog.t2;
+
+    assert.equal(resolveTrackLyricsSource(timedTrack, timedEntry, "auto").kind, "timed");
+    assert.equal(resolveTrackLyricsSource(timedTrack, timedEntry, "untimed").kind, "untimed");
+    assert.equal(resolveTrackLyricsSource(timedTrack, timedEntry, "none").kind, "none");
+    assert.equal(resolveTrackLyricsSource(timedTrack, null, "auto").kind, "none");
+
+    const introFrame = resolveActiveLyricsFrame(timedTrack, timedEntry, 2.0, "auto");
+    assert.equal(introFrame.kind, "timed");
+    assert.equal(introFrame.isIntroCue, true);
+    assert.equal(introFrame.upcomingText, "First light across the vinyl");
+
+    const cueZeroBoundaryFrame = resolveActiveLyricsFrame(timedTrack, timedEntry, 5.0, "auto");
+    assert.equal(cueZeroBoundaryFrame.kind, "timed");
+    assert.equal(cueZeroBoundaryFrame.isIntroCue, false);
+    assert.equal(cueZeroBoundaryFrame.currentText, "First light across the vinyl");
+    assert.equal(cueZeroBoundaryFrame.upcomingText, "Spinning quietly in zero gravity");
+
+    const cueOneBoundaryFrame = resolveActiveLyricsFrame(timedTrack, timedEntry, 12.5, "auto");
+    assert.equal(cueOneBoundaryFrame.currentText, "Spinning quietly in zero gravity");
+    assert.equal(cueOneBoundaryFrame.upcomingText, "Until the final groove fades");
+
+    const finalCueFrame = resolveActiveLyricsFrame(timedTrack, timedEntry, 21.0, "auto");
+    assert.equal(finalCueFrame.currentText, "Until the final groove fades");
+    assert.equal(finalCueFrame.upcomingText, "");
+
+    const untimedStartFrame = resolveActiveLyricsFrame(untimedTrack, untimedEntry, 0, "auto");
+    assert.equal(untimedStartFrame.kind, "untimed");
+    assert.equal(untimedStartFrame.currentText, "Evening shadows settle softly");
+
+    const untimedMidFrame = resolveActiveLyricsFrame(untimedTrack, untimedEntry, 110, "auto");
+    assert.equal(untimedMidFrame.kind, "untimed");
+    assert.notEqual(untimedMidFrame.currentText, untimedStartFrame.currentText);
+
+    const untimedEndFrame = resolveActiveLyricsFrame(untimedTrack, untimedEntry, 195, "auto");
+    assert.equal(untimedEndFrame.currentText, "Night unfolds across the turntable");
+    assert.equal(untimedEndFrame.upcomingText, "");
+
+    const missingFrame = resolveActiveLyricsFrame(timedTrack, null, 10, "auto");
+    assert.equal(missingFrame.kind, "none");
+    assert.equal(missingFrame.modeLabel, "NO LYRICS");
+    assert.equal(missingFrame.note, "NO EMBEDDED OR .LRC FILE");
+
+    const forcedNoneFrame = resolveActiveLyricsFrame(timedTrack, timedEntry, 10, "none");
+    assert.equal(forcedNoneFrame.kind, "none");
+    assert.equal(forcedNoneFrame.modeLabel, "NO LYRICS");
+    assert.equal(forcedNoneFrame.note, "NO EMBEDDED OR .LRC FILE");
+  });
+
+  test("enrichTrackDetails preserves tech specs, derives trackIndexLabel, and handles missing inputs", () => {
+    const catalog = buildNowPlayingTestCatalog();
+    const trackEntry = catalog.allTracks[0];
+    const albumEntry = catalog.albums[0];
+
+    const enrichedDetails = enrichTrackDetails(trackEntry, albumEntry, 8, 2);
+    assert.equal(enrichedDetails.format, "FLAC 24-BIT");
+    assert.equal(enrichedDetails.sampleRate, "96.0 KHZ");
+    assert.equal(enrichedDetails.bitrate, "2,822 KBPS");
+    assert.equal(enrichedDetails.fileSize, "42.3 MB");
+    assert.equal(typeof enrichedDetails.trackIndexLabel, "string");
+    assert.ok(enrichedDetails.trackIndexLabel.includes("2"));
+    assert.ok(enrichedDetails.trackIndexLabel.includes("8"));
+
+    const fallbackDetails = enrichTrackDetails(null, null, 0, 0);
+    assert.equal(typeof fallbackDetails.format, "string");
+    assert.equal(typeof fallbackDetails.sampleRate, "string");
+    assert.equal(typeof fallbackDetails.bitrate, "string");
+    assert.equal(typeof fallbackDetails.fileSize, "string");
+    assert.equal(typeof fallbackDetails.trackIndexLabel, "string");
+  });
+});
+
+describe("createNowPlayingController entry, operating modes, and tap gestures", () => {
+  test("starts idle, invokes onBrowseLibrary on CTA tap and activateFocused, and enters playing with bloom", () => {
+    const idleHarness = createNowPlayingTestHarness({ sourceSpec: null });
+    const defaultSnapshot = idleHarness.nowPlayingController.getRenderSnapshot();
+    assert.equal(defaultSnapshot.operatingMode, "idle");
+    assert.equal(defaultSnapshot.quickActionsOpen, false);
+    assert.equal(defaultSnapshot.queueSheetOpen, false);
+    assert.equal(defaultSnapshot.detailsSheetOpen, false);
+    assert.equal(defaultSnapshot.playlistPickerOpen, false);
+    assert.equal(defaultSnapshot.lyricsOpen, false);
+
+    tapPoint(idleHarness.nowPlayingController, IDLE_BROWSE_CTA_X, IDLE_BROWSE_CTA_Y);
+    assert.equal(idleHarness.callbackLogs.browseLibraryCalls, 1);
+
+    idleHarness.nowPlayingController.activateFocused();
+    assert.equal(idleHarness.callbackLogs.browseLibraryCalls, 2);
+
+    idleHarness.nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: idleHarness.audioEngine.getState(),
+    });
+    assert.equal(idleHarness.nowPlayingController.getRenderSnapshot().operatingMode, "idle");
+    assert.equal(idleHarness.nowPlayingController.getRenderSnapshot().returnScreen, "home");
+
+    idleHarness.audioEngine.playTrackFromSource(
+      { trackId: "t1", queueSource: "album", albumId: "a1" },
+      idleHarness.catalog,
+    );
+    idleHarness.nowPlayingController.enterFromLibrary({
+      returnScreen: "library",
+      audioState: idleHarness.audioEngine.getState(),
+    });
+    const entryStartSnapshot = idleHarness.nowPlayingController.getRenderSnapshot();
+    assert.equal(entryStartSnapshot.operatingMode, "playing");
+    assert.equal(entryStartSnapshot.returnScreen, "library");
+    assert.equal(entryStartSnapshot.openTransitionProgress, 0);
+    assert.equal(entryStartSnapshot.quickActionsOpen, false);
+    assert.equal(entryStartSnapshot.queueSheetOpen, false);
+    assert.equal(entryStartSnapshot.detailsSheetOpen, false);
+    assert.equal(entryStartSnapshot.playlistPickerOpen, false);
+    assert.equal(entryStartSnapshot.lyricsOpen, false);
+
+    const halfBloom = NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2;
+    idleHarness.nowPlayingController.step(halfBloom);
+    const midBloomSnapshot = idleHarness.nowPlayingController.getRenderSnapshot();
+    assert.ok(midBloomSnapshot.openTransitionProgress > 0 && midBloomSnapshot.openTransitionProgress < 1);
+
+    idleHarness.nowPlayingController.step(halfBloom);
+    assert.equal(idleHarness.nowPlayingController.getRenderSnapshot().openTransitionProgress, 1);
+  });
+
+  test("distinguishes double-tap play/pause from single-tap Quick Actions with 4.6s auto-dismiss", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness();
+
+    tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
+    nowPlayingController.step(0.10);
+    tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
+
+    const pausedSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(callbackLogs.togglePlayPauseCalls, 1);
+    assert.equal(pausedSnapshot.playPausePulseAlpha, 1);
+    assert.equal(pausedSnapshot.toastText, "");
+    assert.equal(pausedSnapshot.toastAlpha, 0);
+    assert.equal(pausedSnapshot.quickActionsOpen, false);
+
+    nowPlayingController.step(0.30);
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, false);
+
+    tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
+    nowPlayingController.step(0.10);
+    tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
+    const resumedSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(callbackLogs.togglePlayPauseCalls, 2);
+    assert.equal(resumedSnapshot.playPausePulseAlpha, 1);
+    assert.equal(resumedSnapshot.toastText, "");
+    assert.equal(resumedSnapshot.toastAlpha, 0);
+    assert.equal(resumedSnapshot.quickActionsOpen, false);
+
+    tapPoint(nowPlayingController, VINYL_CENTER_TAP_X, VINYL_CENTER_TAP_Y);
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.DOUBLE_TAP_WINDOW_SECONDS + 0.03);
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, true);
+
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.QUICK_ACTIONS_TIMEOUT_SECONDS - 0.5);
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, true);
+
+    nowPlayingController.step(0.6);
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, false);
+  });
+});
+
+describe("createNowPlayingController seek, volume arc, and wheel controls", () => {
+  test("long-press activates seek mode, scrubs angularly and near spindle clamped to duration, and collapses on release", () => {
+    const { audioEngine, nowPlayingController, callbackLogs } = createNowPlayingTestHarness();
+    audioEngine.seekTo(20);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+
+    nowPlayingController.handlePointerDown(SEEK_HOLD_POINT_X, SEEK_HOLD_POINT_Y);
+    nowPlayingController.step(0.20);
+    const chargingSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(chargingSnapshot.seekHoldProgress > 0 && chargingSnapshot.seekHoldProgress < 1);
+    assert.equal(chargingSnapshot.isSeeking, false);
+
+    nowPlayingController.step(0.25);
+    const activeSeekSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(activeSeekSnapshot.isSeeking, true);
+    assert.equal(activeSeekSnapshot.pointerMode, "seek");
+
+    nowPlayingController.step(0.15);
+    assert.ok(nowPlayingController.getRenderSnapshot().seekExpandProgress > 0);
+
+    nowPlayingController.handlePointerMove(SEEK_ARC_THREE_OCLOCK_X, SEEK_ARC_THREE_OCLOCK_Y);
+    nowPlayingController.handlePointerMove(SEEK_ARC_SIX_OCLOCK_X, SEEK_ARC_SIX_OCLOCK_Y);
+    const arcScrubbedSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(callbackLogs.seekTargets.length > 0);
+    assert.ok(arcScrubbedSnapshot.trackElapsedSeconds > 20);
+    assert.ok(arcScrubbedSnapshot.trackElapsedSeconds <= 180);
+
+    nowPlayingController.handlePointerUp(SEEK_ARC_SIX_OCLOCK_X, SEEK_ARC_SIX_OCLOCK_Y);
+    assert.equal(nowPlayingController.getRenderSnapshot().isSeeking, false);
+
+    advanceSteps(nowPlayingController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    assert.equal(nowPlayingController.getRenderSnapshot().seekExpandProgress, 0);
+
+    // Near-spindle horizontal scrub clamped within [0, durationSeconds]
+    const beforeSpindleElapsed = nowPlayingController.getRenderSnapshot().trackElapsedSeconds;
+    nowPlayingController.handlePointerDown(SEEK_SPINDLE_START_X, SEEK_SPINDLE_Y);
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS + 0.03);
+    assert.equal(nowPlayingController.getRenderSnapshot().isSeeking, true);
+
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, SEEK_SPINDLE_Y);
+    nowPlayingController.handlePointerMove(SEEK_SPINDLE_END_X, SEEK_SPINDLE_Y);
+    const spindleScrubbedSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(spindleScrubbedSnapshot.trackElapsedSeconds > beforeSpindleElapsed);
+    assert.ok(
+      spindleScrubbedSnapshot.trackElapsedSeconds >= 0 &&
+        spindleScrubbedSnapshot.trackElapsedSeconds <= 180,
+    );
+
+    nowPlayingController.handlePointerMove(-400, SEEK_SPINDLE_Y);
+    assert.ok(nowPlayingController.getRenderSnapshot().trackElapsedSeconds >= 0);
+
+    nowPlayingController.handlePointerMove(900, SEEK_SPINDLE_Y);
+    assert.ok(nowPlayingController.getRenderSnapshot().trackElapsedSeconds <= 180);
+
+    nowPlayingController.handlePointerUp(900, SEEK_SPINDLE_Y);
+    assert.equal(nowPlayingController.getRenderSnapshot().isSeeking, false);
+  });
+
+  test("right-edge bezel arc adjusts volume clamped to [0, 1], holds HUD for 1.45s, and wheel adapts to active layer", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness();
+    const initialVolume = nowPlayingController.getRenderSnapshot().volumeLevel;
+
+    nowPlayingController.handlePointerDown(VOLUME_BEZEL_X, VOLUME_BEZEL_START_Y);
+    nowPlayingController.handlePointerMove(VOLUME_BEZEL_X, VOLUME_BEZEL_UP_END_Y);
+    const raisedSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(raisedSnapshot.volumeLevel > initialVolume);
+    assert.ok(raisedSnapshot.volumeLevel <= 1);
+    assert.equal(raisedSnapshot.volumeHudAlpha, 1);
+    assert.ok(callbackLogs.volumeChanges.length >= 1);
+
+    nowPlayingController.handlePointerMove(VOLUME_BEZEL_X, VOLUME_BEZEL_MAX_UP_Y);
+    assert.ok(nowPlayingController.getRenderSnapshot().volumeLevel <= 1);
+
+    nowPlayingController.handlePointerMove(VOLUME_BEZEL_X, VOLUME_BEZEL_MAX_DOWN_Y);
+    assert.ok(nowPlayingController.getRenderSnapshot().volumeLevel >= 0);
+
+    nowPlayingController.handlePointerMove(VOLUME_BEZEL_X, VOLUME_BEZEL_UP_END_Y);
+    nowPlayingController.handlePointerUp(VOLUME_BEZEL_X, VOLUME_BEZEL_UP_END_Y);
+
+    nowPlayingController.step(1.0);
+    assert.ok(nowPlayingController.getRenderSnapshot().volumeHudAlpha > 0);
+
+    nowPlayingController.step(1.2);
+    assert.equal(nowPlayingController.getRenderSnapshot().volumeHudAlpha, 0);
+
+    const beforeWheelVolume = nowPlayingController.getRenderSnapshot().volumeLevel;
+    nowPlayingController.handleWheel(-120);
+    const afterWheelUpVolume = nowPlayingController.getRenderSnapshot().volumeLevel;
+    assert.ok(afterWheelUpVolume > beforeWheelVolume || Math.abs(beforeWheelVolume - 1) < FLOAT_TOLERANCE);
+
+    nowPlayingController.handleWheel(120);
+    assert.ok(nowPlayingController.getRenderSnapshot().volumeLevel < afterWheelUpVolume);
+
+    // Wheel scrolls Queue Sheet instead of altering volume when Queue Sheet is open
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, QUEUE_PULL_START_Y);
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, true);
+
+    const queueVolumeBeforeWheel = nowPlayingController.getRenderSnapshot().volumeLevel;
+    const queueScrollBeforeWheel = nowPlayingController.getRenderSnapshot().queueScrollPosition;
+    nowPlayingController.handleWheel(120);
+    advanceSteps(nowPlayingController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    const queueAfterWheelSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(queueAfterWheelSnapshot.volumeLevel, queueVolumeBeforeWheel);
+    assert.ok(queueAfterWheelSnapshot.queueScrollPosition > queueScrollBeforeWheel);
+  });
+
+  test("180-degree right-bezel arc maps full semicircle across [0, 1] from right-bezel start zone without dead-zone", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness();
+    audioEngine.setVolume(0);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+
+    const outerRightThreeOClock = {
+      pointX: DISPLAY_CENTER_PX + VOLUME_OUTER_START_RADIUS_PX,
+      pointY: DISPLAY_CENTER_PX,
+    };
+    const sixOClock = { pointX: 180, pointY: 330 };
+    const lowerRightDiagonal = { pointX: 286, pointY: 286 };
+    const threeOClock = { pointX: 330, pointY: 180 };
+    const upperRightDiagonal = { pointX: 286, pointY: 74 };
+    const twelveOClock = { pointX: 180, pointY: 30 };
+
+    // Starting at (180 + 160, 180) (0 deg, r = 160 >= 135) and tracing 180 deg (Math.PI rad) sweeps volume 0 -> 1
+    nowPlayingController.handlePointerDown(
+      outerRightThreeOClock.pointX,
+      outerRightThreeOClock.pointY,
+    );
+    traceCircularBezelArc(
+      nowPlayingController,
+      VOLUME_OUTER_START_RADIUS_PX,
+      0,
+      -Math.PI,
+      RIGHT_BEZEL_SWEEP_STEPS * 2,
+    );
+    const fullArcUpSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(fullArcUpSnapshot.pointerMode, "volume");
+    assert.ok(Math.abs(fullArcUpSnapshot.volumeLevel - 1.0) < FLOAT_TOLERANCE);
+    nowPlayingController.handlePointerUp(
+      DISPLAY_CENTER_PX - VOLUME_OUTER_START_RADIUS_PX,
+      DISPLAY_CENTER_PX,
+    );
+
+    // Starting at 3 o'clock with 0.5 volume sweeps up to 12 o'clock (1.0), down to 6 o'clock (0.0), and back to 12 o'clock (1.0)
+    audioEngine.setVolume(0.5);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.handlePointerDown(threeOClock.pointX, threeOClock.pointY);
+    traceRightBezelSweep(nowPlayingController, threeOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, twelveOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 1.0) < FLOAT_TOLERANCE,
+    );
+
+    traceRightBezelSweep(nowPlayingController, twelveOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, threeOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.5) < FLOAT_TOLERANCE,
+    );
+
+    traceRightBezelSweep(nowPlayingController, threeOClock, lowerRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, lowerRightDiagonal, sixOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.0) < FLOAT_TOLERANCE,
+    );
+
+    traceRightBezelSweep(nowPlayingController, sixOClock, lowerRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, lowerRightDiagonal, threeOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.5) < FLOAT_TOLERANCE,
+    );
+
+    traceRightBezelSweep(nowPlayingController, threeOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, twelveOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 1.0) < FLOAT_TOLERANCE,
+    );
+    nowPlayingController.handlePointerUp(twelveOClock.pointX, twelveOClock.pointY);
+
+    // Push past 1.0 (staying clamped at 1.0), then trace backward 45 deg for immediate drop to 0.75
+    audioEngine.setVolume(0.75);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.handlePointerDown(threeOClock.pointX, threeOClock.pointY);
+    traceRightBezelSweep(nowPlayingController, threeOClock, upperRightDiagonal);
+    traceRightBezelSweep(nowPlayingController, upperRightDiagonal, twelveOClock);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 1.0) < FLOAT_TOLERANCE,
+    );
+
+    traceRightBezelSweep(nowPlayingController, twelveOClock, upperRightDiagonal);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().volumeLevel - 0.75) < FLOAT_TOLERANCE,
+    );
+    nowPlayingController.handlePointerUp(upperRightDiagonal.pointX, upperRightDiagonal.pointY);
+  });
+
+  test("volume start zone requires r >= 135 and |atan2(deltaY, deltaX)| <= Math.PI / 4 on the right bezel", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness();
+    audioEngine.setVolume(0.5);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+
+    // 1. Bottom 6 o'clock (180, 330) is outside |angle| <= PI/4 and must NOT enter volume mode
+    nowPlayingController.handlePointerDown(180, 330);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+    traceCircularBezelArc(nowPlayingController, 150, Math.PI / 2, 0);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+    assert.equal(nowPlayingController.getRenderSnapshot().volumeLevel, 0.5);
+    nowPlayingController.handlePointerUp(330, 180);
+
+    // 2. Left side 9 o'clock (180 - 150, 180) must NOT enter volume mode
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX - 150, DISPLAY_CENTER_PX);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+    traceCircularBezelArc(nowPlayingController, 150, Math.PI, Math.PI * 0.5);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+    assert.equal(nowPlayingController.getRenderSnapshot().volumeLevel, 0.5);
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX + 150);
+
+    // 3. Inner radii r = 100 and r = 120 (< 135) on the right side must NOT enter volume mode
+    for (const rejectRadiusPx of [VOLUME_INNER_REJECT_RADIUS_PX, VOLUME_MID_REJECT_RADIUS_PX]) {
+      nowPlayingController.handlePointerDown(
+        DISPLAY_CENTER_PX + rejectRadiusPx,
+        DISPLAY_CENTER_PX,
+      );
+      assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+      traceCircularBezelArc(nowPlayingController, rejectRadiusPx, 0, -Math.PI / 3);
+      assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+      assert.equal(nowPlayingController.getRenderSnapshot().volumeLevel, 0.5);
+      nowPlayingController.handlePointerUp(
+        DISPLAY_CENTER_PX + rejectRadiusPx * Math.cos(-Math.PI / 3),
+        DISPLAY_CENTER_PX + rejectRadiusPx * Math.sin(-Math.PI / 3),
+      );
+    }
+
+    // 4. Outer right bezel outside 45-degree wedge (60 deg) must NOT enter volume mode
+    const sixtyDegreesRadians = Math.PI / 3;
+    const sixtyDegPointX = DISPLAY_CENTER_PX + 150 * Math.cos(sixtyDegreesRadians);
+    const sixtyDegPointY = DISPLAY_CENTER_PX + 150 * Math.sin(sixtyDegreesRadians);
+    nowPlayingController.handlePointerDown(sixtyDegPointX, sixtyDegPointY);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+    traceCircularBezelArc(nowPlayingController, 150, sixtyDegreesRadians, 0);
+    assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+    assert.equal(nowPlayingController.getRenderSnapshot().volumeLevel, 0.5);
+    nowPlayingController.handlePointerUp(330, 180);
+
+    // 5. Boundary at r = 135 and angle = -45 deg DOES enter volume mode
+    nowPlayingController.handlePointerDown(
+      DISPLAY_CENTER_PX + VOLUME_MIN_START_RADIUS_PX,
+      DISPLAY_CENTER_PX,
+    );
+    assert.equal(nowPlayingController.getRenderSnapshot().pointerMode, "volume-pending");
+    traceCircularBezelArc(nowPlayingController, VOLUME_MIN_START_RADIUS_PX, 0, -Math.PI / 4);
+    assert.equal(nowPlayingController.getRenderSnapshot().pointerMode, "volume");
+    assert.ok(nowPlayingController.getRenderSnapshot().volumeLevel > 0.5);
+    nowPlayingController.handlePointerUp(
+      DISPLAY_CENTER_PX + VOLUME_MIN_START_RADIUS_PX * Math.cos(-Math.PI / 4),
+      DISPLAY_CENTER_PX + VOLUME_MIN_START_RADIUS_PX * Math.sin(-Math.PI / 4),
+    );
+  });
+
+  test("seek start zone is a full 360-degree circle inside r <= 90px and rejects long-taps outside r > 90px", () => {
+    const { nowPlayingController } = createNowPlayingTestHarness();
+
+    // Long-tapping outside r > 90px (e.g. r = 110 at 3 o'clock and r = 95 at 12 o'clock) must NOT enter seek mode
+    const rejectedSeekPoints = [
+      { pointX: DISPLAY_CENTER_PX + SEEK_OUTSIDE_TEST_RADIUS_PX, pointY: DISPLAY_CENTER_PX },
+      { pointX: DISPLAY_CENTER_PX, pointY: DISPLAY_CENTER_PX - 95 },
+    ];
+    for (const candidatePoint of rejectedSeekPoints) {
+      nowPlayingController.handlePointerDown(candidatePoint.pointX, candidatePoint.pointY);
+      nowPlayingController.step(NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS + 0.05);
+      const outsideSnapshot = nowPlayingController.getRenderSnapshot();
+      assert.equal(outsideSnapshot.isSeeking, false);
+      assert.notEqual(outsideSnapshot.pointerMode, "seek");
+      assert.equal(outsideSnapshot.seekHoldProgress, 0);
+      nowPlayingController.handlePointerUp(candidatePoint.pointX, candidatePoint.pointY);
+    }
+
+    // Full 360-degree circle inside r <= 90px (3, 9, 6, and exact 90px boundary) enters seek after 0.42s
+    const acceptedSeekPoints = [
+      { pointX: DISPLAY_CENTER_PX + SEEK_INSIDE_TEST_RADIUS_PX, pointY: DISPLAY_CENTER_PX },
+      { pointX: DISPLAY_CENTER_PX - SEEK_INSIDE_TEST_RADIUS_PX, pointY: DISPLAY_CENTER_PX },
+      { pointX: DISPLAY_CENTER_PX, pointY: DISPLAY_CENTER_PX + SEEK_INSIDE_TEST_RADIUS_PX },
+      { pointX: DISPLAY_CENTER_PX + SEEK_BOUNDARY_RADIUS_PX, pointY: DISPLAY_CENTER_PX },
+    ];
+    for (const candidatePoint of acceptedSeekPoints) {
+      nowPlayingController.handlePointerDown(candidatePoint.pointX, candidatePoint.pointY);
+      nowPlayingController.step(NOW_PLAYING_CONSTANTS.SEEK_HOLD_DURATION_SECONDS + 0.02);
+      const insideSnapshot = nowPlayingController.getRenderSnapshot();
+      assert.equal(insideSnapshot.isSeeking, true);
+      assert.equal(insideSnapshot.pointerMode, "seek");
+      nowPlayingController.handlePointerUp(candidatePoint.pointX, candidatePoint.pointY);
+      assert.equal(nowPlayingController.getRenderSnapshot().isSeeking, false);
+      advanceSteps(nowPlayingController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    }
+  });
+});
+
+describe("createNowPlayingController skip transitions, quick actions, and queue sheet", () => {
+  test("triggers same-cover banner on intra-album skip and vinyl crossfade on cross-album skip", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      sourceSpec: { trackId: "t1", queueSource: "all-songs" },
+    });
+
+    // Swipe left (t1 -> t2, same albumId "a1")
+    nowPlayingController.handlePointerDown(SKIP_LEFT_START_X, DISPLAY_CENTER_PX);
+    nowPlayingController.handlePointerMove(SKIP_LEFT_END_X, DISPLAY_CENTER_PX);
+    nowPlayingController.handlePointerUp(SKIP_LEFT_END_X, DISPLAY_CENTER_PX);
+
+    assert.deepEqual(callbackLogs.skipDirections, [1]);
+    const sameAlbumSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(sameAlbumSnapshot.previousTrack, null);
+    assert.equal(sameAlbumSnapshot.skipTransitionProgress, 1);
+    assert.equal(sameAlbumSnapshot.trackBannerPhase, "in");
+    assert.equal(sameAlbumSnapshot.trackBannerTitle.toUpperCase(), "02 DUSK");
+
+    const observedBannerPhases = [sameAlbumSnapshot.trackBannerPhase];
+    for (let stepIndex = 0; stepIndex < 90; stepIndex += 1) {
+      nowPlayingController.step(STEP_DELTA_SECONDS);
+      const sampledPhase = nowPlayingController.getRenderSnapshot().trackBannerPhase;
+      if (observedBannerPhases[observedBannerPhases.length - 1] !== sampledPhase) {
+        observedBannerPhases.push(sampledPhase);
+      }
+    }
+    assert.ok(observedBannerPhases.includes("in"));
+    assert.ok(observedBannerPhases.includes("hold"));
+    assert.ok(observedBannerPhases.includes("out"));
+
+    // skipTrack(+1) across album boundary (t2 in a1 -> t3 in a2)
+    nowPlayingController.skipTrack(1);
+    assert.deepEqual(callbackLogs.skipDirections, [1, 1]);
+    const crossAlbumStartSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(crossAlbumStartSnapshot.previousTrack !== null);
+    assert.equal(crossAlbumStartSnapshot.previousTrack.id, "t2");
+    assert.equal(crossAlbumStartSnapshot.skipTransitionProgress, 0);
+
+    const halfSkip = NOW_PLAYING_CONSTANTS.SKIP_DURATION_SECONDS / 2;
+    nowPlayingController.step(halfSkip);
+    const crossAlbumMidSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(
+      crossAlbumMidSnapshot.skipTransitionProgress > 0 &&
+        crossAlbumMidSnapshot.skipTransitionProgress < 1,
+    );
+
+    nowPlayingController.step(halfSkip);
+    assert.equal(nowPlayingController.getRenderSnapshot().skipTransitionProgress, 1);
+
+    // Swipe right from center-left vinyl skips backward (t3 -> t2)
+    nowPlayingController.handlePointerDown(SKIP_RIGHT_START_X, DISPLAY_CENTER_PX);
+    nowPlayingController.handlePointerMove(SKIP_RIGHT_END_X, DISPLAY_CENTER_PX);
+    nowPlayingController.handlePointerUp(SKIP_RIGHT_END_X, DISPLAY_CENTER_PX);
+    assert.deepEqual(callbackLogs.skipDirections, [1, 1, -1]);
+  });
+
+  test("Quick Actions trigger favorite, play mode, playlist picker with default crate & deduping, lyrics, and details sheet", () => {
+    const emptyPlaylistsCatalog = buildNowPlayingTestCatalog({ playlists: [] });
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      catalog: emptyPlaylistsCatalog,
+      sourceSpec: { trackId: "t1", queueSource: "album", albumId: "a1" },
+    });
+
+    // 1. Favorite toggle on & off
+    openQuickActionsViaTap(nowPlayingController);
+    tapPoint(nowPlayingController, QUICK_FAVORITE_X, QUICK_FAVORITE_Y);
+    assert.deepEqual(callbackLogs.favoriteToggles, [{ trackId: "t1", isFavorite: true }]);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "ADDED TO FAVORITES");
+
+    tapPoint(nowPlayingController, QUICK_FAVORITE_X, QUICK_FAVORITE_Y);
+    assert.deepEqual(callbackLogs.favoriteToggles, [
+      { trackId: "t1", isFavorite: true },
+      { trackId: "t1", isFavorite: false },
+    ]);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "REMOVED FROM FAVORITES");
+
+    // 2. Independent Shuffle toggle and Repeat mode cycling
+    tapPoint(nowPlayingController, QUICK_SHUFFLE_X, QUICK_SHUFFLE_Y);
+    assert.deepEqual(callbackLogs.shuffleToggles, [true]);
+    assert.equal(nowPlayingController.getRenderSnapshot().shuffleEnabled, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "SHUFFLE // ON");
+
+    tapPoint(nowPlayingController, QUICK_REPEAT_X, QUICK_REPEAT_Y);
+    assert.deepEqual(callbackLogs.repeatCycles, ["all"]);
+    assert.equal(nowPlayingController.getRenderSnapshot().repeatMode, "all");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "REPEAT // ALL");
+
+    tapPoint(nowPlayingController, QUICK_REPEAT_X, QUICK_REPEAT_Y);
+    assert.deepEqual(callbackLogs.repeatCycles, ["all", "one"]);
+    assert.equal(nowPlayingController.getRenderSnapshot().repeatMode, "one");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "REPEAT // ONE");
+
+    tapPoint(nowPlayingController, QUICK_REPEAT_X, QUICK_REPEAT_Y);
+    assert.deepEqual(callbackLogs.repeatCycles, ["all", "one", "off"]);
+    assert.equal(nowPlayingController.getRenderSnapshot().repeatMode, "off");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "REPEAT // OFF");
+
+    tapPoint(nowPlayingController, QUICK_SHUFFLE_X, QUICK_SHUFFLE_Y);
+    assert.deepEqual(callbackLogs.shuffleToggles, [true, false]);
+    assert.equal(nowPlayingController.getRenderSnapshot().shuffleEnabled, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "SHUFFLE // OFF");
+
+    // 3. Playlist picker creates default "DialOS Crate" when empty, adds track, and dedupes
+    tapPoint(nowPlayingController, QUICK_PLAYLIST_X, QUICK_PLAYLIST_Y);
+    const pickerOpenSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(pickerOpenSnapshot.playlistPickerOpen, true);
+    assert.equal(pickerOpenSnapshot.playlists.length, 1);
+    assert.equal(pickerOpenSnapshot.playlists[0].name, "DialOS Crate");
+
+    const firstPlaylistRow = computeNowPlayingQueueRowLayout(0, 0);
+    tapPoint(nowPlayingController, firstPlaylistRow.centerX, firstPlaylistRow.centerY);
+
+    const afterAddSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(afterAddSnapshot.playlistPickerOpen, false);
+    assert.equal(afterAddSnapshot.toastText.toUpperCase(), "ADDED TO DIALOS CRATE");
+    assert.equal(callbackLogs.persistedPlaylists.length, 1);
+    assert.deepEqual(callbackLogs.persistedPlaylists[0][0].trackIds, ["t1"]);
+
+    openQuickActionsViaTap(nowPlayingController);
+    tapPoint(nowPlayingController, QUICK_PLAYLIST_X, QUICK_PLAYLIST_Y);
+    tapPoint(nowPlayingController, firstPlaylistRow.centerX, firstPlaylistRow.centerY);
+
+    const afterDuplicateSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(afterDuplicateSnapshot.playlistPickerOpen, false);
+    assert.equal(afterDuplicateSnapshot.toastText.toUpperCase(), "IN DIALOS CRATE");
+    assert.deepEqual(afterDuplicateSnapshot.playlists[0].trackIds, ["t1"]);
+
+    // 4. Lyrics quick button opens lyrics and closes Quick Actions
+    openQuickActionsViaTap(nowPlayingController);
+    tapPoint(nowPlayingController, QUICK_LYRICS_X, QUICK_LYRICS_Y);
+    const lyricsOpenedSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(lyricsOpenedSnapshot.lyricsOpen, true);
+    assert.equal(lyricsOpenedSnapshot.quickActionsOpen, false);
+
+    nowPlayingController.stepBack();
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsOpen, false);
+
+    // 5. Info quick button opens details sheet with enriched metadata
+    openQuickActionsViaTap(nowPlayingController);
+    tapPoint(nowPlayingController, QUICK_DETAILS_X, QUICK_DETAILS_Y);
+    const detailsSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(detailsSnapshot.detailsSheetOpen, true);
+    assert.equal(detailsSnapshot.trackDetails.format, "FLAC 24-BIT");
+    assert.equal(detailsSnapshot.trackDetails.sampleRate, "96.0 KHZ");
+    assert.equal(detailsSnapshot.trackDetails.bitrate, "2,822 KBPS");
+    assert.equal(detailsSnapshot.trackDetails.fileSize, "42.3 MB");
+    assert.equal(typeof detailsSnapshot.trackDetails.trackIndexLabel, "string");
+    assert.ok(detailsSnapshot.trackDetails.trackIndexLabel.includes("1"));
+    assert.ok(detailsSnapshot.trackDetails.trackIndexLabel.includes("2"));
+  });
+
+  test("swipe-up opens Context Queue Sheet at active queueIndex, selects rows, snaps drags, and closes on pull-down", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      sourceSpec: { trackId: "t3", queueSource: "all-songs" },
+    });
+
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, QUEUE_PULL_START_Y);
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+
+    const openedQueueSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(openedQueueSnapshot.queueSheetOpen, true);
+    assert.equal(openedQueueSnapshot.queueScrollPosition, 2);
+
+    // Drag up to scroll deeper, release, and settle to integer snap index
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, 210);
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, 145);
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, 145);
+    const snappedQueueSnapshot = advanceSteps(
+      nowPlayingController,
+      STEP_DELTA_SECONDS,
+      SETTLE_STEP_COUNT,
+    );
+    assert.ok(snappedQueueSnapshot.queueScrollPosition >= 2);
+    assert.ok(
+      Math.abs(
+        snappedQueueSnapshot.queueScrollPosition -
+          Math.round(snappedQueueSnapshot.queueScrollPosition),
+      ) < FLOAT_TOLERANCE,
+    );
+
+    // Select row 1 from scroll 0
+    nowPlayingController.stepBack();
+    const zeroQueueHarness = createNowPlayingTestHarness({
+      sourceSpec: { trackId: "t1", queueSource: "all-songs" },
+    });
+    zeroQueueHarness.nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, QUEUE_PULL_START_Y);
+    zeroQueueHarness.nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+    zeroQueueHarness.nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+    assert.equal(zeroQueueHarness.nowPlayingController.getRenderSnapshot().queueScrollPosition, 0);
+
+    // Pull down at scroll 0 (> 68px) closes Queue Sheet
+    zeroQueueHarness.nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, QUEUE_CLOSE_START_Y);
+    zeroQueueHarness.nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, QUEUE_CLOSE_END_Y);
+    zeroQueueHarness.nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, QUEUE_CLOSE_END_Y);
+    assert.equal(zeroQueueHarness.nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+
+    // Re-open at scroll 0 and tap row 1
+    zeroQueueHarness.nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, QUEUE_PULL_START_Y);
+    zeroQueueHarness.nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+    zeroQueueHarness.nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+
+    const secondQueueRow = computeNowPlayingQueueRowLayout(1, 0);
+    tapPoint(zeroQueueHarness.nowPlayingController, secondQueueRow.centerX, secondQueueRow.centerY);
+    assert.deepEqual(zeroQueueHarness.callbackLogs.selectedQueueIndices, [1]);
+    assert.equal(zeroQueueHarness.nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+  });
+
+  test("Context Queue swipe-up starts only from pointY >= 245 and left-edge drags never fall through into queue-pull or skip-drag", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      returnScreen: "home",
+    });
+
+    // 1. Valid start at exact pointY = 245 boundary dragging straight up enters queue-pull and opens Queue Sheet
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, QUEUE_PULL_ZONE_TOP_Y);
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, QUEUE_PULL_ZONE_TOP_Y - 50);
+    assert.equal(nowPlayingController.getRenderSnapshot().pointerMode, "queue-pull");
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, QUEUE_PULL_ZONE_TOP_Y - 50);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, true);
+    nowPlayingController.stepBack();
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+
+    // 2. Starting upward drag at middle (pointY = 180) or upper half (pointY = 110) must NOT open queue-pull
+    for (const invalidStartY of [180, 110]) {
+      nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, invalidStartY);
+      nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, invalidStartY - 70);
+      assert.notEqual(nowPlayingController.getRenderSnapshot().pointerMode, "queue-pull");
+      nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, invalidStartY - 70);
+      assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+    }
+
+    // 3. Left edge upward drag (pointX = 20, pointY = 200) must NOT enter queue-pull or skip-drag
+    nowPlayingController.handlePointerDown(20, 200);
+    nowPlayingController.handlePointerMove(20, 130);
+    const leftEdgeUpSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.notEqual(leftEdgeUpSnapshot.pointerMode, "queue-pull");
+    assert.notEqual(leftEdgeUpSnapshot.pointerMode, "skip-drag");
+    assert.equal(leftEdgeUpSnapshot.skipDragOffsetX, 0);
+    nowPlayingController.handlePointerUp(20, 130);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+    assert.deepEqual(callbackLogs.skipDirections, []);
+
+    // 4. Left edge small diagonal/rightward progression never falls through into skip-drag or queue-pull
+    nowPlayingController.handlePointerDown(20, 200);
+    nowPlayingController.handlePointerMove(30, 195);
+    const initialLeftDriftSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.notEqual(initialLeftDriftSnapshot.pointerMode, "skip-drag");
+    assert.notEqual(initialLeftDriftSnapshot.pointerMode, "queue-pull");
+    assert.equal(initialLeftDriftSnapshot.skipDragOffsetX, 0);
+
+    nowPlayingController.handlePointerMove(90, 195);
+    const committedLeftBackSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(committedLeftBackSnapshot.pointerMode, "back-swipe");
+    assert.equal(committedLeftBackSnapshot.skipDragOffsetX, 0);
+    assert.ok(committedLeftBackSnapshot.backSwipeProgress > 0.45);
+    nowPlayingController.handlePointerUp(90, 195);
+    assert.deepEqual(callbackLogs.exitReturnScreens, ["home"]);
+    assert.deepEqual(callbackLogs.skipDirections, []);
+
+    // 5. Left edge leftward drag never falls through into skip-drag
+    const secondHarness = createNowPlayingTestHarness({ returnScreen: "home" });
+    secondHarness.nowPlayingController.handlePointerDown(20, 200);
+    secondHarness.nowPlayingController.handlePointerMove(6, 200);
+    const leftwardLeftEdgeSnapshot = secondHarness.nowPlayingController.getRenderSnapshot();
+    assert.notEqual(leftwardLeftEdgeSnapshot.pointerMode, "skip-drag");
+    assert.notEqual(leftwardLeftEdgeSnapshot.pointerMode, "queue-pull");
+    assert.equal(leftwardLeftEdgeSnapshot.skipDragOffsetX, 0);
+    secondHarness.nowPlayingController.handlePointerUp(6, 200);
+  });
+
+  test("Track Details sheet stays open on downward or non-left-edge drags and closes only via left-edge back-swipe or stepBack", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      returnScreen: "library",
+    });
+
+    openQuickActionsViaTap(nowPlayingController);
+    tapPoint(nowPlayingController, QUICK_DETAILS_X, QUICK_DETAILS_Y);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+
+    // Dragging downward inside Details must NOT close Details
+    nowPlayingController.handlePointerDown(DISPLAY_CENTER_PX, 120);
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, 240);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, 240);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+
+    // Dragging rightward from center (outside left edge) must NOT close Details
+    nowPlayingController.handlePointerDown(140, DISPLAY_CENTER_PX);
+    nowPlayingController.handlePointerMove(250, DISPLAY_CENTER_PX);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+    nowPlayingController.handlePointerUp(250, DISPLAY_CENTER_PX);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+
+    // Left-edge back-swipe closes Details without exiting Now Playing
+    performLeftEdgeBackSwipe(nowPlayingController);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, false);
+    assert.deepEqual(callbackLogs.exitReturnScreens, []);
+
+    // Re-open Details and close via stepBack()
+    nowPlayingController.toggleTrackDetails();
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+    nowPlayingController.stepBack();
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, false);
+    assert.deepEqual(callbackLogs.exitReturnScreens, []);
+  });
+
+  test("enterFromHome and enterFromLibrary adopt handoff vinylRotationRadians, rotate +20 deg clockwise at matched speed when playing, hold steady when paused, and guard invalid inputs", () => {
+    const HANDOFF_ANGLE_RADIANS = 0.85;
+    const { audioEngine, nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      returnScreen: "home",
+    });
+
+    // 1. enterFromHome while playing adopts handoff angle, sets openTransitionProgress 0, and rotates clockwise +20 deg
+    nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+    });
+    const homeEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(homeEntrySnapshot.launchOrigin, "home");
+    assert.equal(homeEntrySnapshot.returnScreen, "home");
+    assert.equal(homeEntrySnapshot.openTransitionProgress, 0);
+    assert.equal(homeEntrySnapshot.vinylNudgeRadians, 0);
+    assert.ok(Math.abs(homeEntrySnapshot.vinylRotationRadians - HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE);
+
+    // Halfway through entrance: openTransitionProgress = 0.5 and +10 deg clockwise
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
+    const homeMidSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(
+      homeMidSnapshot.openTransitionProgress > 0 && homeMidSnapshot.openTransitionProgress < 1,
+    );
+    assert.equal(homeMidSnapshot.vinylNudgeRadians, 0);
+    assert.ok(
+      Math.abs(
+        homeMidSnapshot.vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS / 2),
+      ) < 0.002,
+    );
+
+    // Full OPEN_DURATION_SECONDS completes openTransitionProgress = 1 and reaches +20 deg clockwise
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
+    const settledHomeEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(settledHomeEntrySnapshot.openTransitionProgress, 1);
+    assert.equal(settledHomeEntrySnapshot.vinylNudgeRadians, 0);
+    assert.ok(
+      Math.abs(
+        settledHomeEntrySnapshot.vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS),
+      ) < 0.002,
+    );
+
+    // Steady angular velocity after entrance matches transition speed (+20 deg per 0.62s)
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    const postEntranceSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(
+      Math.abs(
+        postEntranceSnapshot.vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS * 2),
+      ) < 0.002,
+    );
+
+    // Smooth exit transition state via left-edge swipe progress, decay on cancel/partial, and clean exit commit
+    nowPlayingController.handlePointerDown(BACK_SWIPE_START_X, BACK_SWIPE_Y);
+    nowPlayingController.handlePointerMove(BACK_SWIPE_PARTIAL_END_X, BACK_SWIPE_Y);
+    const partialExitSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.ok(partialExitSnapshot.backSwipeProgress > 0 && partialExitSnapshot.backSwipeProgress < 0.45);
+    nowPlayingController.handlePointerUp(BACK_SWIPE_PARTIAL_END_X, BACK_SWIPE_Y);
+    assert.deepEqual(callbackLogs.exitReturnScreens, []);
+    advanceSteps(nowPlayingController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    assert.equal(nowPlayingController.getRenderSnapshot().backSwipeProgress, 0);
+
+    performLeftEdgeBackSwipe(nowPlayingController);
+    assert.deepEqual(callbackLogs.exitReturnScreens, ["home"]);
+    assert.equal(nowPlayingController.getRenderSnapshot().backSwipeProgress, 0);
+
+    // 2. enterFromLibrary("album-crate") while playing also rotates +10 deg at T/2 and +20 deg at T
+    nowPlayingController.enterFromLibrary({
+      returnScreen: "library",
+      launchOrigin: "album-crate",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+    });
+    const crateEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(crateEntrySnapshot.launchOrigin, "album-crate");
+    assert.equal(crateEntrySnapshot.returnScreen, "library");
+    assert.equal(crateEntrySnapshot.openTransitionProgress, 0);
+    assert.ok(Math.abs(crateEntrySnapshot.vinylRotationRadians - HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE);
+
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
+    assert.ok(
+      Math.abs(
+        nowPlayingController.getRenderSnapshot().vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS / 2),
+      ) < 0.002,
+    );
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS / 2);
+    assert.ok(
+      Math.abs(
+        nowPlayingController.getRenderSnapshot().vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS),
+      ) < 0.002,
+    );
+
+    // 3. Paused state with active track keeps vinylRotationRadians stationary on Home & Library entrances
+    audioEngine.pause();
+    nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+    });
+    const pausedHomeEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(pausedHomeEntrySnapshot.operatingMode, "playing");
+    assert.equal(pausedHomeEntrySnapshot.isPlaying, false);
+    assert.equal(pausedHomeEntrySnapshot.launchOrigin, "home");
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().vinylRotationRadians - HANDOFF_ANGLE_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
+
+    nowPlayingController.enterFromLibrary({
+      returnScreen: "library",
+      launchOrigin: "album-crate",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+    });
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    assert.ok(
+      Math.abs(nowPlayingController.getRenderSnapshot().vinylRotationRadians - HANDOFF_ANGLE_RADIANS) <
+        FLOAT_TOLERANCE,
+    );
+
+    // 4. Fallback guard: default launchOrigin and non-finite handoff angles remain safe
+    audioEngine.play();
+    nowPlayingController.enterFromLibrary({
+      returnScreen: "library",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: Number.NaN,
+    });
+    const libraryEntrySnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(libraryEntrySnapshot.launchOrigin, "library");
+    assert.equal(libraryEntrySnapshot.returnScreen, "library");
+    assert.ok(Number.isFinite(libraryEntrySnapshot.vinylRotationRadians));
+
+    // 5. skipOpenTransition preserves openTransitionProgress === 1 after Home disc zoom handoff
+    nowPlayingController.enterFromHome({
+      returnScreen: "home",
+      audioState: audioEngine.getState(),
+      vinylRotationRadians: HANDOFF_ANGLE_RADIANS,
+      skipOpenTransition: true,
+    });
+    const skippedZoomSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(skippedZoomSnapshot.openTransitionProgress, 1);
+    assert.ok(
+      Math.abs(skippedZoomSnapshot.vinylRotationRadians - HANDOFF_ANGLE_RADIANS) < FLOAT_TOLERANCE,
+    );
+    assert.ok(skippedZoomSnapshot.spinAngularVelocity > 0);
+
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.OPEN_DURATION_SECONDS);
+    const postHandoffSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(postHandoffSnapshot.openTransitionProgress, 1);
+    assert.ok(
+      Math.abs(
+        postHandoffSnapshot.vinylRotationRadians -
+          (HANDOFF_ANGLE_RADIANS + ENTRANCE_ROTATION_OFFSET_RADIANS),
+      ) < 0.002,
+    );
+  });
+});
+
+describe("createNowPlayingController lyrics playback, back navigation, and negative guards", () => {
+  test("animates lyric cue transitions over 0.44s and cycles lyrics mode cleanly", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness({
+      sourceSpec: { trackId: "t1", queueSource: "all-songs" },
+    });
+
+    openQuickActionsViaTap(nowPlayingController);
+    tapPoint(nowPlayingController, QUICK_LYRICS_X, QUICK_LYRICS_Y);
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsOpen, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsMode, "auto");
+
+    audioEngine.seekTo(5.5);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.step(STEP_DELTA_SECONDS);
+
+    audioEngine.seekTo(13.0);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.step(0.11);
+
+    const transitioningLyricsSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(transitioningLyricsSnapshot.lyricsPreviousLineText, "First light across the vinyl");
+    assert.ok(
+      transitioningLyricsSnapshot.lyricsLineTransitionProgress > 0 &&
+        transitioningLyricsSnapshot.lyricsLineTransitionProgress < 1,
+    );
+
+    nowPlayingController.step(NOW_PLAYING_CONSTANTS.LYRICS_TRANSITION_DURATION_SECONDS);
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsLineTransitionProgress, 1);
+
+    nowPlayingController.cycleLyricsMode();
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsMode, "timed");
+    nowPlayingController.cycleLyricsMode();
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsMode, "untimed");
+    nowPlayingController.cycleLyricsMode();
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsMode, "none");
+    nowPlayingController.cycleLyricsMode();
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsMode, "auto");
+  });
+
+  test("stepBack and left-edge swipe close layers in strict priority order and invoke onExit(returnScreen)", () => {
+    const libraryHarness = createNowPlayingTestHarness({ returnScreen: "library" });
+    const controller = libraryHarness.nowPlayingController;
+
+    // 1. playlistPickerOpen
+    openQuickActionsViaTap(controller);
+    tapPoint(controller, QUICK_PLAYLIST_X, QUICK_PLAYLIST_Y);
+    assert.equal(controller.getRenderSnapshot().playlistPickerOpen, true);
+    controller.stepBack();
+    assert.equal(controller.getRenderSnapshot().playlistPickerOpen, false);
+    assert.deepEqual(libraryHarness.callbackLogs.exitReturnScreens, []);
+
+    // 2. detailsSheetOpen
+    openQuickActionsViaTap(controller);
+    tapPoint(controller, QUICK_DETAILS_X, QUICK_DETAILS_Y);
+    assert.equal(controller.getRenderSnapshot().detailsSheetOpen, true);
+    performLeftEdgeBackSwipe(controller);
+    assert.equal(controller.getRenderSnapshot().detailsSheetOpen, false);
+    assert.deepEqual(libraryHarness.callbackLogs.exitReturnScreens, []);
+
+    // 3. queueSheetOpen
+    controller.handlePointerDown(DISPLAY_CENTER_PX, QUEUE_PULL_START_Y);
+    controller.handlePointerMove(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+    controller.handlePointerUp(DISPLAY_CENTER_PX, QUEUE_PULL_END_Y);
+    assert.equal(controller.getRenderSnapshot().queueSheetOpen, true);
+    controller.stepBack();
+    assert.equal(controller.getRenderSnapshot().queueSheetOpen, false);
+    assert.deepEqual(libraryHarness.callbackLogs.exitReturnScreens, []);
+
+    // 4. quickActionsOpen
+    openQuickActionsViaTap(controller);
+    assert.equal(controller.getRenderSnapshot().quickActionsOpen, true);
+    controller.stepBack();
+    assert.equal(controller.getRenderSnapshot().quickActionsOpen, false);
+    assert.deepEqual(libraryHarness.callbackLogs.exitReturnScreens, []);
+
+    // 5. lyricsOpen
+    openQuickActionsViaTap(controller);
+    tapPoint(controller, QUICK_LYRICS_X, QUICK_LYRICS_Y);
+    assert.equal(controller.getRenderSnapshot().lyricsOpen, true);
+    performLeftEdgeBackSwipe(controller);
+    assert.equal(controller.getRenderSnapshot().lyricsOpen, false);
+    assert.deepEqual(libraryHarness.callbackLogs.exitReturnScreens, []);
+
+    // 6. Bare vinyl exits with returnScreen ("library" via stepBack and "home" via swipe)
+    controller.stepBack();
+    assert.deepEqual(libraryHarness.callbackLogs.exitReturnScreens, ["library"]);
+
+    const homeHarness = createNowPlayingTestHarness({ returnScreen: "home" });
+    performLeftEdgeBackSwipe(homeHarness.nowPlayingController);
+    assert.deepEqual(homeHarness.callbackLogs.exitReturnScreens, ["home"]);
+  });
+
+  test("handles non-finite deltas, unmatched pointer events, partial back-swipes, and empty catalogs safely", () => {
+    const { nowPlayingController, callbackLogs } = createNowPlayingTestHarness();
+
+    const invalidDeltas = [
+      -1,
+      -0.05,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      undefined,
+      null,
+    ];
+    for (const invalidDelta of invalidDeltas) {
+      nowPlayingController.step(invalidDelta);
+      const snapshot = nowPlayingController.getRenderSnapshot();
+      assert.ok(Number.isFinite(snapshot.openTransitionProgress));
+      assert.ok(Number.isFinite(snapshot.skipTransitionProgress));
+      assert.ok(Number.isFinite(snapshot.volumeLevel));
+      assert.ok(Number.isFinite(snapshot.trackElapsedSeconds));
+      assert.ok(Number.isFinite(snapshot.seekHoldProgress));
+      assert.ok(Number.isFinite(snapshot.seekExpandProgress));
+    }
+
+    nowPlayingController.handlePointerMove(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX);
+    nowPlayingController.handlePointerUp(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX);
+    nowPlayingController.handlePointerDown(Number.NaN, DISPLAY_CENTER_PX);
+    nowPlayingController.handleWheel(Number.NaN);
+    nowPlayingController.handleWheel(0);
+
+    // Partial left-edge back-swipe below 0.45 threshold stays on Now Playing and decays
+    nowPlayingController.handlePointerDown(BACK_SWIPE_START_X, BACK_SWIPE_Y);
+    nowPlayingController.handlePointerMove(BACK_SWIPE_PARTIAL_END_X, BACK_SWIPE_Y);
+    nowPlayingController.handlePointerUp(BACK_SWIPE_PARTIAL_END_X, BACK_SWIPE_Y);
+    assert.deepEqual(callbackLogs.exitReturnScreens, []);
+    advanceSteps(nowPlayingController, STEP_DELTA_SECONDS, SETTLE_STEP_COUNT);
+    assert.equal(nowPlayingController.getRenderSnapshot().backSwipeProgress, 0);
+
+    // Empty catalog and null state inputs remain safely in idle mode
+    const standaloneController = createNowPlayingController();
+    standaloneController.hydrateCatalog(null);
+    standaloneController.hydrateCatalog({});
+    standaloneController.syncAudioState(null);
+    standaloneController.enterFromLibrary({ returnScreen: "library", audioState: null });
+    assert.equal(standaloneController.getRenderSnapshot().operatingMode, "idle");
+  });
+
+  test("albumTechSpecs provides fallback format, sampleRate, bitrate, and mbPerMin while preserving explicit track fields", () => {
+    const bareTrack = {
+      id: "bare-1",
+      title: "01 Bare",
+      albumId: "album-dsd",
+      durationSeconds: 120,
+      format: "DSD 128",
+    };
+    const albumEntry = {
+      id: "album-dsd",
+      title: "Tape Sessions",
+      artist: "Studio Ensemble",
+      genre: "Electronic",
+      year: 2025,
+      tracks: [bareTrack],
+    };
+    const albumTechSpec = {
+      format: "DSD 64",
+      sampleRate: "2.8 MHZ",
+      bitrate: "5,644 KBPS",
+      mbPerMin: 40.0,
+    };
+
+    const directDetails = enrichTrackDetails(bareTrack, albumEntry, 4, 2, albumTechSpec);
+    assert.equal(directDetails.format, "DSD 128");
+    assert.equal(directDetails.sampleRate, "2.8 MHZ");
+    assert.equal(directDetails.bitrate, "5,644 KBPS");
+    assert.equal(directDetails.fileSize, "80.0 MB");
+
+    const sparseCatalog = {
+      albums: [albumEntry],
+      allTracks: [bareTrack],
+      playlists: [],
+      albumTechSpecs: {
+        "album-dsd": albumTechSpec,
+      },
+      lyricsCatalog: {},
+    };
+    const { nowPlayingController } = createNowPlayingTestHarness({
+      catalog: sparseCatalog,
+      sourceSpec: { trackId: "bare-1", queueSource: "album", albumId: "album-dsd" },
+    });
+    const hydratedDetails = nowPlayingController.getRenderSnapshot().trackDetails;
+    assert.equal(hydratedDetails.format, "DSD 128");
+    assert.equal(hydratedDetails.sampleRate, "2.8 MHZ");
+    assert.equal(hydratedDetails.bitrate, "5,644 KBPS");
+    assert.equal(hydratedDetails.fileSize, "80.0 MB");
+  });
+
+  test("exposes imperative togglePlayPause, toggleLyrics, toggleTrackDetails, toggleQueueSheet, setPlaylists, and updateTrackFavorite", () => {
+    const idleHarness = createNowPlayingTestHarness({ sourceSpec: null });
+    idleHarness.nowPlayingController.togglePlayPause();
+    idleHarness.nowPlayingController.toggleLyrics();
+    idleHarness.nowPlayingController.toggleTrackDetails();
+    idleHarness.nowPlayingController.toggleQueueSheet();
+    const idleSnapshot = idleHarness.nowPlayingController.getRenderSnapshot();
+    assert.equal(idleHarness.callbackLogs.togglePlayPauseCalls, 0);
+    assert.equal(idleSnapshot.lyricsOpen, false);
+    assert.equal(idleSnapshot.detailsSheetOpen, false);
+    assert.equal(idleSnapshot.queueSheetOpen, false);
+
+    const { audioEngine, nowPlayingController, callbackLogs } = createNowPlayingTestHarness({
+      sourceSpec: { trackId: "t2", queueSource: "all-songs" },
+    });
+
+    // togglePlayPause updates playback and pulse without showing a top status toast
+    nowPlayingController.togglePlayPause();
+    assert.equal(callbackLogs.togglePlayPauseCalls, 1);
+    assert.equal(nowPlayingController.getRenderSnapshot().isPlaying, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().playPausePulseAlpha, 1);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastAlpha, 0);
+
+    nowPlayingController.togglePlayPause();
+    assert.equal(callbackLogs.togglePlayPauseCalls, 2);
+    assert.equal(nowPlayingController.getRenderSnapshot().isPlaying, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().playPausePulseAlpha, 1);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastAlpha, 0);
+
+    // toggleLyrics closes Quick Actions/sheets and toggles lyricsOpen
+    openQuickActionsViaTap(nowPlayingController);
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, true);
+    nowPlayingController.toggleLyrics();
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsOpen, true);
+
+    // toggleTrackDetails closes Quick Actions/queue/picker and toggles detailsSheetOpen
+    nowPlayingController.toggleTrackDetails();
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsOpen, true);
+    nowPlayingController.toggleTrackDetails();
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, false);
+
+    // toggleLyrics off closes lyrics and any active sheets
+    nowPlayingController.toggleTrackDetails();
+    nowPlayingController.toggleLyrics();
+    assert.equal(nowPlayingController.getRenderSnapshot().lyricsOpen, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().detailsSheetOpen, false);
+
+    // toggleQueueSheet opens anchored to active queueIndex and closes on second call
+    openQuickActionsViaTap(nowPlayingController);
+    nowPlayingController.toggleQueueSheet();
+    assert.equal(nowPlayingController.getRenderSnapshot().quickActionsOpen, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().queueScrollPosition, 1);
+    nowPlayingController.toggleQueueSheet();
+    assert.equal(nowPlayingController.getRenderSnapshot().queueSheetOpen, false);
+
+    // setPlaylists replaces cloned playlists cleanly and handles null safely
+    const externalPlaylists = [{ id: "p-ext", name: "External Mix", trackIds: ["t1"] }];
+    nowPlayingController.setPlaylists(externalPlaylists);
+    externalPlaylists[0].trackIds.push("t3");
+    assert.deepEqual(nowPlayingController.getRenderSnapshot().playlists, [
+      { id: "p-ext", name: "External Mix", trackIds: ["t1"] },
+    ]);
+    nowPlayingController.setPlaylists(null);
+    assert.deepEqual(nowPlayingController.getRenderSnapshot().playlists, []);
+
+    // updateTrackFavorite syncs activeTrack, queueTracks, and cached track cleanly across syncAudioState
+    assert.equal(nowPlayingController.getRenderSnapshot().activeTrack.isFavorite, true);
+    nowPlayingController.updateTrackFavorite("t2", false);
+    audioEngine.updateTrackFavorite("t2", false);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    const afterUnfavorite = nowPlayingController.getRenderSnapshot();
+    assert.equal(afterUnfavorite.activeTrack.isFavorite, false);
+    assert.equal(
+      afterUnfavorite.queueTracks.find((trackEntry) => trackEntry.id === "t2").isFavorite,
+      false,
+    );
+    nowPlayingController.updateTrackFavorite("t1", true);
+    assert.equal(
+      nowPlayingController
+        .getRenderSnapshot()
+        .queueTracks.find((trackEntry) => trackEntry.id === "t1").isFavorite,
+      true,
+    );
+    nowPlayingController.updateTrackFavorite("", true);
+    nowPlayingController.updateTrackFavorite(null, false);
+  });
+
+  test("enforces 3-second Previous rule, boundary bounce without crossing context, and END/START context toasts", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness({
+      sourceSpec: { trackId: "t1", queueSource: "album", albumId: "a1" },
+    });
+
+    // At track 0 with elapsed <= 3s, skipTrack(-1) bounces at START OF ALBUM
+    audioEngine.seekTo(PREVIOUS_RESTART_THRESHOLD_SECONDS);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.skipTrack(-1);
+    const startBounceSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(startBounceSnapshot.activeTrack.id, "t1");
+    assert.equal(startBounceSnapshot.toastText, "START OF ALBUM");
+    assert.equal(startBounceSnapshot.skipTransitionProgress, 1);
+
+    for (let stepIndex = 0; stepIndex < 60; stepIndex += 1) {
+      nowPlayingController.step(0.05);
+    }
+
+    // At track 0 with elapsed > 3s, skipTrack(-1) restarts current track at 0:00 without bounce
+    audioEngine.seekTo(PREVIOUS_RESTART_THRESHOLD_SECONDS + 1.5);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.skipTrack(-1);
+    const restartSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(restartSnapshot.activeTrack.id, "t1");
+    assert.equal(restartSnapshot.trackElapsedSeconds, 0);
+    assert.equal(restartSnapshot.toastAlpha, 0);
+
+    // Advance to last track of album (t2), verify END OF ALBUM bounce on manual Next
+    nowPlayingController.skipTrack(1);
+    assert.equal(nowPlayingController.getRenderSnapshot().activeTrack.id, "t2");
+    nowPlayingController.skipTrack(1);
+    const endBounceSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(endBounceSnapshot.activeTrack.id, "t2");
+    assert.equal(endBounceSnapshot.toastText, "END OF ALBUM");
+    assert.equal(endBounceSnapshot.skipTransitionProgress, 1);
+
+    // Auto-end on last track under Repeat Off resets to t1 paused and triggers END OF ALBUM toast via syncAudioState
+    audioEngine.step(200);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    const contextEndedSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(contextEndedSnapshot.activeTrack.id, "t1");
+    assert.equal(contextEndedSnapshot.isPlaying, false);
+    assert.equal(contextEndedSnapshot.trackElapsedSeconds, 0);
+    assert.equal(contextEndedSnapshot.toastText, "END OF ALBUM");
+  });
+
+  test("exposes ARTIST queueContext, displays uppercase albumTitle in trackBannerMeta on same-album skip, and shows ARTIST boundary toasts", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness({
+      sourceSpec: {
+        trackId: "t3",
+        queueSource: "artist",
+        artistName: "Boreal Quartet",
+        artistAlbumIds: ["a2"],
+      },
+    });
+
+    const initialSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.deepEqual(initialSnapshot.queueContext, {
+      sourceId: "artist",
+      badge: "ARTIST",
+      title: "Boreal Quartet",
+      tracks: initialSnapshot.queueTracks,
+    });
+
+    // Boundary bounce at start emits START OF ARTIST
+    nowPlayingController.skipTrack(-1);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "START OF ARTIST");
+
+    // Skipping within the same album under artist context shows uppercase albumTitle in trackBannerMeta
+    nowPlayingController.skipTrack(1);
+    const sameAlbumSkipSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(sameAlbumSkipSnapshot.activeTrack.id, "t4");
+    assert.match(sameAlbumSkipSnapshot.trackBannerMeta, /^ZENITH ECHO \u00b7 /);
+
+    // Advance to end and verify END OF ARTIST boundary toast
+    nowPlayingController.skipTrack(1);
+    assert.equal(nowPlayingController.getRenderSnapshot().activeTrack.id, "t5");
+    nowPlayingController.skipTrack(1);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "END OF ARTIST");
+
+    // Syncing back to album context clears artist title cleanly
+    audioEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, buildNowPlayingTestCatalog());
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    assert.equal(nowPlayingController.getRenderSnapshot().queueContext.badge, "ALBUM");
+  });
+});
