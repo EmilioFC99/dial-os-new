@@ -1,12 +1,16 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import { PLAY_MODES, createAudioEngine } from "../core/audio_engine.js";
+import {
+  PREVIOUS_RESTART_THRESHOLD_SECONDS,
+  REPEAT_MODES,
+  createAudioEngine,
+} from "../core/audio_engine.js";
 import {
   NOW_PLAYING_CONSTANTS,
   NOW_PLAYING_LYRICS_MODES,
-  NOW_PLAYING_PLAY_MODES,
   NOW_PLAYING_QUICK_BUTTONS,
+  NOW_PLAYING_REPEAT_MODES,
   computeNowPlayingQueueRowLayout,
   createNowPlayingController,
   enrichTrackDetails,
@@ -30,15 +34,17 @@ const VINYL_CENTER_TAP_X = 180;
 const VINYL_CENTER_TAP_Y = 180;
 
 const QUICK_FAVORITE_X = 104;
-const QUICK_FAVORITE_Y = 176;
-const QUICK_PLAY_MODE_X = 180;
-const QUICK_PLAY_MODE_Y = 176;
-const QUICK_PLAYLIST_X = 256;
-const QUICK_PLAYLIST_Y = 176;
-const QUICK_LYRICS_X = 142;
-const QUICK_LYRICS_Y = 248;
-const QUICK_DETAILS_X = 218;
-const QUICK_DETAILS_Y = 248;
+const QUICK_FAVORITE_Y = 168;
+const QUICK_SHUFFLE_X = 180;
+const QUICK_SHUFFLE_Y = 168;
+const QUICK_REPEAT_X = 256;
+const QUICK_REPEAT_Y = 168;
+const QUICK_PLAYLIST_X = 104;
+const QUICK_PLAYLIST_Y = 238;
+const QUICK_LYRICS_X = 180;
+const QUICK_LYRICS_Y = 238;
+const QUICK_DETAILS_X = 256;
+const QUICK_DETAILS_Y = 238;
 
 const SEEK_HOLD_POINT_X = 180;
 const SEEK_HOLD_POINT_Y = 120;
@@ -416,7 +422,8 @@ function createNowPlayingTestHarness({
     volumeChanges: [],
     skipDirections: [],
     favoriteToggles: [],
-    playModeChanges: [],
+    shuffleToggles: [],
+    repeatCycles: [],
     selectedQueueIndices: [],
     persistedPlaylists: [],
     exitReturnScreens: [],
@@ -444,17 +451,23 @@ function createNowPlayingTestHarness({
     },
     onSkipTrack: (direction) => {
       callbackLogs.skipDirections.push(direction);
-      audioEngine.skipTrack(direction);
+      const outcome = audioEngine.skipTrack(direction);
       nowPlayingController.syncAudioState(audioEngine.getState());
+      return outcome;
     },
     onToggleFavorite: (trackId, nextState) => {
       callbackLogs.favoriteToggles.push({ trackId, isFavorite: nextState });
       audioEngine.updateTrackFavorite(trackId, nextState);
       nowPlayingController.syncAudioState(audioEngine.getState());
     },
-    onPlayModeChange: (nextModeId) => {
-      callbackLogs.playModeChanges.push(nextModeId);
-      audioEngine.setPlayMode(nextModeId);
+    onToggleShuffle: () => {
+      const nextShuffleEnabled = audioEngine.toggleShuffle();
+      callbackLogs.shuffleToggles.push(nextShuffleEnabled);
+      nowPlayingController.syncAudioState(audioEngine.getState());
+    },
+    onCycleRepeatMode: () => {
+      const nextRepeatMode = audioEngine.cycleRepeatMode();
+      callbackLogs.repeatCycles.push(nextRepeatMode);
       nowPlayingController.syncAudioState(audioEngine.getState());
     },
     onSelectQueueIndex: (rowIndex) => {
@@ -494,29 +507,35 @@ function createNowPlayingTestHarness({
   };
 }
 
-describe("audio_engine.js play modes, queue selection, and metadata preservation", () => {
-  test("PLAY_MODES and cyclePlayMode cycle canonically while setPlayMode ignores invalid values", () => {
-    assert.deepEqual(PLAY_MODES, ["sequential", "shuffle", "repeat-all", "repeat-one"]);
+describe("audio_engine.js playback modes, queue selection, and metadata preservation", () => {
+  test("REPEAT_MODES, cycleRepeatMode, setRepeatMode, toggleShuffle, and setShuffleEnabled handle valid and invalid inputs", () => {
+    assert.deepEqual(REPEAT_MODES, ["off", "all", "one"]);
 
     const audioEngine = createAudioEngine();
-    assert.equal(audioEngine.getState().playMode, "sequential");
+    assert.equal(audioEngine.getState().shuffleEnabled, false);
+    assert.equal(audioEngine.getState().repeatMode, "off");
 
-    audioEngine.cyclePlayMode();
-    assert.equal(audioEngine.getState().playMode, "shuffle");
-    audioEngine.cyclePlayMode();
-    assert.equal(audioEngine.getState().playMode, "repeat-all");
-    audioEngine.cyclePlayMode();
-    assert.equal(audioEngine.getState().playMode, "repeat-one");
-    audioEngine.cyclePlayMode();
-    assert.equal(audioEngine.getState().playMode, "sequential");
+    audioEngine.cycleRepeatMode();
+    assert.equal(audioEngine.getState().repeatMode, "all");
+    audioEngine.cycleRepeatMode();
+    assert.equal(audioEngine.getState().repeatMode, "one");
+    audioEngine.cycleRepeatMode();
+    assert.equal(audioEngine.getState().repeatMode, "off");
 
-    audioEngine.setPlayMode("repeat-all");
-    assert.equal(audioEngine.getState().playMode, "repeat-all");
+    audioEngine.setRepeatMode("all");
+    assert.equal(audioEngine.getState().repeatMode, "all");
 
     for (const invalidMode of ["unknown", "", null, undefined, 42, {}]) {
-      audioEngine.setPlayMode(invalidMode);
-      assert.equal(audioEngine.getState().playMode, "repeat-all");
+      audioEngine.setRepeatMode(invalidMode);
+      assert.equal(audioEngine.getState().repeatMode, "all");
     }
+
+    audioEngine.toggleShuffle();
+    assert.equal(audioEngine.getState().shuffleEnabled, true);
+    audioEngine.setShuffleEnabled(false);
+    assert.equal(audioEngine.getState().shuffleEnabled, false);
+    audioEngine.setShuffleEnabled("not-a-bool");
+    assert.equal(audioEngine.getState().shuffleEnabled, false);
   });
 
   test("selectQueueIndex jumps cleanly, resets elapsedSeconds, clamps bounds, and guards empty queues", () => {
@@ -621,15 +640,18 @@ describe("audio_engine.js play modes, queue selection, and metadata preservation
     assert.deepEqual(genreState.queueGenreAlbumIds, ["a2"]);
   });
 
-  test("end-of-track handling follows playMode across both DOM ended events and headless step()", () => {
+  test("end-of-track handling follows shuffleEnabled and repeatMode across both DOM ended events and headless step()", () => {
     const catalog = buildNowPlayingTestCatalog();
 
-    // 1. DOM ended event paths across repeat-one, sequential, repeat-all, and shuffle
+    // 1. DOM ended event paths across repeat-one, repeat-off, repeat-all, and shuffle
     const stubAudio = createMockAudioStub();
-    const domEngine = createAudioEngine({ createAudioElement: () => stubAudio });
+    const domEngine = createAudioEngine({
+      createAudioElement: () => stubAudio,
+      random: () => 0.25,
+    });
     domEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, catalog);
 
-    domEngine.setPlayMode("repeat-one");
+    domEngine.setRepeatMode("one");
     domEngine.seekTo(120);
     stubAudio.emit("ended");
     assert.equal(domEngine.getState().queueIndex, 0);
@@ -637,48 +659,58 @@ describe("audio_engine.js play modes, queue selection, and metadata preservation
     assert.equal(domEngine.getState().elapsedSeconds, 0);
     assert.equal(domEngine.getState().isPlaying, true);
 
-    domEngine.setPlayMode("sequential");
+    domEngine.setRepeatMode("off");
     stubAudio.emit("ended");
     assert.equal(domEngine.getState().queueIndex, 1);
     assert.equal(domEngine.getState().activeTrack.id, "t2");
     assert.equal(domEngine.getState().isPlaying, true);
 
+    // Repeat Off at end of album resets to track 0 at 0:00 paused
     stubAudio.emit("ended");
     assert.equal(domEngine.getState().isPlaying, false);
     assert.equal(domEngine.getState().playbackState, "paused");
+    assert.equal(domEngine.getState().queueIndex, 0);
+    assert.equal(domEngine.getState().activeTrack.id, "t1");
+    assert.equal(domEngine.getState().elapsedSeconds, 0);
+    assert.equal(domEngine.getState().lastEvent.type, "context-ended");
 
     domEngine.play();
-    domEngine.setPlayMode("repeat-all");
+    domEngine.skipTrack(1);
+    domEngine.setRepeatMode("all");
     stubAudio.emit("ended");
     assert.equal(domEngine.getState().queueIndex, 0);
     assert.equal(domEngine.getState().activeTrack.id, "t1");
     assert.equal(domEngine.getState().elapsedSeconds, 0);
     assert.equal(domEngine.getState().isPlaying, true);
 
-    // Shuffle across multi-track queue never repeats the current index consecutively
+    // Shuffle + Repeat Off plays deck anchored on t1, visits every track once, then ends cleanly
+    domEngine.setRepeatMode("off");
     domEngine.playTrackFromSource({ trackId: "t1", queueSource: "all-songs" }, catalog);
-    domEngine.setPlayMode("shuffle");
-    let previousDomIndex = domEngine.getState().queueIndex;
-    for (let roundIndex = 0; roundIndex < SHUFFLE_TRIAL_ROUNDS; roundIndex += 1) {
+    domEngine.setShuffleEnabled(true);
+    const domDeck = domEngine.getState().queueTracks.map((trackEntry) => trackEntry.id);
+    assert.equal(domDeck[0], "t1");
+    assert.equal(domDeck.length, catalog.allTracks.length);
+    for (let stepIndex = 1; stepIndex < domDeck.length; stepIndex += 1) {
       stubAudio.emit("ended");
-      const shuffledState = domEngine.getState();
-      assert.equal(shuffledState.isPlaying, true);
-      assert.ok(shuffledState.queueIndex >= 0 && shuffledState.queueIndex < shuffledState.queueTracks.length);
-      assert.notEqual(shuffledState.queueIndex, previousDomIndex);
-      previousDomIndex = shuffledState.queueIndex;
+      assert.equal(domEngine.getState().activeTrack.id, domDeck[stepIndex]);
+      assert.equal(domEngine.getState().isPlaying, true);
     }
+    stubAudio.emit("ended");
+    assert.equal(domEngine.getState().isPlaying, false);
+    assert.equal(domEngine.getState().queueIndex, 0);
+    assert.equal(domEngine.getState().activeTrack.id, domDeck[0]);
 
-    // 2. Headless step() reaching durationSeconds across all four play modes
-    const headlessEngine = createAudioEngine();
+    // 2. Headless step() reaching durationSeconds across repeat/shuffle modes
+    const headlessEngine = createAudioEngine({ random: () => 0.4 });
     headlessEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, catalog);
 
-    headlessEngine.setPlayMode("repeat-one");
+    headlessEngine.setRepeatMode("one");
     headlessEngine.step(180);
     assert.equal(headlessEngine.getState().queueIndex, 0);
     assert.equal(headlessEngine.getState().elapsedSeconds, 0);
     assert.equal(headlessEngine.getState().isPlaying, true);
 
-    headlessEngine.setPlayMode("sequential");
+    headlessEngine.setRepeatMode("off");
     headlessEngine.step(180);
     assert.equal(headlessEngine.getState().queueIndex, 1);
     assert.equal(headlessEngine.getState().activeTrack.id, "t2");
@@ -687,32 +719,32 @@ describe("audio_engine.js play modes, queue selection, and metadata preservation
     headlessEngine.step(200);
     assert.equal(headlessEngine.getState().isPlaying, false);
     assert.equal(headlessEngine.getState().playbackState, "paused");
+    assert.equal(headlessEngine.getState().queueIndex, 0);
+    assert.equal(headlessEngine.getState().elapsedSeconds, 0);
 
     headlessEngine.play();
-    headlessEngine.setPlayMode("repeat-all");
+    headlessEngine.skipTrack(1);
+    headlessEngine.setRepeatMode("all");
     headlessEngine.step(200);
     assert.equal(headlessEngine.getState().queueIndex, 0);
     assert.equal(headlessEngine.getState().elapsedSeconds, 0);
     assert.equal(headlessEngine.getState().isPlaying, true);
 
+    // Shuffle + Repeat All wraps across full deck and reshuffles avoiding repeating finished track first
     headlessEngine.playTrackFromSource({ trackId: "t1", queueSource: "all-songs" }, catalog);
-    headlessEngine.setPlayMode("shuffle");
-    let previousHeadlessIndex = headlessEngine.getState().queueIndex;
+    headlessEngine.setShuffleEnabled(true);
+    let previousHeadlessId = headlessEngine.getState().activeTrack.id;
     for (let roundIndex = 0; roundIndex < SHUFFLE_TRIAL_ROUNDS; roundIndex += 1) {
       const currentDuration = headlessEngine.getState().durationSeconds;
       headlessEngine.step(currentDuration);
       const nextHeadlessState = headlessEngine.getState();
       assert.equal(nextHeadlessState.isPlaying, true);
       assert.equal(nextHeadlessState.elapsedSeconds, 0);
-      assert.ok(
-        nextHeadlessState.queueIndex >= 0 &&
-          nextHeadlessState.queueIndex < nextHeadlessState.queueTracks.length,
-      );
-      assert.notEqual(nextHeadlessState.queueIndex, previousHeadlessIndex);
-      previousHeadlessIndex = nextHeadlessState.queueIndex;
+      assert.notEqual(nextHeadlessState.activeTrack.id, previousHeadlessId);
+      previousHeadlessId = nextHeadlessState.activeTrack.id;
     }
 
-    // Single-track queue under shuffle remains stable on queueIndex 0
+    // Single-track queue under shuffle + repeat all keeps playing queueIndex 0
     const singleTrackCatalog = buildNowPlayingTestCatalog({
       albums: [
         {
@@ -730,7 +762,8 @@ describe("audio_engine.js play modes, queue selection, and metadata preservation
       { trackId: "t1", queueSource: "album", albumId: "single-album" },
       singleTrackCatalog,
     );
-    headlessEngine.setPlayMode("shuffle");
+    headlessEngine.setShuffleEnabled(true);
+    headlessEngine.setRepeatMode("all");
     headlessEngine.step(180);
     assert.equal(headlessEngine.getState().queueIndex, 0);
     assert.equal(headlessEngine.getState().isPlaying, true);
@@ -822,10 +855,10 @@ describe("now_playing_controller.js constants and pure helpers", () => {
     assert.equal(NOW_PLAYING_CONSTANTS.TAP_DRIFT_LIMIT_PX, 10);
 
     assert.deepEqual(
-      NOW_PLAYING_PLAY_MODES.map((modeEntry) => modeEntry.id),
-      ["sequential", "shuffle", "repeat-all", "repeat-one"],
+      NOW_PLAYING_REPEAT_MODES.map((modeEntry) => modeEntry.id),
+      ["off", "all", "one"],
     );
-    for (const modeEntry of NOW_PLAYING_PLAY_MODES) {
+    for (const modeEntry of NOW_PLAYING_REPEAT_MODES) {
       assert.equal(typeof modeEntry.label, "string");
       assert.ok(modeEntry.label.length > 0);
     }
@@ -838,7 +871,8 @@ describe("now_playing_controller.js constants and pure helpers", () => {
       })),
       [
         { id: "favorite", centerX: QUICK_FAVORITE_X, centerY: QUICK_FAVORITE_Y },
-        { id: "play-mode", centerX: QUICK_PLAY_MODE_X, centerY: QUICK_PLAY_MODE_Y },
+        { id: "shuffle", centerX: QUICK_SHUFFLE_X, centerY: QUICK_SHUFFLE_Y },
+        { id: "repeat", centerX: QUICK_REPEAT_X, centerY: QUICK_REPEAT_Y },
         { id: "playlist", centerX: QUICK_PLAYLIST_X, centerY: QUICK_PLAYLIST_Y },
         { id: "lyrics", centerX: QUICK_LYRICS_X, centerY: QUICK_LYRICS_Y },
         { id: "info", centerX: QUICK_DETAILS_X, centerY: QUICK_DETAILS_Y },
@@ -1431,14 +1465,31 @@ describe("createNowPlayingController skip transitions, quick actions, and queue 
     ]);
     assert.equal(nowPlayingController.getRenderSnapshot().toastText, "REMOVED FROM FAVORITES");
 
-    // 2. Play mode cycling
-    tapPoint(nowPlayingController, QUICK_PLAY_MODE_X, QUICK_PLAY_MODE_Y);
-    assert.deepEqual(callbackLogs.playModeChanges, ["shuffle"]);
-    const shuffleToast = nowPlayingController.getRenderSnapshot().toastText;
-    assert.ok(shuffleToast.startsWith("MODE // "));
-    assert.ok(
-      shuffleToast.toUpperCase().includes(NOW_PLAYING_PLAY_MODES[1].label.toUpperCase()),
-    );
+    // 2. Independent Shuffle toggle and Repeat mode cycling
+    tapPoint(nowPlayingController, QUICK_SHUFFLE_X, QUICK_SHUFFLE_Y);
+    assert.deepEqual(callbackLogs.shuffleToggles, [true]);
+    assert.equal(nowPlayingController.getRenderSnapshot().shuffleEnabled, true);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "SHUFFLE // ON");
+
+    tapPoint(nowPlayingController, QUICK_REPEAT_X, QUICK_REPEAT_Y);
+    assert.deepEqual(callbackLogs.repeatCycles, ["all"]);
+    assert.equal(nowPlayingController.getRenderSnapshot().repeatMode, "all");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "REPEAT // ALL");
+
+    tapPoint(nowPlayingController, QUICK_REPEAT_X, QUICK_REPEAT_Y);
+    assert.deepEqual(callbackLogs.repeatCycles, ["all", "one"]);
+    assert.equal(nowPlayingController.getRenderSnapshot().repeatMode, "one");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "REPEAT // ONE");
+
+    tapPoint(nowPlayingController, QUICK_REPEAT_X, QUICK_REPEAT_Y);
+    assert.deepEqual(callbackLogs.repeatCycles, ["all", "one", "off"]);
+    assert.equal(nowPlayingController.getRenderSnapshot().repeatMode, "off");
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "REPEAT // OFF");
+
+    tapPoint(nowPlayingController, QUICK_SHUFFLE_X, QUICK_SHUFFLE_Y);
+    assert.deepEqual(callbackLogs.shuffleToggles, [true, false]);
+    assert.equal(nowPlayingController.getRenderSnapshot().shuffleEnabled, false);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "SHUFFLE // OFF");
 
     // 3. Playlist picker creates default "DialOS Crate" when empty, adds track, and dedupes
     tapPoint(nowPlayingController, QUICK_PLAYLIST_X, QUICK_PLAYLIST_Y);
@@ -2085,5 +2136,91 @@ describe("createNowPlayingController lyrics playback, back navigation, and negat
     );
     nowPlayingController.updateTrackFavorite("", true);
     nowPlayingController.updateTrackFavorite(null, false);
+  });
+
+  test("enforces 3-second Previous rule, boundary bounce without crossing context, and END/START context toasts", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness({
+      sourceSpec: { trackId: "t1", queueSource: "album", albumId: "a1" },
+    });
+
+    // At track 0 with elapsed <= 3s, skipTrack(-1) bounces at START OF ALBUM
+    audioEngine.seekTo(PREVIOUS_RESTART_THRESHOLD_SECONDS);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.skipTrack(-1);
+    const startBounceSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(startBounceSnapshot.activeTrack.id, "t1");
+    assert.equal(startBounceSnapshot.toastText, "START OF ALBUM");
+    assert.equal(startBounceSnapshot.skipTransitionProgress, 1);
+
+    for (let stepIndex = 0; stepIndex < 60; stepIndex += 1) {
+      nowPlayingController.step(0.05);
+    }
+
+    // At track 0 with elapsed > 3s, skipTrack(-1) restarts current track at 0:00 without bounce
+    audioEngine.seekTo(PREVIOUS_RESTART_THRESHOLD_SECONDS + 1.5);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    nowPlayingController.skipTrack(-1);
+    const restartSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(restartSnapshot.activeTrack.id, "t1");
+    assert.equal(restartSnapshot.trackElapsedSeconds, 0);
+    assert.equal(restartSnapshot.toastAlpha, 0);
+
+    // Advance to last track of album (t2), verify END OF ALBUM bounce on manual Next
+    nowPlayingController.skipTrack(1);
+    assert.equal(nowPlayingController.getRenderSnapshot().activeTrack.id, "t2");
+    nowPlayingController.skipTrack(1);
+    const endBounceSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(endBounceSnapshot.activeTrack.id, "t2");
+    assert.equal(endBounceSnapshot.toastText, "END OF ALBUM");
+    assert.equal(endBounceSnapshot.skipTransitionProgress, 1);
+
+    // Auto-end on last track under Repeat Off resets to t1 paused and triggers END OF ALBUM toast via syncAudioState
+    audioEngine.step(200);
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    const contextEndedSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(contextEndedSnapshot.activeTrack.id, "t1");
+    assert.equal(contextEndedSnapshot.isPlaying, false);
+    assert.equal(contextEndedSnapshot.trackElapsedSeconds, 0);
+    assert.equal(contextEndedSnapshot.toastText, "END OF ALBUM");
+  });
+
+  test("exposes ARTIST queueContext, displays uppercase albumTitle in trackBannerMeta on same-album skip, and shows ARTIST boundary toasts", () => {
+    const { audioEngine, nowPlayingController } = createNowPlayingTestHarness({
+      sourceSpec: {
+        trackId: "t3",
+        queueSource: "artist",
+        artistName: "Boreal Quartet",
+        artistAlbumIds: ["a2"],
+      },
+    });
+
+    const initialSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.deepEqual(initialSnapshot.queueContext, {
+      sourceId: "artist",
+      badge: "ARTIST",
+      title: "Boreal Quartet",
+      tracks: initialSnapshot.queueTracks,
+    });
+
+    // Boundary bounce at start emits START OF ARTIST
+    nowPlayingController.skipTrack(-1);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "START OF ARTIST");
+
+    // Skipping within the same album under artist context shows uppercase albumTitle in trackBannerMeta
+    nowPlayingController.skipTrack(1);
+    const sameAlbumSkipSnapshot = nowPlayingController.getRenderSnapshot();
+    assert.equal(sameAlbumSkipSnapshot.activeTrack.id, "t4");
+    assert.match(sameAlbumSkipSnapshot.trackBannerMeta, /^ZENITH ECHO \u00b7 /);
+
+    // Advance to end and verify END OF ARTIST boundary toast
+    nowPlayingController.skipTrack(1);
+    assert.equal(nowPlayingController.getRenderSnapshot().activeTrack.id, "t5");
+    nowPlayingController.skipTrack(1);
+    assert.equal(nowPlayingController.getRenderSnapshot().toastText, "END OF ARTIST");
+
+    // Syncing back to album context clears artist title cleanly
+    audioEngine.playTrackFromSource({ trackId: "t1", queueSource: "album", albumId: "a1" }, buildNowPlayingTestCatalog());
+    nowPlayingController.syncAudioState(audioEngine.getState());
+    assert.equal(nowPlayingController.getRenderSnapshot().queueContext.badge, "ALBUM");
   });
 });

@@ -4,6 +4,10 @@
  */
 
 import {
+  REPEAT_MODES,
+  resolveSkipOutcome,
+} from "./audio_engine.js";
+import {
   DISPLAY_CENTER_PX,
   FULL_CIRCLE_RADIANS,
   clamp,
@@ -186,19 +190,19 @@ export const NOW_PLAYING_CONSTANTS = Object.freeze({
   TAP_DRIFT_LIMIT_PX: 10,
 });
 
-export const NOW_PLAYING_PLAY_MODES = Object.freeze([
-  Object.freeze({ id: "sequential", label: "SEQUENTIAL" }),
-  Object.freeze({ id: "shuffle", label: "SHUFFLE" }),
-  Object.freeze({ id: "repeat-all", label: "REPEAT ALL" }),
-  Object.freeze({ id: "repeat-one", label: "REPEAT ONE" }),
+export const NOW_PLAYING_REPEAT_MODES = Object.freeze([
+  Object.freeze({ id: "off", label: "REPEAT OFF", caption: "REPEAT" }),
+  Object.freeze({ id: "all", label: "REPEAT ALL", caption: "REP ALL" }),
+  Object.freeze({ id: "one", label: "REPEAT ONE", caption: "REP 1" }),
 ]);
 
 export const NOW_PLAYING_QUICK_BUTTONS = Object.freeze([
-  Object.freeze({ id: "favorite", label: "FAV", centerX: 104, centerY: 176, radius: 25 }),
-  Object.freeze({ id: "play-mode", label: "MODE", centerX: 180, centerY: 176, radius: 25 }),
-  Object.freeze({ id: "playlist", label: "MIX+", centerX: 256, centerY: 176, radius: 25 }),
-  Object.freeze({ id: "lyrics", label: "LYRICS", centerX: 142, centerY: 248, radius: 25 }),
-  Object.freeze({ id: "info", label: "INFO", centerX: 218, centerY: 248, radius: 25 }),
+  Object.freeze({ id: "favorite", label: "FAV", centerX: 104, centerY: 168, radius: 24 }),
+  Object.freeze({ id: "shuffle", label: "SHUFFLE", centerX: 180, centerY: 168, radius: 24 }),
+  Object.freeze({ id: "repeat", label: "REPEAT", centerX: 256, centerY: 168, radius: 24 }),
+  Object.freeze({ id: "playlist", label: "MIX+", centerX: 104, centerY: 238, radius: 24 }),
+  Object.freeze({ id: "lyrics", label: "LYRICS", centerX: 180, centerY: 238, radius: 24 }),
+  Object.freeze({ id: "info", label: "INFO", centerX: 256, centerY: 238, radius: 24 }),
 ]);
 
 export const NOW_PLAYING_LYRICS_MODES = Object.freeze(["auto", "timed", "untimed", "none"]);
@@ -663,7 +667,8 @@ export function enrichTrackDetails(
  * @param {(nextVolume: number) => void} [callbacks.onVolumeChange] Invoked when bezel or wheel changes volume.
  * @param {(direction: number) => void} [callbacks.onSkipTrack] Invoked on track skip (+1 or -1).
  * @param {(trackId: string, nextState: boolean) => void} [callbacks.onToggleFavorite] Invoked on favorite toggle.
- * @param {(nextModeId: string) => void} [callbacks.onPlayModeChange] Invoked when play mode cycles.
+ * @param {() => boolean | void} [callbacks.onToggleShuffle] Invoked when Shuffle is toggled.
+ * @param {() => string | void} [callbacks.onCycleRepeatMode] Invoked when Repeat mode cycles.
  * @param {(rowIndex: number) => void} [callbacks.onSelectQueueIndex] Invoked when tapping a queue row.
  * @param {(updatedPlaylists: Array<object>) => void} [callbacks.onPersistPlaylists] Invoked when a playlist changes.
  * @param {(returnScreen: string) => void} [callbacks.onExit] Invoked when exiting bare Now Playing.
@@ -676,7 +681,8 @@ export function createNowPlayingController({
   onVolumeChange,
   onSkipTrack,
   onToggleFavorite,
-  onPlayModeChange,
+  onToggleShuffle,
+  onCycleRepeatMode,
   onSelectQueueIndex,
   onPersistPlaylists,
   onExit,
@@ -695,12 +701,17 @@ export function createNowPlayingController({
   let previousTrack = null;
   let previousAlbum = null;
   let queueTracks = [];
+  let baseTrackCount = 0;
   let queueIndex = 0;
   let queueSource = "album";
   let queueAlbumId = null;
+  let queueArtistName = null;
+  let queueArtistAlbumIds = [];
   let queuePlaylistId = null;
   let queueGenreTitle = null;
   let queueGenreAlbumIds = [];
+  let ephemeralCurrentTrackId = null;
+  let lastAudioEventSeq = 0;
 
   let isPlaying = false;
   let spinAngularVelocity = 0;
@@ -711,8 +722,8 @@ export function createNowPlayingController({
   let trackDurationSeconds = 0;
   let idleClockSeconds = 0;
 
-  let playMode = NOW_PLAYING_PLAY_MODES[0].id;
-  let playModeIndex = 0;
+  let shuffleEnabled = false;
+  let repeatMode = NOW_PLAYING_REPEAT_MODES[0].id;
 
   let volumeLevel = DEFAULT_VOLUME_LEVEL;
   let volumeHudAlpha = 0;
@@ -833,6 +844,9 @@ export function createNowPlayingController({
         (playlistEntry) => playlistEntry.id === queuePlaylistId,
       );
       title = matchedPlaylist ? matchedPlaylist.name : "Playlist";
+    } else if (queueSource === "artist") {
+      badge = "ARTIST";
+      title = queueArtistName || activeTrack?.artist || "Artist";
     } else if (queueSource === "favorites") {
       badge = "FAVORITES";
       title = "Favorites";
@@ -867,6 +881,9 @@ export function createNowPlayingController({
       const positionText = String(activeIndex + 1).padStart(2, "0");
       const totalText = String(Math.max(1, queueContext.tracks.length)).padStart(2, "0");
       trackBannerMeta = `${positionText} / ${totalText} \u00b7 ${durationLabel}`;
+    } else if (queueContext.sourceId === "artist") {
+      const albumLabel = String(track.albumTitle || "UNKNOWN ALBUM").toUpperCase();
+      trackBannerMeta = `${albumLabel} \u00b7 ${durationLabel}`;
     } else {
       const artistLabel = String(track.artist || "UNKNOWN ARTIST").toUpperCase();
       trackBannerMeta = `${artistLabel} \u00b7 ${durationLabel}`;
@@ -919,13 +936,29 @@ export function createNowPlayingController({
       volumeLevel = clamp(audioState.volume, 0, 1);
     }
 
-    if (typeof audioState.playMode === "string") {
-      const matchedModeIndex = NOW_PLAYING_PLAY_MODES.findIndex(
-        (modeEntry) => modeEntry.id === audioState.playMode,
-      );
-      if (matchedModeIndex >= 0) {
-        playModeIndex = matchedModeIndex;
-        playMode = NOW_PLAYING_PLAY_MODES[matchedModeIndex].id;
+    if (typeof audioState.shuffleEnabled === "boolean") {
+      shuffleEnabled = audioState.shuffleEnabled;
+    }
+
+    if (typeof audioState.repeatMode === "string" && REPEAT_MODES.includes(audioState.repeatMode)) {
+      repeatMode = audioState.repeatMode;
+    }
+
+    ephemeralCurrentTrackId =
+      typeof audioState.ephemeralCurrentTrackId === "string" && audioState.ephemeralCurrentTrackId.length > 0
+        ? audioState.ephemeralCurrentTrackId
+        : null;
+
+    let incomingEvent = null;
+    if (
+      audioState.lastEvent &&
+      typeof audioState.lastEvent.seq === "number" &&
+      audioState.lastEvent.seq > lastAudioEventSeq
+    ) {
+      lastAudioEventSeq = audioState.lastEvent.seq;
+      incomingEvent = audioState.lastEvent;
+      if (incomingEvent.message) {
+        showToast(incomingEvent.message);
       }
     }
 
@@ -934,6 +967,7 @@ export function createNowPlayingController({
       activeTrack = null;
       activeAlbum = null;
       queueTracks = [];
+      baseTrackCount = 0;
       queueIndex = 0;
       isPlaying = false;
       trackElapsedSeconds = 0;
@@ -958,6 +992,10 @@ export function createNowPlayingController({
     } else {
       queueTracks = [activeTrack];
     }
+    baseTrackCount =
+      typeof audioState.baseTrackCount === "number" && Number.isFinite(audioState.baseTrackCount)
+        ? Math.max(0, Math.trunc(audioState.baseTrackCount))
+        : queueTracks.length;
 
     queueIndex =
       typeof audioState.queueIndex === "number" && Number.isFinite(audioState.queueIndex)
@@ -968,6 +1006,10 @@ export function createNowPlayingController({
         ? audioState.queueSource
         : "album";
     queueAlbumId = audioState.queueAlbumId ?? activeTrack.albumId ?? null;
+    queueArtistName = audioState.queueArtistName ?? null;
+    queueArtistAlbumIds = Array.isArray(audioState.queueArtistAlbumIds)
+      ? audioState.queueArtistAlbumIds.slice()
+      : [];
     queuePlaylistId = audioState.queuePlaylistId ?? null;
     queueGenreTitle = audioState.queueGenreTitle ?? null;
     queueGenreAlbumIds = Array.isArray(audioState.queueGenreAlbumIds)
@@ -985,8 +1027,15 @@ export function createNowPlayingController({
       trackElapsedSeconds = clamp(audioState.elapsedSeconds, 0, trackDurationSeconds);
     }
 
-    if (suppressTransition) {
+    if (suppressTransition || incomingEvent?.type === "context-ended") {
       pendingTrackChangeTransition = null;
+      if (incomingEvent?.type === "context-ended") {
+        previousTrack = null;
+        previousAlbum = null;
+        skipTransitionProgress = 1;
+        trackBannerPhase = "hidden";
+        trackBannerAlpha = 0;
+      }
       return;
     }
 
@@ -1347,21 +1396,104 @@ export function createNowPlayingController({
     };
 
     if (typeof onSkipTrack === "function") {
-      onSkipTrack(stepDirection);
+      const hostOutcome = onSkipTrack(stepDirection);
+      if (hostOutcome && hostOutcome.action === "boundary-bounce") {
+        pendingTrackChangeTransition = null;
+        skipDragOffsetX = 0;
+        previousTrack = null;
+        previousAlbum = null;
+        skipTransitionProgress = 1;
+        vinylNudgeTarget += -stepDirection * VINYL_SKIP_SAME_ALBUM_NUDGE_RADIANS;
+        showToast(`${hostOutcome.boundary === "end" ? "END OF " : "START OF "}${hostOutcome.contextBadge}`);
+        return;
+      }
+      if (hostOutcome && hostOutcome.action === "restart-current") {
+        pendingTrackChangeTransition = null;
+        skipDragOffsetX = 0;
+        trackElapsedSeconds = 0;
+        previousTrack = null;
+        previousAlbum = null;
+        skipTransitionProgress = 1;
+        vinylNudgeTarget += stepDirection * VINYL_SKIP_SAME_ALBUM_NUDGE_RADIANS;
+        return;
+      }
+      if (hostOutcome && hostOutcome.action === "idle") {
+        pendingTrackChangeTransition = null;
+        return;
+      }
     }
 
     if (pendingTrackChangeTransition !== null && queueTracks.length > 0) {
       pendingTrackChangeTransition = null;
-      const trackCount = queueTracks.length;
-      const nextIndex = (((queueIndex + stepDirection) % trackCount) + trackCount) % trackCount;
-      queueIndex = nextIndex;
-      activeTrack = queueTracks[nextIndex];
-      activeAlbum = albumByIdMap.get(activeTrack?.albumId) || null;
-      trackDurationSeconds = resolveSafeTrackDurationSeconds(activeTrack);
-      applyTrackChangePresentation(priorTrack, priorAlbum, activeTrack, stepDirection);
+      const outcome = resolveSkipOutcome(
+        {
+          queueTracks,
+          queueIndex,
+          elapsedSeconds: trackElapsedSeconds,
+          repeatMode,
+          shuffleEnabled,
+          queueSource,
+          ephemeralCurrentTrackId,
+          baseTrackCount,
+        },
+        stepDirection,
+      );
+      if (outcome.action === "boundary-bounce") {
+        skipDragOffsetX = 0;
+        previousTrack = null;
+        previousAlbum = null;
+        skipTransitionProgress = 1;
+        vinylNudgeTarget += -stepDirection * VINYL_SKIP_SAME_ALBUM_NUDGE_RADIANS;
+        showToast(`${outcome.boundary === "end" ? "END OF " : "START OF "}${outcome.contextBadge}`);
+        return;
+      }
+      if (outcome.action === "restart-current") {
+        skipDragOffsetX = 0;
+        trackElapsedSeconds = 0;
+        previousTrack = null;
+        previousAlbum = null;
+        skipTransitionProgress = 1;
+        vinylNudgeTarget += stepDirection * VINYL_SKIP_SAME_ALBUM_NUDGE_RADIANS;
+        return;
+      }
+      if (outcome.action === "jump") {
+        queueIndex = outcome.targetIndex;
+        activeTrack = queueTracks[outcome.targetIndex];
+        activeAlbum = albumByIdMap.get(activeTrack?.albumId) || null;
+        trackDurationSeconds = resolveSafeTrackDurationSeconds(activeTrack);
+        applyTrackChangePresentation(priorTrack, priorAlbum, activeTrack, stepDirection);
+      }
     } else {
       pendingTrackChangeTransition = null;
     }
+  }
+
+  /**
+   * Toggle Shuffle ON or OFF cleanly via host callback or local state.
+   */
+  function toggleShuffle() {
+    if (typeof onToggleShuffle === "function") {
+      onToggleShuffle();
+    } else {
+      shuffleEnabled = !shuffleEnabled;
+      showToast(shuffleEnabled ? "SHUFFLE // ON" : "SHUFFLE // OFF");
+    }
+    quickActionsIdleSeconds = 0;
+  }
+
+  /**
+   * Cycle Repeat mode (`off` -> `all` -> `one` -> `off`) cleanly via host callback or local state.
+   */
+  function cycleRepeatMode() {
+    if (typeof onCycleRepeatMode === "function") {
+      onCycleRepeatMode();
+    } else {
+      const currentIndex = REPEAT_MODES.indexOf(repeatMode);
+      const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % REPEAT_MODES.length : 0;
+      repeatMode = REPEAT_MODES[nextIndex];
+      showToast(`REPEAT // ${repeatMode.toUpperCase()}`);
+    }
+    quickActionsIdleSeconds = 0;
   }
 
   /**
@@ -2312,15 +2444,10 @@ export function createNowPlayingController({
             showToast(nextFavorite ? "ADDED TO FAVORITES" : "REMOVED FROM FAVORITES");
           }
           quickActionsIdleSeconds = 0;
-        } else if (actionId === "play-mode") {
-          playModeIndex = (playModeIndex + 1) % NOW_PLAYING_PLAY_MODES.length;
-          const nextModeSpec = NOW_PLAYING_PLAY_MODES[playModeIndex];
-          playMode = nextModeSpec.id;
-          if (typeof onPlayModeChange === "function") {
-            onPlayModeChange(playMode);
-          }
-          showToast(`MODE // ${nextModeSpec.label}`);
-          quickActionsIdleSeconds = 0;
+        } else if (actionId === "shuffle") {
+          toggleShuffle();
+        } else if (actionId === "repeat") {
+          cycleRepeatMode();
         } else if (actionId === "playlist") {
           if (playlists.length === 0) {
             playlists = [{ id: "dialos-crate", name: "DialOS Crate", trackIds: [] }];
@@ -2445,8 +2572,10 @@ export function createNowPlayingController({
       trackElapsedSeconds,
       trackDurationSeconds,
       idleClockSeconds,
-      playMode,
-      playModeIndex,
+      shuffleEnabled,
+      repeatMode,
+      ephemeralCurrentTrackId,
+      baseTrackCount,
       volumeLevel,
       volumeHudAlpha,
       isSeeking,
@@ -2505,6 +2634,8 @@ export function createNowPlayingController({
     skipTrack,
     cycleLyricsMode,
     togglePlayPause,
+    toggleShuffle,
+    cycleRepeatMode,
     toggleLyrics,
     toggleTrackDetails,
     toggleQueueSheet,

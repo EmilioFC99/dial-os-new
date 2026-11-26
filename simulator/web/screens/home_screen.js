@@ -27,7 +27,11 @@ import {
 } from "../core/home_controller.js";
 import { drawDialOsEmblem } from "../core/primitives.js";
 import { APPEARANCE_PALETTES, FONT_DISPLAY, FONT_MONO } from "../core/tokens.js";
-import { drawLibraryVinylDisc, drawMarqueeCanvasText } from "./library_screen.js";
+import {
+  drawLibraryVinylDisc,
+  drawMarqueeCanvasText,
+  renderLibraryHubTransitionLayer,
+} from "./library_screen.js";
 
 const ALPHA_VISIBILITY_THRESHOLD = 0.005;
 const PERCENT_SCALE = 100;
@@ -43,17 +47,25 @@ const BACK_SWIPE_ARC_MIN_PROGRESS = 0.02;
 const BACK_SWIPE_ARC_RADIUS_PX = 168;
 const BACK_SWIPE_ARC_SPAN_RADIANS = 0.34;
 
+const LIBRARY_DIVE_END_PROGRESS = 0.56;
+const LIBRARY_DIVE_SHELL_FADE_START = 0.14;
+const LIBRARY_DIVE_SHELL_FADE_END = 0.54;
+const LIBRARY_DIVE_ICON_FADE_START = 0.08;
+const LIBRARY_DIVE_ICON_FADE_END = 0.36;
+const LIBRARY_DIVE_TARGET_HALF_SIZE_PX = 178;
+
 const CUBE_ICON_BASE_HALF_SIZE_PX = 45;
 const CUBE_INNER_WALL_RATIO = 0.85;
 const CUBE_HIT_SCALE = 1.25;
 const CUBE_HIT_PADDING_PX = 8;
 
-const RIM_SHEEN_RADIUS_PX = 175;
 const EDGE_PROGRESS_RADIUS_PX = DISPLAY_CENTER_PX - 1.5;
 const EDGE_PROGRESS_LINE_WIDTH_PX = 1.6;
 const EXPANDED_CHROME_REVEAL_START_PROGRESS = 0.72;
 const EXPANDED_CHROME_REVEAL_END_PROGRESS = 1.0;
 const EDGE_PROGRESS_MIN_RATIO = 0.001;
+
+const RIM_SHEEN_RADIUS_PX = 175;
 const GLASS_FLOOR_TOP_Y = 202;
 const GLASS_FLOOR_BOTTOM_Y = 232;
 const GLASS_FLOOR_RAIL_SPACING_PX = 36;
@@ -1101,6 +1113,7 @@ function drawGlassAppCube(drawingContext, options) {
     focusWeight,
     alpha,
     shellAlpha,
+    iconAlpha = 1,
     playbackState,
     clockSeconds,
     vinylRotationRadians,
@@ -1227,25 +1240,30 @@ function drawGlassAppCube(drawingContext, options) {
   }
 
   /* Layer 3: Living animated 3D core suspended inside the crystal volume */
-  drawAliveCubeIcon(
-    drawingContext,
-    appId,
-    centerX,
-    centerY,
-    halfSize,
-    angleX,
-    angleY,
-    angleZ,
-    focusWeight,
-    playbackState,
-    clockSeconds,
-    vinylRotationRadians,
-    appearance,
-    palette,
-    activeAlbum,
-    coverCache,
-    hideVinylDisc,
-  );
+  if (iconAlpha > ALPHA_VISIBILITY_THRESHOLD) {
+    drawingContext.save();
+    drawingContext.globalAlpha = alpha * iconAlpha;
+    drawAliveCubeIcon(
+      drawingContext,
+      appId,
+      centerX,
+      centerY,
+      halfSize,
+      angleX,
+      angleY,
+      angleZ,
+      focusWeight,
+      playbackState,
+      clockSeconds,
+      vinylRotationRadians,
+      appearance,
+      palette,
+      activeAlbum,
+      coverCache,
+      hideVinylDisc,
+    );
+    drawingContext.restore();
+  }
 
   /* Layer 4: Front translucent crystal facets, specular refraction glare & corner brackets */
   if (shellAlpha > 0.01) {
@@ -1711,6 +1729,18 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
     palette,
   );
 
+  /* 1B. Incoming Library Hub depth layer (behind the expanding Library acrylic cube) */
+  if (focusedApp.id === "library" && launchProgress > ALPHA_VISIBILITY_THRESHOLD) {
+    renderLibraryHubTransitionLayer(drawingContext, {
+      counts: resolvedContext.counts,
+      scrollPosition: homeState.libraryHubScrollPosition,
+      revealProgress: launchProgress,
+      clockSeconds,
+      palette,
+      appearance,
+    });
+  }
+
   /* 2. Build 5 consecutive virtual slots sorted back-to-front by ascending focusWeight */
   const visibleSlots = [];
   for (let slotOffset = -2; slotOffset <= 2; slotOffset += 1) {
@@ -1789,6 +1819,52 @@ export function renderHomeScreen(drawingContext, homeState, renderContext = {}) 
           coverCache,
           { showCenterLabel: false, grooveAlpha: 0 },
         );
+        continue;
+      }
+
+      if (appSpec.id === "library") {
+        const diveProgress = normalizeRange(launchProgress, 0.0, LIBRARY_DIVE_END_PROGRESS);
+        const diveEase = easeInOutCubic(diveProgress);
+        const shellDissolve =
+          1 -
+          easeOutCubic(
+            normalizeRange(launchProgress, LIBRARY_DIVE_SHELL_FADE_START, LIBRARY_DIVE_SHELL_FADE_END),
+          );
+        const iconDissolve =
+          1 -
+          easeOutCubic(
+            normalizeRange(launchProgress, LIBRARY_DIVE_ICON_FADE_START, LIBRARY_DIVE_ICON_FADE_END),
+          );
+
+        if (
+          shellDissolve > ALPHA_VISIBILITY_THRESHOLD ||
+          iconDissolve > ALPHA_VISIBILITY_THRESHOLD
+        ) {
+          drawGlassAppCube(drawingContext, {
+            appId: appSpec.id,
+            centerX: lerp(layout.centerX, DISPLAY_CENTER_PX, diveEase),
+            centerY: lerp(layout.centerY, DISPLAY_CENTER_PX, diveEase),
+            halfSize: lerp(
+              layout.halfSize,
+              LIBRARY_DIVE_TARGET_HALF_SIZE_PX,
+              easeOutCubic(diveProgress),
+            ),
+            angleX: layout.angleX * (1 - diveEase),
+            angleY: layout.angleY * (1 - diveEase),
+            angleZ: layout.angleZ * (1 - diveEase),
+            focusWeight: layout.focusWeight,
+            alpha: 1.0,
+            shellAlpha: shellDissolve,
+            iconAlpha: iconDissolve,
+            playbackState,
+            clockSeconds,
+            vinylRotationRadians,
+            appearance,
+            palette,
+            activeAlbum,
+            coverCache,
+          });
+        }
         continue;
       }
 

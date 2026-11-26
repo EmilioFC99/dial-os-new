@@ -6,11 +6,13 @@
  * Details telemetry grid, Context Queue sheet, idle/receiver modes, and left-edge back-swipe.
  */
 
+import { resolveSkipOutcome } from "../core/audio_engine.js";
 import {
   DISPLAY_CENTER_PX,
   DISPLAY_DIAMETER_PX,
   FULL_CIRCLE_RADIANS,
   REGISTRATION_MARK_RADIUS_PX,
+  SAFE_CLIP_RADIUS_PX,
   TOP_ANGLE_RADIANS,
   clamp,
   easeInOutCubic,
@@ -22,12 +24,12 @@ import {
 } from "../core/geometry.js";
 import {
   NOW_PLAYING_CONSTANTS,
-  NOW_PLAYING_PLAY_MODES,
   NOW_PLAYING_QUICK_BUTTONS,
+  NOW_PLAYING_REPEAT_MODES,
   computeNowPlayingQueueRowLayout,
   hitTestNowPlayingQueueRow,
 } from "../core/now_playing_controller.js";
-import { drawDiagonalMark } from "../core/primitives.js";
+import { drawCrosshairMark, drawDiagonalMark } from "../core/primitives.js";
 import { APPEARANCE_PALETTES, FONT_DISPLAY, FONT_MONO } from "../core/tokens.js";
 import {
   drawCrateAlbumSleeveBox,
@@ -85,6 +87,48 @@ const PICKER_MAX_VISIBLE_ROWS = 4;
 const QUICK_ACTION_HIT_PAD_PX = 5;
 const QUEUE_LIST_CLIP_TOP_Y = 102;
 const QUEUE_LIST_CLIP_HEIGHT_PX = 214;
+
+const LYRICS_FIELD_LOWER_HORIZON_Y_PX = 238;
+const LYRICS_FIELD_LOWER_EDGE_Y_PX = 368;
+const LYRICS_FIELD_UPPER_HORIZON_Y_PX = 114;
+const LYRICS_FIELD_UPPER_EDGE_Y_PX = -8;
+const LYRICS_FIELD_RAY_HALF_COUNT = 4;
+const LYRICS_FIELD_TOP_RAY_STEP_PX = 28;
+const LYRICS_FIELD_BOTTOM_RAY_STEP_PX = 74;
+const LYRICS_FIELD_DEPTH_STEPS = 4;
+const LYRICS_FIELD_DRIFT_FACTOR = 0.35;
+const LYRICS_FIELD_LINE_MARGIN_PX = 10;
+
+const LYRICS_VIGNETTE_CENTER_Y_OFFSET_PX = -6;
+const LYRICS_VIGNETTE_INNER_RADIUS_PX = 42;
+const LYRICS_VIGNETTE_OUTER_RADIUS_PX = 144;
+
+const LYRICS_OUTER_CROSSHAIRS = Object.freeze([
+  Object.freeze({ centerX: 74, centerY: 84, kind: "plus" }),
+  Object.freeze({ centerX: 286, centerY: 84, kind: "cross" }),
+  Object.freeze({ centerX: 52, centerY: 274, kind: "cross" }),
+  Object.freeze({ centerX: 308, centerY: 274, kind: "plus" }),
+]);
+const LYRICS_CROSSHAIR_PLUS_HALF_LENGTH_PX = 4.2;
+const LYRICS_CROSSHAIR_CROSS_HALF_SPAN_PX = 3.6;
+const LYRICS_CROSSHAIR_LINE_WIDTH_PX = 1.15;
+
+const LYRICS_DIVIDER_MIN_Y_PX = 214;
+const LYRICS_DIVIDER_MAX_Y_PX = 234;
+const LYRICS_DIVIDER_OFFSET_Y_PX = 12;
+const LYRICS_DIVIDER_LEFT_X_PX = 116;
+const LYRICS_DIVIDER_RIGHT_X_PX = 244;
+const LYRICS_DIVIDER_LEFT_CAP_X_PX = 110;
+const LYRICS_DIVIDER_RIGHT_CAP_X_PX = 250;
+const LYRICS_DIVIDER_CAP_SPAN_PX = 2.4;
+
+const NO_LYRICS_MEDALLION_CENTER_Y_PX = 148;
+const NO_LYRICS_MEDALLION_BASE_RADIUS_PX = 30;
+const NO_LYRICS_ICON_RADIUS_PX = 16;
+const NO_LYRICS_SLASH_HALF_SPAN_X_PX = 15;
+const NO_LYRICS_SLASH_HALF_SPAN_Y_PX = 14;
+const NO_LYRICS_SLASH_KNOCKOUT_WIDTH_PX = 4.4;
+const NO_LYRICS_SLASH_LINE_WIDTH_PX = 2.0;
 
 const NOW_PLAYING_MOTIF_GLOW_PALETTES = Object.freeze({
   prism: Object.freeze({
@@ -297,6 +341,69 @@ function drawNowPlayingOpticalVinyl(
   );
 }
 
+/**
+ * Draw the chamfered speech bubble with two quote marks used for Lyrics actions and No Lyrics state.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {number} centerX Center X coordinate.
+ * @param {number} centerY Center Y coordinate.
+ * @param {number} radius Glyph bounding radius in pixels.
+ * @param {object} options Stroke/fill colors and line widths.
+ */
+function drawLyricsBubbleGlyph(
+  drawingContext,
+  centerX,
+  centerY,
+  radius,
+  {
+    bubbleColor,
+    quoteColor,
+    bubbleLineWidth = 1.8,
+    quoteLineWidth = 1.6,
+  },
+) {
+  drawingContext.save();
+  drawingContext.translate(centerX, centerY);
+  drawingContext.strokeStyle = bubbleColor;
+  drawingContext.lineWidth = bubbleLineWidth;
+  drawingContext.lineCap = "butt";
+  drawingContext.lineJoin = "miter";
+
+  // Speech bubble with two quote marks, chamfered to match DialOS 2D primitives.
+  drawingContext.beginPath();
+  drawingContext.moveTo(-radius * 0.62, -radius * 0.64);
+  drawingContext.lineTo(radius * 0.62, -radius * 0.64);
+  drawingContext.lineTo(radius * 0.80, -radius * 0.46);
+  drawingContext.lineTo(radius * 0.80, radius * 0.22);
+  drawingContext.lineTo(radius * 0.62, radius * 0.40);
+  drawingContext.lineTo(-radius * 0.02, radius * 0.40);
+  drawingContext.lineTo(-radius * 0.42, radius * 0.80);
+  drawingContext.lineTo(-radius * 0.36, radius * 0.40);
+  drawingContext.lineTo(-radius * 0.62, radius * 0.40);
+  drawingContext.lineTo(-radius * 0.80, radius * 0.22);
+  drawingContext.lineTo(-radius * 0.80, -radius * 0.46);
+  drawingContext.closePath();
+  drawingContext.stroke();
+
+  drawingContext.fillStyle = quoteColor;
+  drawingContext.strokeStyle = quoteColor;
+  drawingContext.lineWidth = quoteLineWidth;
+  for (const quoteCenterX of [-radius * 0.24, radius * 0.24]) {
+    drawingContext.fillRect(
+      quoteCenterX - radius * 0.11,
+      -radius * 0.32,
+      radius * 0.22,
+      radius * 0.22,
+    );
+    drawingContext.beginPath();
+    drawingContext.moveTo(quoteCenterX + radius * 0.11, -radius * 0.12);
+    drawingContext.lineTo(quoteCenterX - radius * 0.05, radius * 0.16);
+    drawingContext.stroke();
+  }
+
+  drawingContext.restore();
+}
+
 function drawNowPlayingActionIcon(
   drawingContext,
   iconId,
@@ -304,7 +411,7 @@ function drawNowPlayingActionIcon(
   centerY,
   radius,
   isActive,
-  playModeId,
+  repeatMode,
   palette,
 ) {
   const strokeColor = isActive ? palette.signalHighlightInk : "#F5F6F8";
@@ -334,62 +441,47 @@ function drawNowPlayingActionIcon(
     } else {
       drawingContext.stroke();
     }
-  } else if (iconId === "play-mode") {
-    if (playModeId === "sequential") {
-      drawingContext.beginPath();
-      drawingContext.moveTo(-radius * 0.72, -radius * 0.28);
-      drawingContext.lineTo(radius * 0.58, -radius * 0.28);
-      drawingContext.moveTo(radius * 0.26, -radius * 0.58);
-      drawingContext.lineTo(radius * 0.58, -radius * 0.28);
-      drawingContext.lineTo(radius * 0.26, radius * 0.02);
+  } else if (iconId === "shuffle") {
+    drawingContext.beginPath();
+    drawingContext.moveTo(-radius * 0.74, -radius * 0.44);
+    drawingContext.lineTo(-radius * 0.22, -radius * 0.44);
+    drawingContext.lineTo(radius * 0.22, radius * 0.44);
+    drawingContext.lineTo(radius * 0.68, radius * 0.44);
+    drawingContext.moveTo(radius * 0.40, radius * 0.18);
+    drawingContext.lineTo(radius * 0.68, radius * 0.44);
+    drawingContext.lineTo(radius * 0.40, radius * 0.70);
 
-      drawingContext.moveTo(-radius * 0.72, radius * 0.34);
-      drawingContext.lineTo(radius * 0.24, radius * 0.34);
-      drawingContext.stroke();
+    drawingContext.moveTo(-radius * 0.74, radius * 0.44);
+    drawingContext.lineTo(-radius * 0.22, radius * 0.44);
+    drawingContext.lineTo(radius * 0.22, -radius * 0.44);
+    drawingContext.lineTo(radius * 0.68, -radius * 0.44);
+    drawingContext.moveTo(radius * 0.40, -radius * 0.70);
+    drawingContext.lineTo(radius * 0.68, -radius * 0.44);
+    drawingContext.lineTo(radius * 0.40, -radius * 0.18);
+    drawingContext.stroke();
+  } else if (iconId === "repeat") {
+    drawingContext.beginPath();
+    drawingContext.moveTo(-radius * 0.64, radius * 0.02);
+    drawingContext.lineTo(-radius * 0.64, -radius * 0.46);
+    drawingContext.lineTo(radius * 0.58, -radius * 0.46);
+    drawingContext.moveTo(radius * 0.30, -radius * 0.72);
+    drawingContext.lineTo(radius * 0.58, -radius * 0.46);
+    drawingContext.lineTo(radius * 0.30, -radius * 0.20);
+
+    drawingContext.moveTo(radius * 0.64, -radius * 0.02);
+    drawingContext.lineTo(radius * 0.64, radius * 0.46);
+    drawingContext.lineTo(-radius * 0.58, radius * 0.46);
+    drawingContext.moveTo(-radius * 0.30, radius * 0.20);
+    drawingContext.lineTo(-radius * 0.58, radius * 0.46);
+    drawingContext.lineTo(-radius * 0.30, radius * 0.72);
+    drawingContext.stroke();
+
+    if (repeatMode === "one") {
+      drawingContext.font = `800 8.5px ${FONT_MONO}`;
       drawingContext.fillStyle = isActive ? palette.signalHighlightInk : accentColor;
-      drawingContext.fillRect(radius * 0.42, radius * 0.20, 4, 4);
-    } else if (playModeId === "shuffle") {
-      drawingContext.beginPath();
-      drawingContext.moveTo(-radius * 0.74, -radius * 0.44);
-      drawingContext.lineTo(-radius * 0.22, -radius * 0.44);
-      drawingContext.lineTo(radius * 0.22, radius * 0.44);
-      drawingContext.lineTo(radius * 0.68, radius * 0.44);
-      drawingContext.moveTo(radius * 0.40, radius * 0.18);
-      drawingContext.lineTo(radius * 0.68, radius * 0.44);
-      drawingContext.lineTo(radius * 0.40, radius * 0.70);
-
-      drawingContext.moveTo(-radius * 0.74, radius * 0.44);
-      drawingContext.lineTo(-radius * 0.22, radius * 0.44);
-      drawingContext.lineTo(radius * 0.22, -radius * 0.44);
-      drawingContext.lineTo(radius * 0.68, -radius * 0.44);
-      drawingContext.moveTo(radius * 0.40, -radius * 0.70);
-      drawingContext.lineTo(radius * 0.68, -radius * 0.44);
-      drawingContext.lineTo(radius * 0.40, -radius * 0.18);
-      drawingContext.stroke();
-    } else {
-      drawingContext.beginPath();
-      drawingContext.moveTo(-radius * 0.64, radius * 0.02);
-      drawingContext.lineTo(-radius * 0.64, -radius * 0.46);
-      drawingContext.lineTo(radius * 0.58, -radius * 0.46);
-      drawingContext.moveTo(radius * 0.30, -radius * 0.72);
-      drawingContext.lineTo(radius * 0.58, -radius * 0.46);
-      drawingContext.lineTo(radius * 0.30, -radius * 0.20);
-
-      drawingContext.moveTo(radius * 0.64, -radius * 0.02);
-      drawingContext.lineTo(radius * 0.64, radius * 0.46);
-      drawingContext.lineTo(-radius * 0.58, radius * 0.46);
-      drawingContext.moveTo(-radius * 0.30, radius * 0.20);
-      drawingContext.lineTo(-radius * 0.58, radius * 0.46);
-      drawingContext.lineTo(-radius * 0.30, radius * 0.72);
-      drawingContext.stroke();
-
-      if (playModeId === "repeat-one") {
-        drawingContext.font = `800 8.5px ${FONT_MONO}`;
-        drawingContext.fillStyle = isActive ? palette.signalHighlightInk : accentColor;
-        drawingContext.textAlign = "center";
-        drawingContext.textBaseline = "middle";
-        drawingContext.fillText("1", 0, 0.5);
-      }
+      drawingContext.textAlign = "center";
+      drawingContext.textBaseline = "middle";
+      drawingContext.fillText("1", 0, 0.5);
     }
   } else if (iconId === "playlist") {
     drawingContext.beginPath();
@@ -410,13 +502,12 @@ function drawNowPlayingActionIcon(
     drawingContext.lineTo(radius * 0.78, radius * 0.39);
     drawingContext.stroke();
   } else if (iconId === "lyrics") {
-    drawingContext.fillStyle = isActive ? palette.signalHighlightInk : accentColor;
-    drawingContext.fillRect(-radius * 0.72, -radius * 0.16, radius * 1.44, 3);
-
-    drawingContext.fillStyle = isActive ? palette.signalHighlightInk : "rgba(245, 246, 248, 0.55)";
-    drawingContext.fillRect(-radius * 0.54, -radius * 0.54, radius * 1.08, 2);
-    drawingContext.fillRect(-radius * 0.44, radius * 0.28, radius * 0.88, 2);
-    drawingContext.fillRect(-radius * 0.28, radius * 0.58, radius * 0.56, 2);
+    drawLyricsBubbleGlyph(drawingContext, 0, 0, radius, {
+      bubbleColor: strokeColor,
+      quoteColor: isActive ? palette.signalHighlightInk : accentColor,
+      bubbleLineWidth: 1.8,
+      quoteLineWidth: 1.6,
+    });
   } else if (iconId === "info") {
     drawingContext.beginPath();
     drawingContext.arc(0, 0, radius * 0.76, 0, FULL_CIRCLE_RADIANS);
@@ -834,8 +925,10 @@ function renderNowPlayingQuickActions(
   }
   const ease = easeOutExpo(progress);
   const isFavorited = Boolean(nowPlayingState.activeTrack?.isFavorite ?? track?.isFavorite);
-  const activePlayMode =
-    NOW_PLAYING_PLAY_MODES[nowPlayingState.playModeIndex] || NOW_PLAYING_PLAY_MODES[0];
+  const repeatMode = nowPlayingState.repeatMode || "off";
+  const activeRepeatSpec =
+    NOW_PLAYING_REPEAT_MODES.find((modeEntry) => modeEntry.id === repeatMode) ||
+    NOW_PLAYING_REPEAT_MODES[0];
   const isDark = appearance === "dark";
   const trackDurationSeconds = Math.max(
     1,
@@ -904,7 +997,8 @@ function renderNowPlayingQuickActions(
     const isPressed = nowPlayingState.pressedActionId === buttonSpec.id;
     const isToggledActive =
       (buttonSpec.id === "favorite" && isFavorited) ||
-      (buttonSpec.id === "play-mode" && activePlayMode.id !== "sequential") ||
+      (buttonSpec.id === "shuffle" && Boolean(nowPlayingState.shuffleEnabled)) ||
+      (buttonSpec.id === "repeat" && repeatMode !== "off") ||
       (buttonSpec.id === "playlist" && nowPlayingState.playlistPickerOpen) ||
       (buttonSpec.id === "lyrics" && nowPlayingState.lyricsOpen) ||
       (buttonSpec.id === "info" && nowPlayingState.detailsSheetOpen);
@@ -951,24 +1045,15 @@ function renderNowPlayingQuickActions(
       buttonSpec.id,
       0,
       0,
-      11.2,
+      10.8,
       isToggledActive,
-      activePlayMode.id,
+      repeatMode,
       palette,
     );
 
     drawingContext.restore();
 
-    const captionText =
-      buttonSpec.id === "play-mode"
-        ? activePlayMode.id === "sequential"
-          ? "LINEAR"
-          : activePlayMode.id === "repeat-all"
-            ? "REP ALL"
-            : activePlayMode.id === "repeat-one"
-              ? "REP 1"
-              : "SHUFFLE"
-        : buttonSpec.label;
+    const captionText = buttonSpec.id === "repeat" ? activeRepeatSpec.caption : buttonSpec.label;
     drawingContext.font = `700 7.8px ${FONT_MONO}`;
     drawingContext.fillStyle = isToggledActive
       ? palette.signalHighlight
@@ -1332,10 +1417,20 @@ function renderNowPlayingQueueSheet(
 
   const activePositionLabel = tracks.length > 0 ? String(activeIndex + 1).padStart(2, "0") : "00";
   const totalCountLabel = String(tracks.length).padStart(2, "0");
+  const queueModeFlags = [];
+  if (nowPlayingState.shuffleEnabled) {
+    queueModeFlags.push("SHUFFLE");
+  }
+  if (nowPlayingState.repeatMode === "all") {
+    queueModeFlags.push("REP ALL");
+  } else if (nowPlayingState.repeatMode === "one") {
+    queueModeFlags.push("REP 1");
+  }
+  const queueSubtitleSuffix = queueModeFlags.length > 0 ? queueModeFlags.join(" \u00b7 ") : "TAP TO PLAY";
   drawingContext.font = `600 9px ${FONT_MONO}`;
   drawingContext.fillStyle = palette.inkSecondary;
   drawingContext.fillText(
-    `TRACK ${activePositionLabel} OF ${totalCountLabel} \u00b7 TAP TO PLAY`,
+    `TRACK ${activePositionLabel} OF ${totalCountLabel} \u00b7 ${queueSubtitleSuffix}`,
     DISPLAY_CENTER_PX,
     87,
   );
@@ -1765,6 +1860,165 @@ function renderNowPlayingIdleOrMode(drawingContext, nowPlayingState, palette, ap
   drawingContext.restore();
 }
 
+function drawLyricsIsometricField(
+  drawingContext,
+  rotationAngle,
+  ease,
+  contentAlpha,
+  lyricsFrame,
+  palette,
+) {
+  const driftPhase =
+    (((rotationAngle * LYRICS_FIELD_DRIFT_FACTOR) % 1) + 1) % 1;
+
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    SAFE_CLIP_RADIUS_PX,
+    0,
+    FULL_CIRCLE_RADIANS,
+  );
+  drawingContext.clip();
+
+  drawingContext.strokeStyle = "rgba(245, 250, 255, 0.085)";
+  drawingContext.lineWidth = 1;
+  drawingContext.globalAlpha = ease;
+
+  for (
+    let rayIndex = -LYRICS_FIELD_RAY_HALF_COUNT;
+    rayIndex <= LYRICS_FIELD_RAY_HALF_COUNT;
+    rayIndex += 1
+  ) {
+    const topX = DISPLAY_CENTER_PX + rayIndex * LYRICS_FIELD_TOP_RAY_STEP_PX;
+    const bottomX = DISPLAY_CENTER_PX + rayIndex * LYRICS_FIELD_BOTTOM_RAY_STEP_PX;
+    drawingContext.beginPath();
+    drawingContext.moveTo(topX, LYRICS_FIELD_LOWER_HORIZON_Y_PX);
+    drawingContext.lineTo(bottomX, LYRICS_FIELD_LOWER_EDGE_Y_PX);
+    drawingContext.stroke();
+
+    drawingContext.beginPath();
+    drawingContext.moveTo(topX, LYRICS_FIELD_UPPER_HORIZON_Y_PX);
+    drawingContext.lineTo(bottomX, LYRICS_FIELD_UPPER_EDGE_Y_PX);
+    drawingContext.stroke();
+  }
+
+  for (let rowIndex = 0; rowIndex < LYRICS_FIELD_DEPTH_STEPS; rowIndex += 1) {
+    const rawDepth = ((rowIndex + driftPhase) % LYRICS_FIELD_DEPTH_STEPS) / LYRICS_FIELD_DEPTH_STEPS;
+    const curvedDepth = rawDepth * rawDepth;
+    const lowerY = lerp(
+      LYRICS_FIELD_LOWER_HORIZON_Y_PX,
+      LYRICS_FIELD_LOWER_EDGE_Y_PX,
+      curvedDepth,
+    );
+    const upperY = lerp(
+      LYRICS_FIELD_UPPER_HORIZON_Y_PX,
+      LYRICS_FIELD_UPPER_EDGE_Y_PX,
+      curvedDepth,
+    );
+    drawingContext.globalAlpha = ease * (0.05 + curvedDepth * 0.07);
+    drawingContext.beginPath();
+    drawingContext.moveTo(LYRICS_FIELD_LINE_MARGIN_PX, lowerY);
+    drawingContext.lineTo(DISPLAY_DIAMETER_PX - LYRICS_FIELD_LINE_MARGIN_PX, lowerY);
+    drawingContext.moveTo(LYRICS_FIELD_LINE_MARGIN_PX, upperY);
+    drawingContext.lineTo(DISPLAY_DIAMETER_PX - LYRICS_FIELD_LINE_MARGIN_PX, upperY);
+    drawingContext.stroke();
+  }
+  drawingContext.restore();
+
+  const vignetteCenterY = DISPLAY_CENTER_PX + LYRICS_VIGNETTE_CENTER_Y_OFFSET_PX;
+  const centerVignette = drawingContext.createRadialGradient(
+    DISPLAY_CENTER_PX,
+    vignetteCenterY,
+    LYRICS_VIGNETTE_INNER_RADIUS_PX,
+    DISPLAY_CENTER_PX,
+    vignetteCenterY,
+    LYRICS_VIGNETTE_OUTER_RADIUS_PX,
+  );
+  centerVignette.addColorStop(0, "rgba(6, 7, 10, 0.62)");
+  centerVignette.addColorStop(0.68, "rgba(6, 7, 10, 0.30)");
+  centerVignette.addColorStop(1, "rgba(6, 7, 10, 0)");
+  drawingContext.save();
+  drawingContext.globalAlpha = ease;
+  drawingContext.fillStyle = centerVignette;
+  drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
+  drawingContext.restore();
+
+  const hasAccentedIndex =
+    lyricsFrame.kind !== "none" &&
+    !lyricsFrame.isIntroCue &&
+    Number.isInteger(lyricsFrame.activeIndex) &&
+    lyricsFrame.activeIndex >= 0;
+  const accentedMarkIndex = hasAccentedIndex
+    ? lyricsFrame.activeIndex % LYRICS_OUTER_CROSSHAIRS.length
+    : -1;
+
+  for (let markIndex = 0; markIndex < LYRICS_OUTER_CROSSHAIRS.length; markIndex += 1) {
+    const marker = LYRICS_OUTER_CROSSHAIRS[markIndex];
+    const isAccented = markIndex === accentedMarkIndex;
+    const markerColor = isAccented ? palette.signalHighlight : "rgba(245, 250, 255, 0.65)";
+    const markerAlpha = contentAlpha * (isAccented ? 0.68 : 0.24);
+    if (marker.kind === "plus") {
+      drawCrosshairMark(
+        drawingContext,
+        marker.centerX,
+        marker.centerY,
+        LYRICS_CROSSHAIR_PLUS_HALF_LENGTH_PX,
+        LYRICS_CROSSHAIR_LINE_WIDTH_PX,
+        markerColor,
+        markerAlpha,
+      );
+    } else {
+      drawDiagonalMark(
+        drawingContext,
+        marker.centerX,
+        marker.centerY,
+        LYRICS_CROSSHAIR_CROSS_HALF_SPAN_PX,
+        LYRICS_CROSSHAIR_LINE_WIDTH_PX,
+        markerColor,
+        markerAlpha,
+      );
+    }
+  }
+}
+
+function drawLyricsHorizonDivider(drawingContext, activeBlockBottomY, contentAlpha) {
+  const dividerY = clamp(
+    activeBlockBottomY + LYRICS_DIVIDER_OFFSET_Y_PX,
+    LYRICS_DIVIDER_MIN_Y_PX,
+    LYRICS_DIVIDER_MAX_Y_PX,
+  );
+  drawingContext.save();
+  drawingContext.globalAlpha = contentAlpha;
+  drawingContext.strokeStyle = "rgba(245, 250, 255, 0.14)";
+  drawingContext.lineWidth = 1;
+  drawingContext.beginPath();
+  drawingContext.moveTo(LYRICS_DIVIDER_LEFT_X_PX, dividerY);
+  drawingContext.lineTo(LYRICS_DIVIDER_RIGHT_X_PX, dividerY);
+  drawingContext.stroke();
+  drawingContext.restore();
+
+  drawDiagonalMark(
+    drawingContext,
+    LYRICS_DIVIDER_LEFT_CAP_X_PX,
+    dividerY,
+    LYRICS_DIVIDER_CAP_SPAN_PX,
+    1,
+    "rgba(245, 250, 255, 0.34)",
+    contentAlpha,
+  );
+  drawDiagonalMark(
+    drawingContext,
+    LYRICS_DIVIDER_RIGHT_CAP_X_PX,
+    dividerY,
+    LYRICS_DIVIDER_CAP_SPAN_PX,
+    1,
+    "rgba(245, 250, 255, 0.34)",
+    contentAlpha,
+  );
+}
+
 function renderNowPlayingLyricsOverlay(
   drawingContext,
   nowPlayingState,
@@ -1816,9 +2070,9 @@ function renderNowPlayingLyricsOverlay(
     DISPLAY_CENTER_PX,
     DISPLAY_CENTER_PX,
   );
-  frostedVeil.addColorStop(0, isDark ? "rgba(6, 8, 12, 0.72)" : "rgba(10, 13, 18, 0.74)");
-  frostedVeil.addColorStop(0.68, isDark ? "rgba(6, 7, 10, 0.83)" : "rgba(8, 10, 14, 0.84)");
-  frostedVeil.addColorStop(1, "rgba(5, 6, 9, 0.92)");
+  frostedVeil.addColorStop(0, isDark ? "rgba(6, 8, 12, 0.74)" : "rgba(10, 13, 18, 0.75)");
+  frostedVeil.addColorStop(0.7, isDark ? "rgba(6, 7, 10, 0.85)" : "rgba(8, 10, 14, 0.86)");
+  frostedVeil.addColorStop(1, "rgba(5, 6, 9, 0.93)");
   drawingContext.globalAlpha = ease;
   drawingContext.fillStyle = frostedVeil;
   drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
@@ -1833,8 +2087,8 @@ function renderNowPlayingLyricsOverlay(
     primaryGlowY,
     152,
   );
-  primaryGlow.addColorStop(0, `rgba(${primaryGlowRgb}, 0.20)`);
-  primaryGlow.addColorStop(0.55, `rgba(${primaryGlowRgb}, 0.06)`);
+  primaryGlow.addColorStop(0, `rgba(${primaryGlowRgb}, 0.19)`);
+  primaryGlow.addColorStop(0.55, `rgba(${primaryGlowRgb}, 0.057)`);
   primaryGlow.addColorStop(1, `rgba(${primaryGlowRgb}, 0)`);
   drawingContext.fillStyle = primaryGlow;
   drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
@@ -1849,23 +2103,11 @@ function renderNowPlayingLyricsOverlay(
     secondaryGlowY,
     146,
   );
-  secondaryGlow.addColorStop(0, `rgba(${secondaryGlowRgb}, 0.24)`);
-  secondaryGlow.addColorStop(0.6, `rgba(${secondaryGlowRgb}, 0.07)`);
+  secondaryGlow.addColorStop(0, `rgba(${secondaryGlowRgb}, 0.228)`);
+  secondaryGlow.addColorStop(0.6, `rgba(${secondaryGlowRgb}, 0.066)`);
   secondaryGlow.addColorStop(1, `rgba(${secondaryGlowRgb}, 0)`);
   drawingContext.fillStyle = secondaryGlow;
   drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
-
-  drawingContext.save();
-  drawingContext.globalAlpha = ease * (isDark ? 0.036 : 0.052);
-  drawingContext.fillStyle = "#F5F6F8";
-  drawingContext.beginPath();
-  drawingContext.moveTo(42, 0);
-  drawingContext.lineTo(148, 0);
-  drawingContext.lineTo(54, DISPLAY_DIAMETER_PX);
-  drawingContext.lineTo(-22, DISPLAY_DIAMETER_PX);
-  drawingContext.closePath();
-  drawingContext.fill();
-  drawingContext.restore();
 
   const volumeHudAlpha = clamp(Number(nowPlayingState.volumeHudAlpha ?? 0), 0, 1);
 
@@ -1878,6 +2120,15 @@ function renderNowPlayingLyricsOverlay(
     volumeHudAlpha * 0.65,
   );
   const contentAlpha = ease * clamp(1 - overlayOccupancy, 0.12, 1);
+
+  drawLyricsIsometricField(
+    drawingContext,
+    rotationAngle,
+    ease,
+    contentAlpha,
+    lyricsFrame,
+    palette,
+  );
 
   drawingContext.save();
   drawingContext.globalAlpha = contentAlpha;
@@ -1916,31 +2167,63 @@ function renderNowPlayingLyricsOverlay(
 
   if (lyricsFrame.kind === "none") {
     const breathe = 0.5 + 0.5 * Math.sin(clockSeconds * 2.1);
-    const medallionY = 148 + lerp(10, 0, ease);
+    const medallionY = NO_LYRICS_MEDALLION_CENTER_Y_PX + lerp(10, 0, ease);
 
     drawingContext.save();
     drawingContext.globalAlpha = contentAlpha;
 
     drawingContext.beginPath();
-    drawingContext.arc(DISPLAY_CENTER_PX, medallionY, 30 + breathe * 1.5, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.arc(
+      DISPLAY_CENTER_PX,
+      medallionY,
+      NO_LYRICS_MEDALLION_BASE_RADIUS_PX + breathe * 1.5,
+      0,
+      FULL_CIRCLE_RADIANS,
+    );
     drawingContext.fillStyle = "rgba(18, 22, 30, 0.72)";
     drawingContext.fill();
     drawingContext.strokeStyle = "rgba(245, 250, 255, 0.22)";
     drawingContext.lineWidth = 1.2;
     drawingContext.stroke();
 
-    drawingContext.fillStyle = "rgba(245, 246, 248, 0.42)";
-    drawingContext.fillRect(DISPLAY_CENTER_PX - 11, medallionY - 9, 22, 2.2);
-    drawingContext.fillStyle = "rgba(245, 246, 248, 0.68)";
-    drawingContext.fillRect(DISPLAY_CENTER_PX - 14, medallionY - 1.5, 28, 3);
-    drawingContext.fillStyle = "rgba(245, 246, 248, 0.34)";
-    drawingContext.fillRect(DISPLAY_CENTER_PX - 9, medallionY + 7, 18, 2.2);
+    drawLyricsBubbleGlyph(
+      drawingContext,
+      DISPLAY_CENTER_PX,
+      medallionY,
+      NO_LYRICS_ICON_RADIUS_PX,
+      {
+        bubbleColor: "rgba(245, 246, 248, 0.62)",
+        quoteColor: "rgba(245, 246, 248, 0.48)",
+        bubbleLineWidth: 2,
+        quoteLineWidth: 1.8,
+      },
+    );
+
+    drawingContext.lineCap = "butt";
+    drawingContext.strokeStyle = "rgba(18, 22, 30, 0.92)";
+    drawingContext.lineWidth = NO_LYRICS_SLASH_KNOCKOUT_WIDTH_PX;
+    drawingContext.beginPath();
+    drawingContext.moveTo(
+      DISPLAY_CENTER_PX - NO_LYRICS_SLASH_HALF_SPAN_X_PX,
+      medallionY + NO_LYRICS_SLASH_HALF_SPAN_Y_PX,
+    );
+    drawingContext.lineTo(
+      DISPLAY_CENTER_PX + NO_LYRICS_SLASH_HALF_SPAN_X_PX,
+      medallionY - NO_LYRICS_SLASH_HALF_SPAN_Y_PX,
+    );
+    drawingContext.stroke();
 
     drawingContext.strokeStyle = palette.signalHighlight;
-    drawingContext.lineWidth = 1.8;
+    drawingContext.lineWidth = NO_LYRICS_SLASH_LINE_WIDTH_PX;
     drawingContext.beginPath();
-    drawingContext.moveTo(DISPLAY_CENTER_PX - 14, medallionY + 13);
-    drawingContext.lineTo(DISPLAY_CENTER_PX + 14, medallionY - 13);
+    drawingContext.moveTo(
+      DISPLAY_CENTER_PX - NO_LYRICS_SLASH_HALF_SPAN_X_PX,
+      medallionY + NO_LYRICS_SLASH_HALF_SPAN_Y_PX,
+    );
+    drawingContext.lineTo(
+      DISPLAY_CENTER_PX + NO_LYRICS_SLASH_HALF_SPAN_X_PX,
+      medallionY - NO_LYRICS_SLASH_HALF_SPAN_Y_PX,
+    );
     drawingContext.stroke();
 
     drawingContext.textAlign = "center";
@@ -2047,6 +2330,7 @@ function renderNowPlayingLyricsOverlay(
   }
 
   if (lyricsFrame.upcomingText) {
+    drawLyricsHorizonDivider(drawingContext, activeBlockBottomY, contentAlpha);
     drawingContext.font = `600 14.5px ${FONT_DISPLAY}`;
     const previewWrapped = wrapCanvasTextLines(
       drawingContext,
@@ -2371,17 +2655,34 @@ export function renderNowPlayingScreen(drawingContext, nowPlayingState, renderCo
         });
       }
     } else {
-      const trackCount = Math.max(1, queueTracks.length);
       const peekDelta = dragOffsetX < 0 ? 1 : -1;
-      const peekTrack =
-        queueTracks[((safeIndex + peekDelta) % trackCount + trackCount) % trackCount] || null;
-      const peekChangesCover =
-        trackCount > 1 &&
-        Math.abs(dragOffsetX) > 6 &&
-        peekTrack &&
-        peekTrack.albumId !== activeTrack.albumId;
+      const peekOutcome =
+        Math.abs(dragOffsetX) > 6
+          ? resolveSkipOutcome(
+              {
+                queueTracks,
+                queueIndex: safeIndex,
+                elapsedSeconds: Number(nowPlayingState.trackElapsedSeconds ?? 0),
+                repeatMode: nowPlayingState.repeatMode || "off",
+                shuffleEnabled: Boolean(nowPlayingState.shuffleEnabled),
+                queueSource: nowPlayingState.queueContext?.sourceId || "album",
+                ephemeralCurrentTrackId: nowPlayingState.ephemeralCurrentTrackId || null,
+                baseTrackCount: nowPlayingState.baseTrackCount ?? queueTracks.length,
+              },
+              peekDelta,
+            )
+          : null;
+      const peekTrack = peekOutcome && peekOutcome.action === "jump" ? peekOutcome.targetTrack : null;
+      const isBoundaryBlocked = Boolean(peekOutcome && peekOutcome.action === "boundary-bounce");
+      const peekChangesCover = Boolean(
+        Math.abs(dragOffsetX) > 6 && peekTrack && peekTrack.albumId !== activeTrack.albumId,
+      );
       const appliedOffsetX = peekChangesCover ? dragOffsetX : 0;
-      const appliedTwist = peekChangesCover ? dragOffsetX * 0.004 : dragOffsetX * 0.0022;
+      const appliedTwist = peekChangesCover
+        ? dragOffsetX * 0.004
+        : isBoundaryBlocked
+          ? dragOffsetX * 0.0011
+          : dragOffsetX * 0.0022;
 
       drawNowPlayingOpticalVinyl(
         drawingContext,

@@ -695,4 +695,44 @@ describe("createHomeController boundaries and negative guards", () => {
     assert.equal(cancelledSwipeSnapshot.launchTarget, 1);
     assert.equal(cancelledSwipeSnapshot.launchedAppId, "now-playing");
   });
+
+  test("returnFromScreen('library') preserves libraryHubScrollPosition, decays launchProgress over 0.62s, and guards invalid inputs", () => {
+    const homeController = createSettledHomeController();
+    homeController.selectAppById("library");
+    homeController.launchFocusedApp();
+    homeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS);
+
+    homeController.returnFromScreen("library", {
+      libraryHubScrollPosition: 1,
+    });
+    const startReturnSnapshot = homeController.getRenderSnapshot();
+    assert.equal(startReturnSnapshot.focusedApp.id, "library");
+    assert.equal(startReturnSnapshot.launchProgress, 1);
+    assert.equal(startReturnSnapshot.launchTarget, 0);
+    assert.equal(startReturnSnapshot.libraryHubScrollPosition, 1);
+
+    homeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
+    const midReturnSnapshot = homeController.getRenderSnapshot();
+    assert.ok(midReturnSnapshot.launchProgress > 0.45 && midReturnSnapshot.launchProgress < 0.55);
+    assert.equal(midReturnSnapshot.libraryHubScrollPosition, 1);
+
+    homeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS / 2);
+    const settledReturnSnapshot = homeController.getRenderSnapshot();
+    assert.equal(settledReturnSnapshot.launchProgress, 0);
+    assert.equal(settledReturnSnapshot.libraryHubScrollPosition, 1);
+
+    /* Fresh launch resets libraryHubScrollPosition to 0 so forward dive opens at top of Hub */
+    homeController.launchFocusedApp();
+    assert.equal(homeController.getRenderSnapshot().libraryHubScrollPosition, 0);
+
+    /* Non-finite or negative scroll positions clamp safely to 0 */
+    homeController.returnFromScreen("library", {
+      libraryHubScrollPosition: Number.NaN,
+    });
+    assert.equal(homeController.getRenderSnapshot().libraryHubScrollPosition, 0);
+    homeController.returnFromScreen("library", {
+      libraryHubScrollPosition: -4,
+    });
+    assert.equal(homeController.getRenderSnapshot().libraryHubScrollPosition, 0);
+  });
 });

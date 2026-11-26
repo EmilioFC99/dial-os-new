@@ -319,6 +319,7 @@ export function createHomeController() {
   let launchProgress = 0;
   let launchTarget = 0;
   let launchedAppId = null;
+  let libraryHubScrollPosition = 0;
   let playbackState = "idle";
   let hasActiveTrack = false;
   let volumeLevel = DEFAULT_PLAYBACK_VOLUME;
@@ -360,6 +361,7 @@ export function createHomeController() {
     launchProgress = 0;
     launchTarget = 0;
     launchedAppId = null;
+    libraryHubScrollPosition = 0;
     vinylNudgeRadians = 0;
     vinylNudgeTarget = 0;
     backSwipeProgress = 0;
@@ -485,6 +487,9 @@ export function createHomeController() {
     const focusedApp = HOME_APPS[wrapAppIndex(targetSlot)];
     launchTarget = 1;
     launchedAppId = focusedApp.id;
+    if (focusedApp.id === "library") {
+      libraryHubScrollPosition = 0;
+    }
   }
 
   /**
@@ -558,6 +563,13 @@ export function createHomeController() {
     launchTarget = 0;
     launchedAppId = null;
     backSwipeProgress = 0;
+    if (appId === "library") {
+      const requestedHubScroll = options?.libraryHubScrollPosition;
+      libraryHubScrollPosition =
+        typeof requestedHubScroll === "number" && Number.isFinite(requestedHubScroll)
+          ? Math.max(0, requestedHubScroll)
+          : 0;
+    }
     if (Number.isFinite(options?.vinylRotationRadians)) {
       vinylRotationRadians = options.vinylRotationRadians;
     }
@@ -732,6 +744,7 @@ export function createHomeController() {
       launchProgress,
       launchTarget,
       launchedAppId,
+      libraryHubScrollPosition,
       playbackState,
       hasActiveTrack,
       volumeLevel,

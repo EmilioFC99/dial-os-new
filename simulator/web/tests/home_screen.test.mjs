@@ -687,4 +687,99 @@ describe("home_screen.js Now Playing transition and subtitle marquee", () => {
       "overflowing Home subtitle must advance horizontal X across animationTimeSeconds",
     );
   });
+
+  test("renderHomeScreen renders Crystal Depth Dive when launching Library and mirrors cleanly on Library -> Home return in Dark and Light modes", () => {
+    const sampleCounts = {
+      tracks: 1461,
+      albums: 271,
+      artists: 86,
+      genres: 29,
+      favorites: 14,
+      playlists: 4,
+    };
+
+    function renderLibraryTransitionFrame(snapshot, appearance = "dark") {
+      const drawingContext = createRecordingCanvasContext();
+      homeScreen.renderHomeScreen(drawingContext, snapshot, {
+        appearance,
+        palette: APPEARANCE_PALETTES[appearance],
+        counts: sampleCounts,
+        animationTimeSeconds: snapshot.idleClockSeconds,
+      });
+      return drawingContext;
+    }
+
+    function computeMaxTileWidth(drawingContext) {
+      const tilePolygons = drawingContext.recordedFills.filter(
+        (fillEntry) => fillEntry.points.length === 8,
+      );
+      let maxWidth = 0;
+      for (const polygon of tilePolygons) {
+        const worldXCoordinates = polygon.points.map((point) => point.worldX);
+        const width = Math.max(...worldXCoordinates) - Math.min(...worldXCoordinates);
+        if (width > maxWidth) {
+          maxWidth = width;
+        }
+      }
+      return maxWidth;
+    }
+
+    const homeController = createSettledHomeController();
+    homeController.selectAppById("library");
+    for (let stepIndex = 0; stepIndex < 30; stepIndex += 1) {
+      homeController.step(0.05);
+    }
+    homeController.launchFocusedApp();
+
+    /* Mid-dive (~50%): emerging Library Hub tiles scale up from depth (< 114px) and Library header appears */
+    homeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS * 0.5);
+    const midContext = renderLibraryTransitionFrame(homeController.getRenderSnapshot(), "dark");
+    const midTileWidth = computeMaxTileWidth(midContext);
+    assert.ok(
+      midTileWidth > 40 && midTileWidth < 112,
+      `expected emerging hub tiles scaled from depth mid-dive, got ${midTileWidth}`,
+    );
+    assert.ok(
+      midContext.recordedTextCalls.some((call) => call.text === "Favorites"),
+      "mid-dive must render emerging Library Hub tiles behind expanding glass cube",
+    );
+
+    /* Completed dive (100%): settled full-size 114px 2-up crystal hub + header matching Library screen */
+    homeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS * 0.5);
+    const settledContext = renderLibraryTransitionFrame(homeController.getRenderSnapshot(), "dark");
+    const settledTileWidth = computeMaxTileWidth(settledContext);
+    assert.ok(
+      Math.abs(settledTileWidth - 114) <= 2,
+      `expected settled hub tiles at 114px width, got ${settledTileWidth}`,
+    );
+    assert.ok(
+      settledContext.recordedTextCalls.some((call) => call.text === "Library"),
+      "completed Crystal Depth Dive must display Library header",
+    );
+    assert.ok(
+      settledContext.recordedTextCalls.some((call) => call.text.includes("2-UP CRYSTAL HUB")),
+      "completed Crystal Depth Dive must display Library Hub subtitle",
+    );
+    assert.equal(
+      settledContext.getCounts().saveCount,
+      settledContext.getCounts().restoreCount,
+      "canvas save/restore stack must remain balanced",
+    );
+
+    /* Reverse (Library Hub -> Home) in Light Mode preserving scrolled Hub row (scrollPosition = 1) */
+    homeController.returnFromScreen("library", { libraryHubScrollPosition: 1 });
+    homeController.step(HOME_CONSTANTS.LAUNCH_DURATION_SECONDS * 0.45);
+    const reverseLightContext = renderLibraryTransitionFrame(
+      homeController.getRenderSnapshot(),
+      "light",
+    );
+    assert.ok(
+      reverseLightContext.recordedTextCalls.some((call) => call.text === "Albums"),
+      "reverse transition from scrolled Library Hub must preserve visible Albums tile",
+    );
+    assert.equal(
+      reverseLightContext.getCounts().saveCount,
+      reverseLightContext.getCounts().restoreCount,
+    );
+  });
 });

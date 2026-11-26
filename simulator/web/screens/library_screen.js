@@ -21,15 +21,22 @@ import {
   normalizeRange,
 } from "../core/geometry.js";
 import {
+  ALBUM_SORT_MODE_LABELS,
+  COLLECTION_SORT_MODE_LABELS,
   LIBRARY_CONSTANTS,
   LIBRARY_HUB_SECTIONS,
+  buildAlbumSeekIndex,
   buildAlphabeticalLetterIndex,
+  buildCollectionSeekIndex,
   computeLibraryCurvedRowLayout,
   computeLibraryHubTileRect,
+  computeSortWheelSlots,
   computeWindowedCrateBars,
   resolveLibraryRimSliceIndex,
   shortestSliceDistance,
+  sortAlbumsByMode,
   sortAlphabeticallyBy,
+  sortArtistsByMode,
 } from "../core/library_controller.js";
 import {
   drawCrosshairMark,
@@ -41,8 +48,6 @@ import { APPEARANCE_PALETTES, FONT_DISPLAY, FONT_MONO } from "../core/tokens.js"
 const ALPHA_VISIBILITY_THRESHOLD = 0.005;
 const CONTENT_VISIBILITY_THRESHOLD = 0.01;
 const PERCENT_SCALE = 100;
-const DEFAULT_TRACK_DURATION_SECONDS = 248;
-const DEFAULT_VOLUME_LEVEL = 0.62;
 const MIN_ALPHABETICAL_INDEX_COUNT = 3;
 const MIN_LETTER_GROUPS_FOR_SEEK = 2;
 
@@ -51,8 +56,6 @@ const RIM_SHEEN_RADIUS_PX = 175;
 const SCROLL_ARC_RADIUS_PX = 166;
 const SCROLL_ARC_START_RADIANS = -0.44;
 const SCROLL_ARC_END_RADIANS = 0.44;
-const VOLUME_ARC_START_RADIANS = -0.46;
-const VOLUME_ARC_END_RADIANS = 0.46;
 const BACK_SWIPE_ARC_RADIUS_PX = 168;
 const BACK_SWIPE_ARC_SPAN_RADIANS = 0.34;
 const TOP_HANDLE_HALF_WIDTH_PX = 14;
@@ -89,9 +92,15 @@ const CRATE_PEEK_BOTTOM_Y = 212;
 const CRATE_SLEEVE_LEFT_X = 108;
 const CRATE_SLEEVE_TOP_Y = 90;
 const CRATE_SLEEVE_BOTTOM_Y = 216;
-const CRATE_NOTE_BUTTON_CENTER_Y = 325;
-const CRATE_NOTE_BUTTON_RADIUS_PX = 18;
-const CRATE_NOTE_BUTTON_HIT_RADIUS_PX = 22;
+const CRATE_SORT_BUTTON_CENTER_X = LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_X;
+const CRATE_NOTE_BUTTON_CENTER_X = LIBRARY_CONSTANTS.CRATE_NOTE_BUTTON_X;
+const CRATE_NOTE_BUTTON_CENTER_Y = LIBRARY_CONSTANTS.CRATE_NOTE_BUTTON_Y;
+const CRATE_NOTE_BUTTON_RADIUS_PX = LIBRARY_CONSTANTS.CRATE_BOTTOM_BUTTON_RADIUS_PX;
+const CRATE_NOTE_BUTTON_HIT_RADIUS_PX = LIBRARY_CONSTANTS.CRATE_BOTTOM_BUTTON_HIT_RADIUS_PX;
+const ALBUM_QUICK_ACTION_BUTTON_CENTER_Y = LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_BUTTON_CENTER_Y;
+const ALBUM_QUICK_ACTION_BUTTON_RADIUS_PX = LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_BUTTON_RADIUS_PX;
+const ALBUM_QUICK_ACTION_BUTTON_HIT_RADIUS_PX =
+  LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_BUTTON_HIT_RADIUS_PX;
 const CRYSTAL_OVERLAY_TOP_Y = HEADER_CLIP_TOP_Y - 2;
 const CRATE_SLEEVE_START_X_PX = DISPLAY_CENTER_PX - 8;
 const CRATE_SLEEVE_EXIT_X_PX = -110;
@@ -102,7 +111,55 @@ const TRACKLIST_DISC_START_RADIUS_PX = 36;
 const CRATE_SLIP_OUT_SPLIT_PROGRESS = 0.36;
 const CRATE_SLEEVE_SLIDE_END_PROGRESS = 0.72;
 const CRATE_SLEEVE_FADE_START_PROGRESS = 0.38;
-const EXPANDED_CHROME_MIN_PROGRESS = 0.35;
+
+const HUB_ALBUMS_TILE_INDEX = 3;
+const HUB_TILE_ICON_OFFSET_Y_PX = 14;
+const HUB_TILE_FULL_ICON_RADIUS_PX = 19;
+const HUB_TILE_PEEK_ICON_RADIUS_PX = 15;
+const HUB_ALBUMS_ICON_SLEEVE_RATIO = 0.70;
+const HUB_ALBUMS_ICON_SHIFT_X_RATIO = 0.24;
+const HUB_ALBUMS_ICON_DISC_OFFSET_RATIO = 0.88;
+
+const HUB_DIVE_FLOOR_START = 0.24;
+const HUB_DIVE_FLOOR_END = 0.68;
+const HUB_DIVE_HEADER_START = 0.42;
+const HUB_DIVE_HEADER_END = 0.96;
+const HUB_DIVE_HEADER_DRIFT_Y_PX = -18;
+const HUB_DIVE_TOP_ROW_START = 0.30;
+const HUB_DIVE_TOP_ROW_END = 0.88;
+const HUB_DIVE_PEEK_ROW_START = 0.42;
+const HUB_DIVE_PEEK_ROW_END = 1.0;
+const HUB_DIVE_TILE_MIN_SCALE = 0.80;
+const HUB_DIVE_TILE_RISE_Y_PX = 18;
+const HUB_DIVE_ARC_START = 0.65;
+const HUB_DIVE_ARC_END = 1.0;
+
+const ALBUMS_BLOOM_HUB_HEADER_END = 0.42;
+const ALBUMS_BLOOM_CRATE_HEADER_START = 0.44;
+const ALBUMS_BLOOM_CRATE_HEADER_END = 0.92;
+const ALBUMS_BLOOM_HEADER_DRIFT_Y_PX = 10;
+const ALBUMS_BLOOM_HUB_PART_END = 0.44;
+const ALBUMS_BLOOM_HUB_PART_X_PX = 95;
+const ALBUMS_BLOOM_HUB_PART_Y_PX = 24;
+const ALBUMS_BLOOM_TILE_SHELL_END = 0.30;
+const ALBUMS_BLOOM_ARC_EXIT_END = 0.28;
+const ALBUMS_BLOOM_SHELF_START = 0.36;
+const ALBUMS_BLOOM_SHELF_END = 0.85;
+const ALBUMS_BLOOM_NEIGHBOR_DEAL_START = 0.34;
+const ALBUMS_BLOOM_NEIGHBOR_DEAL_END = 0.96;
+const ALBUMS_BLOOM_NEIGHBOR_ALPHA_START = 0.36;
+const ALBUMS_BLOOM_NEIGHBOR_ALPHA_END = 0.92;
+const ALBUMS_BLOOM_NEIGHBOR_SPREAD_PX = 120;
+const ALBUMS_BLOOM_BOTTOM_START = 0.42;
+const ALBUMS_BLOOM_BOTTOM_END = 0.96;
+const ALBUMS_BLOOM_BOTTOM_RISE_Y_PX = 22;
+const ALBUMS_BLOOM_ARTWORK_FADE_START = 0.06;
+const ALBUMS_BLOOM_ARTWORK_FADE_END = 0.34;
+const ALBUMS_BLOOM_MINI_ICON_FADE_START = 0.08;
+const ALBUMS_BLOOM_MINI_ICON_FADE_END = 0.34;
+const ALBUMS_BLOOM_DISC_TUCK_END = 0.38;
+const ALBUMS_BLOOM_HERO_ALPHA_END = 0.32;
+const ALBUMS_BLOOM_BRACKET_START = 0.55;
 
 function resolvePalette(appearance, palette) {
   if (palette && typeof palette === "object") {
@@ -1059,6 +1116,126 @@ function drawLibraryPeripheralChrome(
   drawingContext.restore();
 }
 
+function drawArtistHeaderChrome(
+  drawingContext,
+  title,
+  artistModeBlend,
+  headerOffsetY,
+  chromeAlpha,
+  palette,
+  appearance,
+  animationTimeSeconds = 0,
+) {
+  if (chromeAlpha <= ALPHA_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const clampedBlend = clamp(Number(artistModeBlend ?? 0), 0, 1);
+  const easedBlend = easeInOutCubic(clampedBlend);
+  const toggleWidth = LIBRARY_CONSTANTS.ARTIST_TOGGLE_WIDTH_PX;
+  const toggleHeight = LIBRARY_CONSTANTS.ARTIST_TOGGLE_HEIGHT_PX;
+  const toggleLeft = DISPLAY_CENTER_PX - toggleWidth / 2;
+  const toggleTop = LIBRARY_CONSTANTS.ARTIST_TOGGLE_TOP_Y;
+  const toggleChamfer = LIBRARY_CONSTANTS.ARTIST_TOGGLE_CHAMFER_PX;
+  const segmentHalfWidth = toggleWidth / 2;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = chromeAlpha;
+
+  drawingContext.lineCap = "round";
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    RIM_SHEEN_RADIUS_PX,
+    -Math.PI * 0.84,
+    -Math.PI * 0.30,
+  );
+  drawingContext.strokeStyle = isDark
+    ? "rgba(235, 244, 255, 0.14)"
+    : "rgba(255, 255, 255, 0.72)";
+  drawingContext.lineWidth = 2;
+  drawingContext.stroke();
+
+  drawingContext.beginPath();
+  drawingContext.arc(
+    DISPLAY_CENTER_PX,
+    DISPLAY_CENTER_PX,
+    RIM_SHEEN_RADIUS_PX,
+    Math.PI * 0.14,
+    Math.PI * 0.44,
+  );
+  drawingContext.strokeStyle = isDark
+    ? "rgba(192, 254, 5, 0.18)"
+    : "rgba(232, 90, 36, 0.22)";
+  drawingContext.lineWidth = 1.5;
+  drawingContext.stroke();
+
+  drawingContext.translate(0, headerOffsetY);
+
+  drawingContext.fillStyle = palette.hairlineStrong;
+  drawingContext.globalAlpha = chromeAlpha * 0.65;
+  drawingContext.fillRect(
+    DISPLAY_CENTER_PX - TOP_HANDLE_HALF_WIDTH_PX,
+    20,
+    TOP_HANDLE_HALF_WIDTH_PX * 2,
+    TOP_HANDLE_HEIGHT_PX,
+  );
+
+  drawingContext.globalAlpha = chromeAlpha;
+  drawingContext.font = `700 15.5px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = palette.inkPrimary;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawMarqueeCanvasText(drawingContext, title, DISPLAY_CENTER_PX, 38, 184, animationTimeSeconds);
+
+  traceChamferRect(drawingContext, toggleLeft, toggleTop, toggleWidth, toggleHeight, toggleChamfer);
+  drawingContext.fillStyle = isDark
+    ? "rgba(210, 230, 255, 0.08)"
+    : "rgba(255, 255, 255, 0.56)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = isDark
+    ? "rgba(235, 245, 255, 0.24)"
+    : "rgba(46, 50, 56, 0.22)";
+  drawingContext.lineWidth = 1;
+  drawingContext.stroke();
+
+  drawingContext.save();
+  traceChamferRect(drawingContext, toggleLeft, toggleTop, toggleWidth, toggleHeight, toggleChamfer);
+  drawingContext.clip();
+  const activeLeftX = lerp(toggleLeft, toggleLeft + segmentHalfWidth, easedBlend);
+  drawingContext.fillStyle = palette.signalHighlight;
+  drawingContext.fillRect(activeLeftX, toggleTop, segmentHalfWidth, toggleHeight);
+  drawingContext.restore();
+
+  drawingContext.font = `800 8.5px ${FONT_MONO}`;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillStyle =
+    clampedBlend < 0.5 ? palette.signalHighlightInk : palette.inkSecondary;
+  drawingContext.fillText(
+    "ALBUMS",
+    toggleLeft + segmentHalfWidth / 2,
+    toggleTop + toggleHeight / 2 + 0.5,
+  );
+  drawingContext.fillStyle =
+    clampedBlend >= 0.5 ? palette.signalHighlightInk : palette.inkSecondary;
+  drawingContext.fillText(
+    "SONGS",
+    toggleLeft + segmentHalfWidth * 1.5,
+    toggleTop + toggleHeight / 2 + 0.5,
+  );
+
+  drawingContext.strokeStyle = palette.hairline;
+  drawingContext.lineWidth = 1;
+  drawingContext.beginPath();
+  drawingContext.moveTo(DISPLAY_CENTER_PX - 52, LIBRARY_CONSTANTS.ARTIST_HEADER_DIVIDER_Y);
+  drawingContext.lineTo(DISPLAY_CENTER_PX + 52, LIBRARY_CONSTANTS.ARTIST_HEADER_DIVIDER_Y);
+  drawingContext.stroke();
+
+  drawingContext.restore();
+}
+
 /**
  * Draw the curved right-edge scroll indicator arc and active position thumb.
  *
@@ -1228,21 +1405,30 @@ function resolveLibraryRowPressIntensity(rowIndex, libraryState) {
 function resolveCrateAlbumsFromState(libraryState, currentView) {
   if (
     Array.isArray(libraryState?.currentCrateAlbums) &&
-    (libraryState.currentCrateAlbums.length > 0 || !libraryState?.catalog?.albums?.length)
+    (currentView?.isFavoritesView ||
+      libraryState.currentCrateAlbums.length > 0 ||
+      !libraryState?.catalog?.albums?.length)
   ) {
     return libraryState.currentCrateAlbums;
   }
+  const sortMode = libraryState?.albumSortMode || "alphabetical";
   const catalogAlbums = Array.isArray(libraryState?.catalog?.albums)
     ? libraryState.catalog.albums
     : [];
-  if (Array.isArray(currentView?.albumIds) && currentView.albumIds.length > 0) {
-    const albumByIdMap = new Map(catalogAlbums.map((albumEntry) => [albumEntry.id, albumEntry]));
-    return sortAlphabeticallyBy(
-      currentView.albumIds.map((albumId) => albumByIdMap.get(albumId)).filter(Boolean),
-      (albumEntry) => albumEntry.title,
+  if (currentView?.isFavoritesView) {
+    return sortAlbumsByMode(
+      catalogAlbums.filter((albumEntry) => Boolean(albumEntry?.isFavorite)),
+      sortMode,
     );
   }
-  return catalogAlbums;
+  if (Array.isArray(currentView?.albumIds) && currentView.albumIds.length > 0) {
+    const albumByIdMap = new Map(catalogAlbums.map((albumEntry) => [albumEntry.id, albumEntry]));
+    return sortAlbumsByMode(
+      currentView.albumIds.map((albumId) => albumByIdMap.get(albumId)).filter(Boolean),
+      sortMode,
+    );
+  }
+  return sortAlbumsByMode(catalogAlbums, sortMode);
 }
 
 function resolveRowsFromState(libraryState, currentView) {
@@ -1272,9 +1458,32 @@ function resolveLetterEntriesFromState(currentView, libraryState) {
   if (Array.isArray(libraryState?.letterEntries)) {
     return libraryState.letterEntries;
   }
+  if (currentView.kind === "albums") {
+    const crateAlbums = resolveCrateAlbumsFromState(libraryState, currentView);
+    if (crateAlbums.length < MIN_ALPHABETICAL_INDEX_COUNT) {
+      return [];
+    }
+    const anchors = buildAlbumSeekIndex(
+      crateAlbums,
+      libraryState?.albumSortMode || "alphabetical",
+    );
+    return anchors.length >= MIN_LETTER_GROUPS_FOR_SEEK ? anchors : [];
+  }
+
+  if (currentView.kind === "artists") {
+    const entries = resolveRowsFromState(libraryState, currentView);
+    if (entries.length < MIN_ALPHABETICAL_INDEX_COUNT) {
+      return [];
+    }
+    const anchors = buildCollectionSeekIndex(
+      entries,
+      libraryState?.artistSortMode || "alphabetical",
+      (entry) => entry?.title ?? entry?.name ?? "",
+    );
+    return anchors.length >= MIN_LETTER_GROUPS_FOR_SEEK ? anchors : [];
+  }
+
   const isAlphabeticalView =
-    currentView.kind === "albums" ||
-    currentView.kind === "artists" ||
     currentView.kind === "genres" ||
     currentView.kind === "playlists" ||
     (currentView.kind === "tracks" && currentView.sourceType !== "album");
@@ -1283,10 +1492,7 @@ function resolveLetterEntriesFromState(currentView, libraryState) {
     return [];
   }
 
-  const entries =
-    currentView.kind === "albums"
-      ? resolveCrateAlbumsFromState(libraryState, currentView)
-      : resolveRowsFromState(libraryState, currentView);
+  const entries = resolveRowsFromState(libraryState, currentView);
 
   if (entries.length < MIN_ALPHABETICAL_INDEX_COUNT) {
     return [];
@@ -1297,6 +1503,271 @@ function resolveLetterEntriesFromState(currentView, libraryState) {
     (entry) => entry?.title ?? entry?.name ?? entry,
   );
   return letters.length >= MIN_LETTER_GROUPS_FOR_SEEK ? letters : [];
+}
+
+function buildHubSectionRowsFromCounts(counts = {}) {
+  const safeCounts = counts && typeof counts === "object" ? counts : {};
+  const countMap = {
+    favorites: Number.isFinite(safeCounts.favorites) ? Math.max(0, Math.round(safeCounts.favorites)) : 0,
+    playlists: Number.isFinite(safeCounts.playlists) ? Math.max(0, Math.round(safeCounts.playlists)) : 0,
+    artists: Number.isFinite(safeCounts.artists) ? Math.max(0, Math.round(safeCounts.artists)) : 0,
+    albums: Number.isFinite(safeCounts.albums) ? Math.max(0, Math.round(safeCounts.albums)) : 0,
+    genres: Number.isFinite(safeCounts.genres) ? Math.max(0, Math.round(safeCounts.genres)) : 0,
+    "all-songs": Number.isFinite(safeCounts.tracks) ? Math.max(0, Math.round(safeCounts.tracks)) : 0,
+  };
+  return LIBRARY_HUB_SECTIONS.map((sectionSpec) => {
+    const countLabel = formatIntegerCount(countMap[sectionSpec.id] || 0);
+    return {
+      id: sectionSpec.id,
+      rowType: "hub",
+      title: sectionSpec.title,
+      countLabel,
+      countText: countLabel,
+    };
+  });
+}
+
+function drawSingleHubCrystalTile(
+  drawingContext,
+  row,
+  {
+    centerX,
+    centerY,
+    width,
+    height,
+    isPeeking = false,
+    tileAlpha = 1,
+    pressIntensity = 0,
+    clockSeconds = 0,
+    showIcon = true,
+    palette,
+    appearance = "dark",
+  },
+) {
+  if (tileAlpha <= CONTENT_VISIBILITY_THRESHOLD || width <= 2 || height <= 2) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const isPressed = pressIntensity > 0.10;
+  const leftX = centerX - width / 2;
+  const topY = centerY - height / 2;
+  const chamferScale = clamp(width / 114, 0.5, 1.0);
+  const outerChamfer = 12 * chamferScale;
+  const innerChamfer = 9 * chamferScale;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = tileAlpha;
+
+  traceChamferRect(drawingContext, leftX, topY, width, height, outerChamfer);
+  drawingContext.fillStyle = isDark
+    ? "rgba(210, 230, 255, 0.065)"
+    : "rgba(255, 255, 255, 0.54)";
+  drawingContext.fill();
+
+  traceChamferRect(drawingContext, leftX + 4, topY + 4, width - 8, height - 8, innerChamfer);
+  drawingContext.strokeStyle = isDark
+    ? "rgba(225, 240, 255, 0.09)"
+    : "rgba(255, 255, 255, 0.65)";
+  drawingContext.lineWidth = 0.85;
+  drawingContext.stroke();
+
+  drawingContext.save();
+  traceChamferRect(drawingContext, leftX, topY, width, height, outerChamfer);
+  drawingContext.clip();
+  if (pressIntensity > CONTENT_VISIBILITY_THRESHOLD) {
+    drawingContext.fillStyle = palette.signalHighlightSoft;
+    drawingContext.globalAlpha = tileAlpha * pressIntensity;
+    drawingContext.fillRect(leftX, topY, width, height);
+  }
+  drawingContext.globalAlpha = tileAlpha * (isPressed ? 0.22 : 0.085);
+  drawingContext.fillStyle = "#FFFFFF";
+  drawingContext.beginPath();
+  drawingContext.moveTo(leftX + width * 0.25, topY);
+  drawingContext.lineTo(leftX + width * 0.52, topY);
+  drawingContext.lineTo(leftX + width * 0.12, topY + height);
+  drawingContext.lineTo(leftX - width * 0.15, topY + height);
+  drawingContext.closePath();
+  drawingContext.fill();
+  drawingContext.restore();
+
+  traceChamferRect(drawingContext, leftX + 0.5, topY + 0.5, width - 1, height - 1, outerChamfer);
+  drawingContext.strokeStyle = isPressed
+    ? palette.signalHighlight
+    : isDark
+      ? "rgba(235, 245, 255, 0.24)"
+      : "rgba(46, 50, 56, 0.22)";
+  drawingContext.lineWidth = isPressed ? 1.6 : 1.1;
+  drawingContext.stroke();
+
+  if (pressIntensity > 0.04) {
+    drawLibraryCornerBrackets(
+      drawingContext,
+      leftX,
+      topY,
+      width,
+      height,
+      12 * chamferScale,
+      2.3,
+      palette.signalHighlight,
+      tileAlpha * pressIntensity,
+    );
+  }
+
+  const sizeScale = width / (isPeeking ? 94 : 114);
+  if (showIcon) {
+    drawLibraryLivingIcon(
+      drawingContext,
+      row.id,
+      centerX,
+      centerY - HUB_TILE_ICON_OFFSET_Y_PX * sizeScale,
+      (isPeeking ? HUB_TILE_PEEK_ICON_RADIUS_PX : HUB_TILE_FULL_ICON_RADIUS_PX) * sizeScale,
+      clockSeconds,
+      isPressed,
+      palette,
+      appearance,
+    );
+  }
+
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  const titleFontSize = (isPeeking ? 11.5 : 13) * sizeScale;
+  drawingContext.font = `${isPeeking ? "600" : "700"} ${titleFontSize.toFixed(2)}px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = isPressed ? palette.signalHighlight : palette.inkPrimary;
+  drawMarqueeCanvasText(
+    drawingContext,
+    row.title,
+    centerX,
+    centerY + 25 * sizeScale,
+    Math.max(40, width - 14),
+    clockSeconds,
+  );
+
+  const countFontSize = 9 * sizeScale;
+  drawingContext.font = `600 ${countFontSize.toFixed(2)}px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.inkSecondary;
+  drawingContext.fillText(
+    row.countText ?? row.countLabel ?? "0",
+    centerX,
+    centerY + 41 * sizeScale,
+  );
+
+  drawingContext.restore();
+}
+
+/**
+ * Render the Library 2-up Crystal Hub depth-dive transition layer for Home <-> Library
+ * handoffs (`revealProgress` in [0, 1]). At `revealProgress === 1`, output matches the
+ * settled Library Hub frame pixel-for-pixel so screen handoff has zero visual pop.
+ *
+ * @param {CanvasRenderingContext2D} drawingContext Canvas 2D context.
+ * @param {object} [options={}] Transition state, counts, scroll position, and theme.
+ */
+export function renderLibraryHubTransitionLayer(drawingContext, options = {}) {
+  if (!drawingContext || !options || typeof options !== "object") {
+    return;
+  }
+  const revealProgress = clamp(Number(options.revealProgress ?? 0), 0, 1);
+  if (revealProgress <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+
+  const appearance = resolveAppearance(options.appearance);
+  const palette = resolvePalette(appearance, options.palette);
+  const scrollPairPosition = Number.isFinite(options.scrollPosition)
+    ? Math.max(0, options.scrollPosition)
+    : 0;
+  const clockSeconds = Number.isFinite(options.clockSeconds) ? options.clockSeconds : 0;
+  const rows = Array.isArray(options.rows)
+    ? options.rows
+    : buildHubSectionRowsFromCounts(options.counts);
+  const totalTrackCount = Number.isFinite(options.counts?.tracks)
+    ? Math.max(0, Math.round(options.counts.tracks))
+    : 0;
+  const hubSubtitle =
+    totalTrackCount === 0
+      ? "0 TRACKS \u00b7 EMPTY COLLECTION"
+      : `2-UP CRYSTAL HUB \u00b7 ${formatIntegerCount(totalTrackCount)} TRACKS`;
+
+  const floorAlpha = easeOutCubic(
+    normalizeRange(revealProgress, HUB_DIVE_FLOOR_START, HUB_DIVE_FLOOR_END),
+  );
+  const headerProgress = normalizeRange(revealProgress, HUB_DIVE_HEADER_START, HUB_DIVE_HEADER_END);
+  const headerAlpha = easeOutCubic(headerProgress);
+  const headerOffsetY = lerp(HUB_DIVE_HEADER_DRIFT_Y_PX, 0, easeOutExpo(headerProgress));
+
+  drawLibraryPerspectiveFloor(drawingContext, scrollPairPosition, floorAlpha, palette, appearance);
+  drawLibraryPeripheralChrome(
+    drawingContext,
+    "Library",
+    hubSubtitle,
+    headerOffsetY,
+    headerAlpha,
+    palette,
+    appearance,
+    clockSeconds,
+  );
+
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(
+    0,
+    HEADER_CLIP_TOP_Y,
+    DISPLAY_DIAMETER_PX,
+    DISPLAY_DIAMETER_PX - HEADER_CLIP_TOP_Y,
+  );
+  drawingContext.clip();
+
+  for (let tileIndex = 0; tileIndex < rows.length; tileIndex += 1) {
+    const tileRect = computeLibraryHubTileRect(tileIndex, scrollPairPosition);
+    if (tileRect.alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+      continue;
+    }
+    const rowProgress = tileRect.isPeeking
+      ? normalizeRange(revealProgress, HUB_DIVE_PEEK_ROW_START, HUB_DIVE_PEEK_ROW_END)
+      : normalizeRange(revealProgress, HUB_DIVE_TOP_ROW_START, HUB_DIVE_TOP_ROW_END);
+    const tileFade = easeOutCubic(rowProgress);
+    if (tileFade <= CONTENT_VISIBILITY_THRESHOLD) {
+      continue;
+    }
+    const rowEase = easeOutExpo(rowProgress);
+    const tileScale = lerp(HUB_DIVE_TILE_MIN_SCALE, 1.0, rowEase);
+    const tileCenterX = lerp(DISPLAY_CENTER_PX, tileRect.centerX, tileScale);
+    const tileCenterY = lerp(
+      DISPLAY_CENTER_PX + HUB_DIVE_TILE_RISE_Y_PX,
+      tileRect.centerY,
+      tileScale,
+    );
+
+    drawSingleHubCrystalTile(drawingContext, rows[tileIndex], {
+      centerX: tileCenterX,
+      centerY: tileCenterY,
+      width: tileRect.width * tileScale,
+      height: tileRect.height * tileScale,
+      isPeeking: tileRect.isPeeking,
+      tileAlpha: tileRect.alpha * tileFade,
+      pressIntensity: 0,
+      clockSeconds,
+      showIcon: true,
+      palette,
+      appearance,
+    });
+  }
+
+  drawingContext.restore();
+
+  const arcAlpha = easeOutCubic(
+    normalizeRange(revealProgress, HUB_DIVE_ARC_START, HUB_DIVE_ARC_END),
+  );
+  if (arcAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+    const hubScrollRowSpan = Math.ceil(rows.length / 2) + 1;
+    drawLibraryScrollArc(
+      drawingContext,
+      scrollPairPosition,
+      hubScrollRowSpan,
+      arcAlpha * 0.85,
+      palette,
+    );
+  }
 }
 
 function renderLibraryHubGrid(
@@ -1312,7 +1783,6 @@ function renderLibraryHubGrid(
   const clockSeconds = Number.isFinite(libraryState.idleClockSeconds)
     ? libraryState.idleClockSeconds
     : 0;
-  const isDark = appearance === "dark";
 
   drawingContext.save();
   drawingContext.beginPath();
@@ -1332,108 +1802,37 @@ function renderLibraryHubGrid(
     const row = rows[tileIndex];
     const tileAlpha = tileRect.alpha * contentAlpha;
     const pressIntensity = resolveLibraryRowPressIntensity(tileIndex, libraryState);
-    const isPressed = pressIntensity > 0.10;
     const scale = lerp(1.0, 0.96, pressIntensity);
-    const width = tileRect.width * scale;
-    const height = tileRect.height * scale;
-    const leftX = tileRect.centerX - width / 2;
-    const topY = tileRect.centerY - height / 2;
 
-    drawingContext.save();
-    drawingContext.globalAlpha = tileAlpha;
-
-    traceChamferRect(drawingContext, leftX, topY, width, height, 12);
-    drawingContext.fillStyle = isDark
-      ? "rgba(210, 230, 255, 0.065)"
-      : "rgba(255, 255, 255, 0.54)";
-    drawingContext.fill();
-
-    traceChamferRect(drawingContext, leftX + 4, topY + 4, width - 8, height - 8, 9);
-    drawingContext.strokeStyle = isDark
-      ? "rgba(225, 240, 255, 0.09)"
-      : "rgba(255, 255, 255, 0.65)";
-    drawingContext.lineWidth = 0.85;
-    drawingContext.stroke();
-
-    drawingContext.save();
-    traceChamferRect(drawingContext, leftX, topY, width, height, 12);
-    drawingContext.clip();
-    if (pressIntensity > CONTENT_VISIBILITY_THRESHOLD) {
-      drawingContext.fillStyle = palette.signalHighlightSoft;
-      drawingContext.globalAlpha = tileAlpha * pressIntensity;
-      drawingContext.fillRect(leftX, topY, width, height);
-    }
-    drawingContext.globalAlpha = tileAlpha * (isPressed ? 0.22 : 0.085);
-    drawingContext.fillStyle = "#FFFFFF";
-    drawingContext.beginPath();
-    drawingContext.moveTo(leftX + width * 0.25, topY);
-    drawingContext.lineTo(leftX + width * 0.52, topY);
-    drawingContext.lineTo(leftX + width * 0.12, topY + height);
-    drawingContext.lineTo(leftX - width * 0.15, topY + height);
-    drawingContext.closePath();
-    drawingContext.fill();
-    drawingContext.restore();
-
-    traceChamferRect(drawingContext, leftX + 0.5, topY + 0.5, width - 1, height - 1, 12);
-    drawingContext.strokeStyle = isPressed
-      ? palette.signalHighlight
-      : isDark
-        ? "rgba(235, 245, 255, 0.24)"
-        : "rgba(46, 50, 56, 0.22)";
-    drawingContext.lineWidth = isPressed ? 1.6 : 1.1;
-    drawingContext.stroke();
-
-    if (pressIntensity > 0.04) {
-      drawLibraryCornerBrackets(
-        drawingContext,
-        leftX,
-        topY,
-        width,
-        height,
-        12,
-        2.3,
-        palette.signalHighlight,
-        tileAlpha * pressIntensity,
-      );
-    }
-
-    drawLibraryLivingIcon(
-      drawingContext,
-      row.id,
-      tileRect.centerX,
-      tileRect.centerY - 14,
-      tileRect.isPeeking ? 15 : 19,
+    drawSingleHubCrystalTile(drawingContext, row, {
+      centerX: tileRect.centerX,
+      centerY: tileRect.centerY,
+      width: tileRect.width * scale,
+      height: tileRect.height * scale,
+      isPeeking: tileRect.isPeeking,
+      tileAlpha,
+      pressIntensity,
       clockSeconds,
-      isPressed,
+      showIcon: true,
       palette,
       appearance,
-    );
-
-    drawingContext.textAlign = "center";
-    drawingContext.textBaseline = "middle";
-    drawingContext.font = `${tileRect.isPeeking ? "600 11.5px" : "700 13px"} ${FONT_DISPLAY}`;
-    drawingContext.fillStyle = isPressed ? palette.signalHighlight : palette.inkPrimary;
-    drawMarqueeCanvasText(
-      drawingContext,
-      row.title,
-      tileRect.centerX,
-      tileRect.centerY + 25,
-      Math.max(40, width - 14),
-      clockSeconds,
-    );
-
-    drawingContext.font = `600 9px ${FONT_MONO}`;
-    drawingContext.fillStyle = palette.inkSecondary;
-    drawingContext.fillText(
-      row.countText ?? row.countLabel ?? "0",
-      tileRect.centerX,
-      tileRect.centerY + 41,
-    );
-
-    drawingContext.restore();
+    });
   }
 
   drawingContext.restore();
+
+  if (viewEntry.kind === "artists" && rows.length > 0) {
+    drawFloatingSortButton(
+      drawingContext,
+      libraryState.artistSortMode || "alphabetical",
+      LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_X,
+      LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_Y,
+      clockSeconds,
+      contentAlpha,
+      palette,
+      appearance,
+    );
+  }
 
   const hideDefaultThumb =
     (libraryState.arcFeedbackAlpha ?? 0) > 0.05 ||
@@ -1558,7 +1957,21 @@ function renderLibraryCurvedList(
       drawingContext.fillText(countText, rightPaddingX, layout.rowY + 0.5);
 
       const countWidth = drawingContext.measureText(countText).width;
-      const maxTitleWidth = Math.max(44, rightPaddingX - textOriginX - countWidth - 10);
+      const showArtistHeart = row.rowType === "artist" && Boolean(row.isFavorite);
+      if (showArtistHeart) {
+        drawCrispHeartGlyph(
+          drawingContext,
+          rightPaddingX - countWidth - 10,
+          layout.rowY + 0.5,
+          4.5,
+          true,
+          palette.signalHighlight,
+          palette.signalHighlight,
+          1.1,
+        );
+      }
+      const rightReservedWidth = countWidth + (showArtistHeart ? 24 : 10);
+      const maxTitleWidth = Math.max(44, rightPaddingX - textOriginX - rightReservedWidth);
       drawingContext.font = `${isPreview ? "600 13.5px" : "700 15.5px"} ${FONT_DISPLAY}`;
       drawingContext.fillStyle = isPreview ? palette.inkSecondary : palette.inkPrimary;
       drawingContext.textAlign = "left";
@@ -1633,9 +2046,12 @@ function renderLibraryCurvedList(
 
         drawingContext.font = `600 9px ${FONT_MONO}`;
         drawingContext.fillStyle = palette.inkSecondary;
+        const subtitleText = row.showAlbumSubtitle
+          ? String(row.albumTitle || "").toUpperCase()
+          : String(row.artist || "").toUpperCase();
         drawMarqueeCanvasText(
           drawingContext,
-          String(row.artist || "").toUpperCase(),
+          subtitleText,
           textOriginX,
           layout.rowY + 9,
           maxTitleWidth,
@@ -1663,6 +2079,19 @@ function renderLibraryCurvedList(
   }
 
   drawingContext.restore();
+
+  if (viewEntry.kind === "artists" && rows.length > 0) {
+    drawFloatingSortButton(
+      drawingContext,
+      libraryState.artistSortMode || "alphabetical",
+      LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_X,
+      LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_Y,
+      clockSeconds,
+      contentAlpha,
+      palette,
+      appearance,
+    );
+  }
 
   const hideDefaultThumb =
     (libraryState.arcFeedbackAlpha ?? 0) > 0.05 ||
@@ -1759,6 +2188,64 @@ export function drawCrateAlbumSleeveBox(
     drawingContext.stroke();
   }
 
+  if (Boolean(album?.isFavorite)) {
+    const badgeSize = Math.round(sleeveSize * 0.21);
+    const badgeX = sleeveHalf - badgeSize - 5;
+    const badgeY = -sleeveHalf + 5;
+    drawingContext.save();
+    drawingContext.globalAlpha = resolvedAlpha;
+    traceChamferRect(drawingContext, badgeX, badgeY, badgeSize, badgeSize, 4);
+    drawingContext.fillStyle = isDark ? "rgba(6, 7, 9, 0.82)" : "rgba(245, 246, 248, 0.90)";
+    drawingContext.fill();
+    drawingContext.strokeStyle = resolvedPalette.signalHighlight;
+    drawingContext.lineWidth = 1.25;
+    drawingContext.stroke();
+    drawCrispHeartGlyph(
+      drawingContext,
+      badgeX + badgeSize / 2,
+      badgeY + badgeSize / 2 + 0.5,
+      badgeSize * 0.29,
+      true,
+      resolvedPalette.signalHighlight,
+      resolvedPalette.signalHighlight,
+      1.2,
+    );
+    drawingContext.restore();
+  }
+
+  drawingContext.restore();
+}
+
+function drawCrispHeartGlyph(
+  drawingContext,
+  centerX,
+  centerY,
+  radius,
+  filled,
+  fillColor,
+  strokeColor,
+  lineWidth = 1.4,
+) {
+  drawingContext.save();
+  drawingContext.translate(centerX, centerY);
+  drawingContext.beginPath();
+  drawingContext.moveTo(0, radius * 0.78);
+  drawingContext.lineTo(-radius * 0.86, -radius * 0.08);
+  drawingContext.lineTo(-radius * 0.82, -radius * 0.58);
+  drawingContext.lineTo(-radius * 0.34, -radius * 0.80);
+  drawingContext.lineTo(0, -radius * 0.38);
+  drawingContext.lineTo(radius * 0.34, -radius * 0.80);
+  drawingContext.lineTo(radius * 0.82, -radius * 0.58);
+  drawingContext.lineTo(radius * 0.86, -radius * 0.08);
+  drawingContext.closePath();
+  if (filled) {
+    drawingContext.fillStyle = fillColor;
+    drawingContext.fill();
+  }
+  drawingContext.strokeStyle = strokeColor;
+  drawingContext.lineWidth = lineWidth;
+  drawingContext.lineJoin = "miter";
+  drawingContext.stroke();
   drawingContext.restore();
 }
 
@@ -1827,6 +2314,122 @@ function drawCrateAlbumSleeveWithDisc(
   drawingContext.restore();
 }
 
+function drawSortModeIconGlyph(drawingContext, sortMode, centerX, centerY, accentColor) {
+  drawingContext.save();
+  drawingContext.translate(centerX, centerY);
+
+  // 3 stepped horizontal sort bars on the left
+  drawingContext.strokeStyle = accentColor;
+  drawingContext.lineWidth = 1.5;
+  drawingContext.lineCap = "square";
+  drawingContext.beginPath();
+  drawingContext.moveTo(-8, -4.5);
+  drawingContext.lineTo(1, -4.5);
+  drawingContext.moveTo(-8, 0);
+  drawingContext.lineTo(-1.5, 0);
+  drawingContext.moveTo(-8, 4.5);
+  drawingContext.lineTo(-4, 4.5);
+  drawingContext.stroke();
+
+  if (sortMode === "liked-first") {
+    drawCrispHeartGlyph(
+      drawingContext,
+      5.5,
+      2.5,
+      4.2,
+      true,
+      accentColor,
+      accentColor,
+      1.1,
+    );
+  } else if (sortMode === "recent" || sortMode === "oldest") {
+    const arrowX = 5.5;
+    const isDown = sortMode === "recent";
+    drawingContext.strokeStyle = accentColor;
+    drawingContext.lineWidth = 1.6;
+    drawingContext.lineCap = "butt";
+    drawingContext.beginPath();
+    drawingContext.moveTo(arrowX, -5.5);
+    drawingContext.lineTo(arrowX, 5.5);
+    if (isDown) {
+      drawingContext.moveTo(arrowX - 3.2, 2.2);
+      drawingContext.lineTo(arrowX, 5.8);
+      drawingContext.lineTo(arrowX + 3.2, 2.2);
+    } else {
+      drawingContext.moveTo(arrowX - 3.2, -2.2);
+      drawingContext.lineTo(arrowX, -5.8);
+      drawingContext.lineTo(arrowX + 3.2, -2.2);
+    }
+    drawingContext.stroke();
+  } else {
+    drawingContext.font = `800 6.5px ${FONT_MONO}`;
+    drawingContext.fillStyle = accentColor;
+    drawingContext.textAlign = "center";
+    drawingContext.textBaseline = "middle";
+    drawingContext.fillText(sortMode === "reverse-alphabetical" ? "ZA" : "AZ", 5.5, 3.2);
+  }
+
+  drawingContext.restore();
+}
+
+function drawFloatingSortButton(
+  drawingContext,
+  sortMode,
+  centerX,
+  baseCenterY,
+  clockSeconds,
+  alpha,
+  palette,
+  appearance,
+) {
+  if (alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+
+  const isDark = appearance === "dark";
+  const safeClock = Number.isFinite(clockSeconds) ? clockSeconds : 0;
+  const centerY = baseCenterY + Math.sin(safeClock * 2.4 + 1.2) * 1.1;
+  const buttonRadius = CRATE_NOTE_BUTTON_RADIUS_PX;
+  const isCustomSort = sortMode !== "alphabetical";
+  const accentColor = isCustomSort ? palette.signalHighlight : palette.inkPrimary;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+  drawingContext.translate(centerX, centerY);
+
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, buttonRadius, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = isDark ? "rgba(18, 22, 30, 0.88)" : "rgba(255, 255, 255, 0.84)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = isCustomSort ? palette.signalHighlight : palette.hairlineStrong;
+  drawingContext.lineWidth = 1.4;
+  drawingContext.stroke();
+
+  drawSortModeIconGlyph(drawingContext, sortMode, 0, 0, accentColor);
+
+  drawingContext.restore();
+}
+
+function drawCrateFloatingSortButton(
+  drawingContext,
+  sortMode,
+  clockSeconds,
+  alpha,
+  palette,
+  appearance,
+) {
+  drawFloatingSortButton(
+    drawingContext,
+    sortMode,
+    CRATE_SORT_BUTTON_CENTER_X,
+    CRATE_NOTE_BUTTON_CENTER_Y,
+    clockSeconds,
+    alpha,
+    palette,
+    appearance,
+  );
+}
+
 function drawCrateFloatingNoteButton(
   drawingContext,
   clockSeconds,
@@ -1845,7 +2448,7 @@ function drawCrateFloatingNoteButton(
 
   drawingContext.save();
   drawingContext.globalAlpha = alpha;
-  drawingContext.translate(DISPLAY_CENTER_PX, centerY);
+  drawingContext.translate(CRATE_NOTE_BUTTON_CENTER_X, centerY);
 
   drawingContext.beginPath();
   drawingContext.arc(0, 0, buttonRadius, 0, FULL_CIRCLE_RADIANS);
@@ -2112,6 +2715,15 @@ function renderLibraryAlbumCrate(
       cursorX += bar.width + CRATE_BAR_GAP_PX;
     }
 
+    drawCrateFloatingSortButton(
+      drawingContext,
+      libraryState.albumSortMode || "alphabetical",
+      clockSeconds,
+      bottomAlpha,
+      palette,
+      appearance,
+    );
+
     drawCrateFloatingNoteButton(
       drawingContext,
       clockSeconds,
@@ -2122,6 +2734,83 @@ function renderLibraryAlbumCrate(
 
     drawingContext.restore();
   }
+}
+
+function renderFavoritesInlineEmptyState(
+  drawingContext,
+  tabMode,
+  clockSeconds,
+  contentAlpha,
+  palette,
+  appearance,
+) {
+  if (contentAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+  const isAlbumsTab = tabMode !== "songs";
+  const isDark = appearance === "dark";
+  const safeClock = Number.isFinite(clockSeconds) ? clockSeconds : 0;
+  const breatheScale = 1 + Math.sin(safeClock * 2.1) * 0.04;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = contentAlpha;
+
+  const emblemCenterY = 152;
+  drawingContext.save();
+  drawingContext.translate(DISPLAY_CENTER_PX, emblemCenterY);
+  drawingContext.scale(breatheScale, breatheScale);
+
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, 32, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = isDark
+    ? "rgba(210, 230, 255, 0.06)"
+    : "rgba(255, 255, 255, 0.56)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = isDark
+    ? "rgba(235, 245, 255, 0.22)"
+    : "rgba(46, 50, 56, 0.22)";
+  drawingContext.lineWidth = 1.25;
+  drawingContext.stroke();
+
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, 40, -Math.PI * 0.68, Math.PI * 0.12);
+  drawingContext.strokeStyle = palette.signalHighlight;
+  drawingContext.lineWidth = 1.6;
+  drawingContext.lineCap = "round";
+  drawingContext.stroke();
+  drawingContext.restore();
+
+  drawLibraryLivingIcon(
+    drawingContext,
+    isAlbumsTab ? "albums" : "favorites",
+    DISPLAY_CENTER_PX,
+    emblemCenterY,
+    16,
+    safeClock,
+    false,
+    palette,
+    appearance,
+  );
+
+  drawingContext.font = `700 18px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = palette.inkPrimary;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillText(
+    isAlbumsTab ? "No Favorite Albums" : "No Favorite Songs",
+    DISPLAY_CENTER_PX,
+    214,
+  );
+
+  drawingContext.font = `600 9.5px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.inkSecondary;
+  drawingContext.fillText(
+    isAlbumsTab ? "HOLD AN ALBUM SLEEVE TO LIKE" : "HEART A TRACK WHILE LISTENING",
+    DISPLAY_CENTER_PX,
+    236,
+  );
+
+  drawingContext.restore();
 }
 
 function renderLibraryEmptyState(
@@ -2247,84 +2936,67 @@ function drawLibraryRimArcFeedback(
       const sliceIndex = drawOrder[orderIndex].sliceIndex;
       const pull = easeOutCubic(drawOrder[orderIndex].pull);
       const sliceCenter = TOP_ANGLE_RADIANS + (sliceIndex + 0.5) * slicePitch;
-      const angularSpan = slicePitch * lerp(0.60, 0.76, pull);
+      const angularSpan = slicePitch * lerp(0.56, 0.72, pull);
       const startAngle = sliceCenter - angularSpan / 2;
       const endAngle = sliceCenter + angularSpan / 2;
 
-      const outerRadius = lerp(171, 173, pull);
-      const innerRadius = lerp(168, 149, pull);
-
       if (pull < 0.04) {
+        drawingContext.save();
+        drawingContext.globalAlpha = arcAlpha * 0.42;
         drawingContext.beginPath();
-        drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, 169.5, startAngle, endAngle);
+        drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, 171.5, startAngle, endAngle);
         drawingContext.strokeStyle = palette.hairlineStrong;
-        drawingContext.lineWidth = 2.8;
+        drawingContext.lineWidth = 1.25;
         drawingContext.lineCap = "butt";
         drawingContext.stroke();
+        drawingContext.restore();
       } else {
+        const outerRadius = lerp(172, 173, pull);
+        const innerRadius = lerp(170.5, 161, pull);
+
         traceCurvedSlabWedge(drawingContext, innerRadius, outerRadius, startAngle, endAngle);
         drawingContext.fillStyle = isDark
-          ? `rgba(216, 234, 255, ${lerp(0.10, 0.24, pull).toFixed(3)})`
-          : `rgba(255, 255, 255, ${lerp(0.45, 0.88, pull).toFixed(3)})`;
+          ? `rgba(210, 230, 255, ${lerp(0.08, 0.19, pull).toFixed(3)})`
+          : `rgba(255, 255, 255, ${lerp(0.36, 0.72, pull).toFixed(3)})`;
         drawingContext.fill();
 
-        drawingContext.save();
-        drawingContext.globalAlpha = arcAlpha * pull * 0.55;
-        drawingContext.fillStyle = palette.signalHighlightSoft;
-        drawingContext.fill();
-        drawingContext.restore();
-
-        drawingContext.save();
-        traceCurvedSlabWedge(drawingContext, innerRadius, outerRadius, startAngle, endAngle);
-        drawingContext.clip();
-        const midpointRadius = (innerRadius + outerRadius) / 2;
-        const glintX = DISPLAY_CENTER_PX + Math.cos(sliceCenter) * midpointRadius;
-        const glintY = DISPLAY_CENTER_PX + Math.sin(sliceCenter) * midpointRadius;
-        drawingContext.translate(glintX, glintY);
-        drawingContext.rotate(sliceCenter + 0.55);
-        drawingContext.fillStyle = isDark
-          ? "rgba(255, 255, 255, 0.24)"
-          : "rgba(255, 255, 255, 0.72)";
-        drawingContext.fillRect(-16, -2.5, 32, 4.5);
-        drawingContext.restore();
-
-        if (outerRadius - innerRadius > 9) {
-          traceCurvedSlabWedge(
-            drawingContext,
-            innerRadius + 3,
-            outerRadius - 3,
-            startAngle + 0.03,
-            endAngle - 0.03,
-          );
-          drawingContext.strokeStyle = isDark
-            ? "rgba(240, 248, 255, 0.22)"
-            : "rgba(255, 255, 255, 0.78)";
-          drawingContext.lineWidth = 0.85;
-          drawingContext.stroke();
+        if (pull > 0.65) {
+          drawingContext.save();
+          traceCurvedSlabWedge(drawingContext, innerRadius, outerRadius, startAngle, endAngle);
+          drawingContext.clip();
+          const midpointRadius = (innerRadius + outerRadius) / 2;
+          const glintX = DISPLAY_CENTER_PX + Math.cos(sliceCenter) * midpointRadius;
+          const glintY = DISPLAY_CENTER_PX + Math.sin(sliceCenter) * midpointRadius;
+          drawingContext.translate(glintX, glintY);
+          drawingContext.rotate(sliceCenter + 0.55);
+          drawingContext.fillStyle = isDark
+            ? "rgba(255, 255, 255, 0.18)"
+            : "rgba(255, 255, 255, 0.56)";
+          drawingContext.fillRect(-12, -1.6, 24, 3.2);
+          drawingContext.restore();
         }
 
         traceCurvedSlabWedge(drawingContext, innerRadius, outerRadius, startAngle, endAngle);
-        drawingContext.strokeStyle =
-          pull > 0.55
-            ? palette.signalHighlight
-            : isDark
-              ? "rgba(235, 245, 255, 0.58)"
-              : "rgba(46, 50, 56, 0.45)";
-        drawingContext.lineWidth = pull > 0.55 ? 1.55 : 1.1;
+        drawingContext.strokeStyle = isDark
+          ? `rgba(235, 245, 255, ${lerp(0.24, 0.58, pull).toFixed(3)})`
+          : `rgba(46, 50, 56, ${lerp(0.22, 0.45, pull).toFixed(3)})`;
+        drawingContext.lineWidth = 1;
         drawingContext.stroke();
 
-        drawingContext.beginPath();
-        drawingContext.arc(
-          DISPLAY_CENTER_PX,
-          DISPLAY_CENTER_PX,
-          innerRadius + 0.8,
-          startAngle + 0.02,
-          endAngle - 0.02,
-        );
-        drawingContext.strokeStyle = palette.signalHighlight;
-        drawingContext.lineWidth = lerp(1.5, 3.0, pull);
-        drawingContext.lineCap = "butt";
-        drawingContext.stroke();
+        if (pull > 0.50) {
+          drawingContext.beginPath();
+          drawingContext.arc(
+            DISPLAY_CENTER_PX,
+            DISPLAY_CENTER_PX,
+            innerRadius + 0.6,
+            startAngle + 0.02,
+            endAngle - 0.02,
+          );
+          drawingContext.strokeStyle = palette.signalHighlight;
+          drawingContext.lineWidth = 1.6;
+          drawingContext.lineCap = "butt";
+          drawingContext.stroke();
+        }
       }
     }
 
@@ -2390,6 +3062,24 @@ function drawLibraryRimArcFeedback(
   drawingContext.restore();
 }
 
+function drawSeekHeartBadge(drawingContext, centerX, centerY, radius, fillColor) {
+  drawingContext.save();
+  drawingContext.translate(centerX, centerY);
+  drawingContext.beginPath();
+  drawingContext.moveTo(0, radius * 0.78);
+  drawingContext.lineTo(-radius * 0.88, -radius * 0.08);
+  drawingContext.lineTo(-radius * 0.84, -radius * 0.58);
+  drawingContext.lineTo(-radius * 0.35, -radius * 0.80);
+  drawingContext.lineTo(0, -radius * 0.40);
+  drawingContext.lineTo(radius * 0.35, -radius * 0.80);
+  drawingContext.lineTo(radius * 0.84, -radius * 0.58);
+  drawingContext.lineTo(radius * 0.88, -radius * 0.08);
+  drawingContext.closePath();
+  drawingContext.fillStyle = fillColor;
+  drawingContext.fill();
+  drawingContext.restore();
+}
+
 function renderLibraryLetterSearchHud(
   drawingContext,
   libraryState,
@@ -2408,9 +3098,13 @@ function renderLibraryLetterSearchHud(
   const isDark = appearance === "dark";
   const activeIndex = clamp(Number(libraryState.letterSearchIndex ?? 0), 0, letters.length - 1);
   const activeEntry = letters[activeIndex];
-  const prevEntry = activeIndex > 0 ? letters[activeIndex - 1] : null;
+  const previousEntry = activeIndex > 0 ? letters[activeIndex - 1] : null;
   const nextEntry = activeIndex < letters.length - 1 ? letters[activeIndex + 1] : null;
   const ease = easeOutExpo(hudAlpha);
+  const isDateAnchor =
+    (typeof activeEntry.kind === "string" && activeEntry.kind.startsWith("date-")) ||
+    Boolean(activeEntry.subLabel) ||
+    String(activeEntry.letter || "").length > 1;
 
   drawingContext.save();
 
@@ -2429,28 +3123,95 @@ function renderLibraryLetterSearchHud(
   drawingContext.lineWidth = 1.6;
   drawingContext.stroke();
 
-  drawingContext.font = `700 8.5px ${FONT_MONO}`;
-  drawingContext.fillStyle = palette.inkSecondary;
   drawingContext.textAlign = "center";
   drawingContext.textBaseline = "middle";
-  drawingContext.fillText("LETTER SEEK", DISPLAY_CENTER_PX, DISPLAY_CENTER_PX - 40);
 
-  drawingContext.font = `700 14px ${FONT_DISPLAY}`;
-  drawingContext.fillStyle = palette.inkSecondary;
-  if (prevEntry) {
-    drawingContext.globalAlpha = ease * 0.65;
-    drawingContext.fillText(prevEntry.letter, DISPLAY_CENTER_PX - 40, DISPLAY_CENTER_PX - 6);
-  }
-  if (nextEntry) {
-    drawingContext.globalAlpha = ease * 0.65;
-    drawingContext.fillText(nextEntry.letter, DISPLAY_CENTER_PX + 40, DISPLAY_CENTER_PX - 6);
+  if (isDateAnchor) {
+    drawingContext.font = `700 11px ${FONT_MONO}`;
+    drawingContext.fillStyle = palette.inkSecondary;
+    if (previousEntry) {
+      drawingContext.globalAlpha = ease * 0.78;
+      drawingContext.textAlign = "right";
+      drawingContext.fillText(
+        previousEntry.shortLabel || previousEntry.letter,
+        DISPLAY_CENTER_PX - 74,
+        DISPLAY_CENTER_PX - 6,
+      );
+    }
+    if (nextEntry) {
+      drawingContext.globalAlpha = ease * 0.78;
+      drawingContext.textAlign = "left";
+      drawingContext.fillText(
+        nextEntry.shortLabel || nextEntry.letter,
+        DISPLAY_CENTER_PX + 74,
+        DISPLAY_CENTER_PX - 6,
+      );
+    }
+
+    drawingContext.textAlign = "center";
+    if (activeEntry.subLabel) {
+      const primaryFontSize = String(activeEntry.letter || "").length <= 2 ? 34 : 30;
+      drawingContext.globalAlpha = ease;
+      drawingContext.font = `800 ${primaryFontSize}px ${FONT_DISPLAY}`;
+      drawingContext.fillStyle = palette.signalHighlight;
+      drawingContext.fillText(activeEntry.letter, DISPLAY_CENTER_PX, DISPLAY_CENTER_PX - 8);
+
+      drawingContext.globalAlpha = ease * 0.85;
+      drawingContext.font = `700 10.5px ${FONT_MONO}`;
+      drawingContext.fillStyle = palette.inkPrimary;
+      drawingContext.fillText(activeEntry.subLabel, DISPLAY_CENTER_PX, DISPLAY_CENTER_PX + 18);
+    } else {
+      drawingContext.globalAlpha = ease;
+      drawingContext.font = `800 30px ${FONT_DISPLAY}`;
+      drawingContext.fillStyle = palette.signalHighlight;
+      drawingContext.fillText(activeEntry.letter, DISPLAY_CENTER_PX, DISPLAY_CENTER_PX - 2);
+    }
+  } else {
+    drawingContext.font = `700 14px ${FONT_DISPLAY}`;
+    drawingContext.fillStyle = palette.inkSecondary;
+    if (previousEntry) {
+      drawingContext.globalAlpha = ease * 0.65;
+      drawingContext.fillText(previousEntry.letter, DISPLAY_CENTER_PX - 40, DISPLAY_CENTER_PX - 6);
+      if (previousEntry.isFavorite) {
+        drawSeekHeartBadge(
+          drawingContext,
+          DISPLAY_CENTER_PX - 40,
+          DISPLAY_CENTER_PX - 21,
+          3.8,
+          palette.signalHighlight,
+        );
+      }
+    }
+    if (nextEntry) {
+      drawingContext.globalAlpha = ease * 0.65;
+      drawingContext.fillText(nextEntry.letter, DISPLAY_CENTER_PX + 40, DISPLAY_CENTER_PX - 6);
+      if (nextEntry.isFavorite) {
+        drawSeekHeartBadge(
+          drawingContext,
+          DISPLAY_CENTER_PX + 40,
+          DISPLAY_CENTER_PX - 21,
+          3.8,
+          palette.signalHighlight,
+        );
+      }
+    }
+
+    drawingContext.globalAlpha = ease;
+    drawingContext.font = `800 46px ${FONT_DISPLAY}`;
+    drawingContext.fillStyle = palette.signalHighlight;
+    drawingContext.fillText(activeEntry.letter, DISPLAY_CENTER_PX, DISPLAY_CENTER_PX - 4);
+    if (activeEntry.isFavorite) {
+      drawSeekHeartBadge(
+        drawingContext,
+        DISPLAY_CENTER_PX,
+        DISPLAY_CENTER_PX + 32,
+        6,
+        palette.signalHighlight,
+      );
+    }
   }
 
   drawingContext.globalAlpha = ease;
-  drawingContext.font = `800 46px ${FONT_DISPLAY}`;
-  drawingContext.fillStyle = palette.signalHighlight;
-  drawingContext.fillText(activeEntry.letter, DISPLAY_CENTER_PX, DISPLAY_CENTER_PX - 4);
-
   drawingContext.font = `700 10px ${FONT_MONO}`;
   drawingContext.fillStyle = palette.inkPrimary;
   drawMarqueeCanvasText(
@@ -2597,92 +3358,934 @@ function renderLibraryPlaylistSheet(
   drawingContext.restore();
 }
 
-function drawNowPlayingExpandedChrome(
+function renderLibrarySortToast(drawingContext, libraryState, palette, appearance) {
+  const toastAlpha = clamp(Number(libraryState?.sortToastAlpha ?? 0), 0, 1);
+  const toastLabel = libraryState?.sortToastLabel;
+  if (toastAlpha <= CONTENT_VISIBILITY_THRESHOLD || !toastLabel) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const pillWidth = 168;
+  const pillHeight = 26;
+  const pillLeft = DISPLAY_CENTER_PX - pillWidth / 2;
+  const pillTop = 139;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = toastAlpha;
+  traceChamferRect(drawingContext, pillLeft, pillTop, pillWidth, pillHeight, 6);
+  drawingContext.fillStyle = isDark ? "rgba(6, 7, 9, 0.92)" : "rgba(46, 50, 56, 0.92)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = palette.signalHighlight;
+  drawingContext.lineWidth = 1.25;
+  drawingContext.stroke();
+
+  drawingContext.font = `800 9px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.signalHighlight;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillText(`SORT \u00b7 ${toastLabel}`, DISPLAY_CENTER_PX, pillTop + pillHeight / 2 + 0.5);
+  drawingContext.restore();
+}
+
+function resolveQuickActionsViewModel(libraryState) {
+  const unifiedProgress = Number(libraryState?.quickActionsProgress ?? 0);
+  const albumLegacyProgress = Number(libraryState?.albumQuickActionsProgress ?? 0);
+  const artistLegacyProgress = Number(libraryState?.artistQuickActionsProgress ?? 0);
+  const progress = clamp(
+    Math.max(unifiedProgress, albumLegacyProgress, artistLegacyProgress),
+    0,
+    1,
+  );
+  if (progress <= CONTENT_VISIBILITY_THRESHOLD) {
+    return null;
+  }
+
+  const kind =
+    libraryState?.quickActionsKind ||
+    (artistLegacyProgress > albumLegacyProgress ? "artist" : "album");
+  const targetId =
+    libraryState?.quickActionsTargetId ||
+    (kind === "artist"
+      ? libraryState?.artistQuickActionsArtistId
+      : libraryState?.albumQuickActionsAlbumId);
+  const catalogAlbums = Array.isArray(libraryState?.catalog?.albums)
+    ? libraryState.catalog.albums
+    : [];
+
+  if (kind === "artist") {
+    const catalogArtists = Array.isArray(libraryState?.catalog?.artists)
+      ? libraryState.catalog.artists
+      : [];
+    const targetArtist =
+      catalogArtists.find((artistEntry) => artistEntry.id === targetId) || null;
+    if (!targetArtist) {
+      return null;
+    }
+    const artistAlbumIds = Array.isArray(targetArtist.albumIds) ? targetArtist.albumIds : [];
+    const artistAlbums = artistAlbumIds
+      .map((albumId) => catalogAlbums.find((albumEntry) => albumEntry.id === albumId))
+      .filter(Boolean);
+    const albumCount = artistAlbums.length > 0 ? artistAlbums.length : artistAlbumIds.length;
+    const trackCount = artistAlbums.reduce(
+      (total, albumEntry) =>
+        total + (Array.isArray(albumEntry.tracks) ? albumEntry.tracks.length : 0),
+      0,
+    );
+    const albumWord = albumCount === 1 ? "Album" : "Albums";
+    const trackWord = trackCount === 1 ? "Track" : "Tracks";
+    const isLiked = Boolean(targetArtist.isFavorite);
+    return {
+      progress,
+      headerText: "ARTIST ACTIONS",
+      titleText: targetArtist.name || "Unknown Artist",
+      subtitleText: `${formatIntegerCount(albumCount)} ${albumWord} \u00b7 ${formatIntegerCount(trackCount)} ${trackWord}`,
+      isFavorited: isLiked,
+      buttonLabel: isLiked ? "LIKED" : "LIKE",
+    };
+  }
+
+  const targetAlbum =
+    catalogAlbums.find((albumEntry) => albumEntry.id === targetId) || null;
+  if (!targetAlbum) {
+    return null;
+  }
+  const trackCount = Array.isArray(targetAlbum.tracks) ? targetAlbum.tracks.length : 0;
+  const isFavorited = Boolean(targetAlbum.isFavorite);
+  return {
+    progress,
+    headerText: "ALBUM ACTIONS",
+    titleText: targetAlbum.title || "Unknown Album",
+    subtitleText: `${targetAlbum.artist || "Unknown Artist"} \u00b7 ${formatIntegerCount(trackCount)} Tracks`,
+    isFavorited,
+    buttonLabel: isFavorited ? "FAVORITED" : "FAVORITE",
+  };
+}
+
+function renderLibraryQuickActions(
   drawingContext,
-  launchProgress,
-  elapsedSeconds,
-  durationSeconds,
-  volumeLevel,
+  libraryState,
   palette,
+  appearance,
+  animationTimeSeconds = 0,
 ) {
-  const waveOne = easeOutExpo(normalizeRange(launchProgress, 0.52, 0.86));
-  if (waveOne > CONTENT_VISIBILITY_THRESHOLD) {
-    const spindleRadius = lerp(12, 27, waveOne);
-    const activeDuration = Math.max(1, durationSeconds);
-    const trackRatio = clamp(elapsedSeconds / activeDuration, 0, 1);
+  const viewModel = resolveQuickActionsViewModel(libraryState);
+  if (!viewModel) {
+    return;
+  }
+
+  const { progress, headerText, titleText, subtitleText, isFavorited, buttonLabel } = viewModel;
+  const isDark = appearance === "dark";
+  const ease = easeOutExpo(progress);
+  const isPressed = Boolean(libraryState.pressedQuickAction ?? libraryState.pressedAlbumQuickAction);
+  const buttonScale = isPressed ? 0.93 : 1.0;
+
+  drawingContext.save();
+
+  drawingContext.fillStyle = isDark ? "rgba(6, 7, 9, 0.78)" : "rgba(14, 17, 22, 0.76)";
+  drawingContext.globalAlpha = progress;
+  drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
+
+  const headerYOffset = lerp(-12, 0, ease);
+  drawingContext.save();
+  drawingContext.translate(0, headerYOffset);
+  drawingContext.globalAlpha = ease;
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+
+  drawingContext.font = `700 9px ${FONT_MONO}`;
+  drawingContext.fillStyle = palette.signalHighlight;
+  drawingContext.fillText(headerText, DISPLAY_CENTER_PX, 68);
+
+  drawingContext.font = `800 18px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = "#F5F6F8";
+  drawMarqueeCanvasText(
+    drawingContext,
+    titleText,
+    DISPLAY_CENTER_PX,
+    94,
+    224,
+    animationTimeSeconds,
+  );
+
+  drawingContext.font = `600 10.5px ${FONT_DISPLAY}`;
+  drawingContext.fillStyle = "rgba(245, 246, 248, 0.72)";
+  drawMarqueeCanvasText(
+    drawingContext,
+    subtitleText,
+    DISPLAY_CENTER_PX,
+    114,
+    244,
+    animationTimeSeconds,
+  );
+
+  drawingContext.strokeStyle = "rgba(245, 250, 255, 0.16)";
+  drawingContext.lineWidth = 1;
+  drawingContext.beginPath();
+  drawingContext.moveTo(116, 132);
+  drawingContext.lineTo(244, 132);
+  drawingContext.stroke();
+  drawingContext.restore();
+
+  const clusterYOffset = lerp(14, 0, ease);
+  drawingContext.save();
+  drawingContext.translate(0, clusterYOffset);
+  drawingContext.globalAlpha = ease;
+
+  drawingContext.save();
+  drawingContext.translate(DISPLAY_CENTER_PX, ALBUM_QUICK_ACTION_BUTTON_CENTER_Y);
+  drawingContext.scale(buttonScale, buttonScale);
+
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, ALBUM_QUICK_ACTION_BUTTON_RADIUS_PX, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = isFavorited
+    ? palette.signalHighlight
+    : isPressed
+      ? "rgba(245, 250, 255, 0.24)"
+      : "rgba(22, 26, 34, 0.90)";
+  drawingContext.fill();
+
+  drawingContext.strokeStyle =
+    isFavorited || isPressed ? palette.signalHighlight : "rgba(245, 250, 255, 0.34)";
+  drawingContext.lineWidth = isFavorited || isPressed ? 2.0 : 1.5;
+  drawingContext.stroke();
+
+  drawCrispHeartGlyph(
+    drawingContext,
+    0,
+    0,
+    14,
+    isFavorited,
+    isFavorited ? palette.signalHighlightInk : "transparent",
+    isFavorited ? palette.signalHighlightInk : "#F5F6F8",
+    1.8,
+  );
+
+  drawingContext.restore();
+
+  drawingContext.font = `700 9px ${FONT_MONO}`;
+  drawingContext.fillStyle = isFavorited ? palette.signalHighlight : "rgba(245, 246, 248, 0.80)";
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillText(
+    buttonLabel,
+    DISPLAY_CENTER_PX,
+    ALBUM_QUICK_ACTION_BUTTON_CENTER_Y + ALBUM_QUICK_ACTION_BUTTON_RADIUS_PX + 16,
+  );
+
+  drawingContext.font = `600 8.5px ${FONT_MONO}`;
+  drawingContext.fillStyle = "rgba(245, 246, 248, 0.48)";
+  drawingContext.fillText("TAP OUTSIDE TO CLOSE", DISPLAY_CENTER_PX, 316);
+
+  drawingContext.restore();
+  drawingContext.restore();
+}
+
+function renderLibrarySortWheel(drawingContext, libraryState, palette, appearance) {
+  const progress = clamp(Number(libraryState?.sortWheelProgress ?? 0), 0, 1);
+  if (progress <= CONTENT_VISIBILITY_THRESHOLD) {
+    return;
+  }
+
+  const isDark = appearance === "dark";
+  const ease = easeOutExpo(progress);
+  const isArtistsWheel =
+    libraryState?.sortWheelScope === "artists" ||
+    (!libraryState?.sortWheelScope && libraryState?.currentView?.kind === "artists");
+  const anchorX = isArtistsWheel
+    ? LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_X
+    : CRATE_SORT_BUTTON_CENTER_X;
+  const anchorY = isArtistsWheel
+    ? LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_Y
+    : CRATE_NOTE_BUTTON_CENTER_Y;
+  const hoveredMode = libraryState?.sortWheelHoveredMode || null;
+  const activeSortMode = isArtistsWheel
+    ? libraryState?.artistSortMode || "alphabetical"
+    : libraryState?.albumSortMode || "alphabetical";
+  const slots = computeSortWheelSlots(anchorX, anchorY);
+
+  drawingContext.save();
+
+  // Translucent scrim behind the radial half-wheel
+  drawingContext.fillStyle = isDark ? "rgba(6, 7, 9, 0.58)" : "rgba(14, 17, 22, 0.52)";
+  drawingContext.globalAlpha = progress;
+  drawingContext.fillRect(0, 0, DISPLAY_DIAMETER_PX, DISPLAY_DIAMETER_PX);
+
+  // Semi-circular crystal arc band
+  const innerRadius = 52 * ease;
+  const outerRadius = 98 * ease;
+  const arcStart = -Math.PI * 0.96;
+  const arcEnd = -Math.PI * 0.04;
+
+  drawingContext.globalAlpha = ease;
+  drawingContext.beginPath();
+  drawingContext.arc(anchorX, anchorY, outerRadius, arcStart, arcEnd, false);
+  drawingContext.arc(anchorX, anchorY, innerRadius, arcEnd, arcStart, true);
+  drawingContext.closePath();
+  drawingContext.fillStyle = isDark ? "rgba(18, 22, 30, 0.90)" : "rgba(246, 247, 249, 0.92)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = isDark ? "rgba(245, 250, 255, 0.24)" : "rgba(46, 50, 56, 0.22)";
+  drawingContext.lineWidth = 1.25;
+  drawingContext.stroke();
+
+  // Highlighted sector wedge & guide ray for currently hovered mode
+  const hoveredSlot = slots.find((slot) => slot.mode === hoveredMode) || null;
+  if (hoveredSlot) {
+    const sectorSpan = 0.25;
+    drawingContext.beginPath();
+    drawingContext.arc(
+      anchorX,
+      anchorY,
+      outerRadius,
+      hoveredSlot.angleRadians - sectorSpan,
+      hoveredSlot.angleRadians + sectorSpan,
+      false,
+    );
+    drawingContext.arc(
+      anchorX,
+      anchorY,
+      innerRadius,
+      hoveredSlot.angleRadians + sectorSpan,
+      hoveredSlot.angleRadians - sectorSpan,
+      true,
+    );
+    drawingContext.closePath();
+    drawingContext.fillStyle = palette.signalHighlightSoft;
+    drawingContext.fill();
+
+    const targetX = lerp(anchorX, hoveredSlot.centerX, ease);
+    const targetY = lerp(anchorY, hoveredSlot.centerY, ease);
+    drawingContext.strokeStyle = palette.signalHighlight;
+    drawingContext.lineWidth = 1.5;
+    drawingContext.beginPath();
+    drawingContext.moveTo(anchorX, anchorY);
+    drawingContext.lineTo(targetX, targetY);
+    drawingContext.stroke();
+  }
+
+  // 4 blooming sort-mode medallions
+  for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+    const slot = slots[slotIndex];
+    const drawX = lerp(anchorX, slot.centerX, ease);
+    const drawY = lerp(anchorY, slot.centerY, ease);
+    const isHovered = slot.mode === hoveredMode;
+    const isCurrent = slot.mode === activeSortMode;
+    const medallionScale = isHovered ? 1.16 : 1.0;
 
     drawingContext.save();
-    drawingContext.globalAlpha = waveOne;
+    drawingContext.translate(drawX, drawY);
+    drawingContext.scale(medallionScale, medallionScale);
 
     drawingContext.beginPath();
-    drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, spindleRadius, 0, FULL_CIRCLE_RADIANS);
-    drawingContext.fillStyle = "rgba(6, 7, 9, 0.88)";
+    drawingContext.arc(0, 0, slot.radius, 0, FULL_CIRCLE_RADIANS);
+    drawingContext.fillStyle = isHovered
+      ? palette.signalHighlight
+      : isCurrent
+        ? isDark
+          ? "rgba(192, 254, 5, 0.16)"
+          : "rgba(232, 90, 36, 0.16)"
+        : isDark
+          ? "rgba(18, 22, 30, 0.94)"
+          : "rgba(246, 247, 249, 0.94)";
     drawingContext.fill();
 
-    drawingContext.beginPath();
-    drawingContext.arc(
-      DISPLAY_CENTER_PX,
-      DISPLAY_CENTER_PX,
-      spindleRadius - 4,
-      0,
-      FULL_CIRCLE_RADIANS,
-    );
-    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.22)";
-    drawingContext.lineWidth = 3;
+    drawingContext.strokeStyle =
+      isHovered || isCurrent ? palette.signalHighlight : palette.hairlineStrong;
+    drawingContext.lineWidth = isHovered || isCurrent ? 1.6 : 1.2;
     drawingContext.stroke();
 
-    drawingContext.beginPath();
-    drawingContext.arc(
-      DISPLAY_CENTER_PX,
-      DISPLAY_CENTER_PX,
-      spindleRadius - 4,
-      TOP_ANGLE_RADIANS,
-      TOP_ANGLE_RADIANS + trackRatio * FULL_CIRCLE_RADIANS,
-    );
-    drawingContext.strokeStyle = palette.signalHighlight;
-    drawingContext.lineWidth = 3.2;
-    drawingContext.lineCap = "butt";
-    drawingContext.stroke();
-
-    drawingContext.beginPath();
-    drawingContext.arc(DISPLAY_CENTER_PX, DISPLAY_CENTER_PX, 5, 0, FULL_CIRCLE_RADIANS);
-    drawingContext.fillStyle = "#F5F6F8";
-    drawingContext.fill();
+    const iconInk = isHovered
+      ? palette.signalHighlightInk
+      : isCurrent
+        ? palette.signalHighlight
+        : palette.inkPrimary;
+    drawSortModeIconGlyph(drawingContext, slot.mode, 0, 0, iconInk);
     drawingContext.restore();
   }
 
-  const waveTwo = easeOutCubic(normalizeRange(launchProgress, 0.68, 1.0));
-  if (waveTwo > CONTENT_VISIBILITY_THRESHOLD) {
+  // Live mode readout pill above the wheel apex
+  const readoutLabel = hoveredMode
+    ? ALBUM_SORT_MODE_LABELS[hoveredMode]?.toastLabel || "SORT"
+    : "DRAG TO SORT";
+  const pillWidth = 136;
+  const pillHeight = 24;
+  const pillLeft = anchorX - pillWidth / 2;
+  const pillTop = 200;
+  traceChamferRect(drawingContext, pillLeft, pillTop, pillWidth, pillHeight, 5);
+  drawingContext.fillStyle = isDark ? "rgba(6, 7, 9, 0.92)" : "rgba(46, 50, 56, 0.92)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = hoveredMode ? palette.signalHighlight : palette.hairlineStrong;
+  drawingContext.lineWidth = 1.2;
+  drawingContext.stroke();
+
+  drawingContext.font = `800 9px ${FONT_MONO}`;
+  drawingContext.fillStyle = hoveredMode ? palette.signalHighlight : "rgba(245, 246, 248, 0.78)";
+  drawingContext.textAlign = "center";
+  drawingContext.textBaseline = "middle";
+  drawingContext.fillText(readoutLabel, anchorX, pillTop + pillHeight / 2 + 0.5);
+
+  // Anchored Sort hub at (152, 325) so the finger stays grounded
+  drawingContext.beginPath();
+  drawingContext.arc(anchorX, anchorY, CRATE_NOTE_BUTTON_RADIUS_PX, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = isDark ? "rgba(18, 22, 30, 0.96)" : "rgba(255, 255, 255, 0.96)";
+  drawingContext.fill();
+  drawingContext.strokeStyle = palette.signalHighlight;
+  drawingContext.lineWidth = 1.8;
+  drawingContext.stroke();
+  drawSortModeIconGlyph(drawingContext, activeSortMode, anchorX, anchorY, palette.signalHighlight);
+
+  drawingContext.restore();
+}
+
+function drawMiniatureAlbumsIconOverlay(
+  drawingContext,
+  centerX,
+  centerY,
+  sleeveSize,
+  alpha,
+  palette,
+  appearance,
+) {
+  if (alpha <= CONTENT_VISIBILITY_THRESHOLD || sleeveSize <= 2) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const accentColor = palette.signalHighlight;
+  const sleeveHalf = sleeveSize / 2;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+  drawingContext.translate(centerX, centerY);
+
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(-sleeveHalf, -sleeveHalf, sleeveSize, sleeveSize);
+  drawingContext.clip();
+
+  drawingContext.fillStyle = isDark ? "#141923" : "#272C35";
+  drawingContext.fillRect(-sleeveHalf, -sleeveHalf, sleeveSize, sleeveSize);
+
+  drawingContext.fillStyle = accentColor;
+  drawingContext.beginPath();
+  drawingContext.moveTo(-sleeveHalf * 0.14, -sleeveHalf);
+  drawingContext.lineTo(sleeveHalf * 0.56, -sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf * 0.24, sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf * 0.68, sleeveHalf);
+  drawingContext.closePath();
+  drawingContext.fill();
+
+  drawingContext.strokeStyle = "#F5F6F8";
+  drawingContext.lineWidth = Math.max(1.5, sleeveHalf * 0.18);
+  drawingContext.beginPath();
+  drawingContext.arc(0, 0, sleeveHalf * 0.54, -Math.PI * 0.22, Math.PI * 0.50);
+  drawingContext.stroke();
+
+  drawingContext.fillStyle = "rgba(255, 255, 255, 0.16)";
+  drawingContext.beginPath();
+  drawingContext.moveTo(-sleeveHalf, -sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf + sleeveSize * 0.45, -sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf + sleeveSize * 0.08, sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf - sleeveSize * 0.35, sleeveHalf);
+  drawingContext.closePath();
+  drawingContext.fill();
+  drawingContext.restore();
+
+  drawingContext.strokeStyle = palette.inkPrimary;
+  drawingContext.lineWidth = 1.25;
+  drawingContext.strokeRect(-sleeveHalf + 0.5, -sleeveHalf + 0.5, sleeveSize - 1, sleeveSize - 1);
+
+  const cornerArm = Math.max(4, sleeveHalf * 0.36);
+  drawingContext.strokeStyle = accentColor;
+  drawingContext.lineWidth = 1.7;
+  drawingContext.beginPath();
+  drawingContext.moveTo(-sleeveHalf, -sleeveHalf + cornerArm);
+  drawingContext.lineTo(-sleeveHalf, -sleeveHalf);
+  drawingContext.lineTo(-sleeveHalf + cornerArm, -sleeveHalf);
+  drawingContext.stroke();
+
+  drawingContext.restore();
+}
+
+function drawMiniaturePeekingVinylDisc(
+  drawingContext,
+  centerX,
+  centerY,
+  discRadius,
+  clockSeconds,
+  alpha,
+  palette,
+  appearance,
+) {
+  if (alpha <= CONTENT_VISIBILITY_THRESHOLD || discRadius <= 2) {
+    return;
+  }
+  const isDark = appearance === "dark";
+  const accentColor = palette.signalHighlight;
+  const spin = clockSeconds * 1.25;
+
+  drawingContext.save();
+  drawingContext.globalAlpha = alpha;
+  drawingContext.beginPath();
+  drawingContext.arc(centerX, centerY, discRadius, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = isDark ? "#13171F" : "#242830";
+  drawingContext.fill();
+  drawingContext.strokeStyle = isDark
+    ? "rgba(245, 246, 248, 0.34)"
+    : "rgba(46, 50, 56, 0.55)";
+  drawingContext.lineWidth = 1.1;
+  drawingContext.stroke();
+
+  drawingContext.beginPath();
+  drawingContext.arc(centerX, centerY, discRadius * 0.66, spin, spin + Math.PI * 0.75);
+  drawingContext.strokeStyle = isDark
+    ? "rgba(245, 246, 248, 0.36)"
+    : "rgba(245, 246, 248, 0.48)";
+  drawingContext.lineWidth = 1.1;
+  drawingContext.stroke();
+
+  drawingContext.beginPath();
+  drawingContext.arc(centerX, centerY, discRadius * 0.30, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = accentColor;
+  drawingContext.fill();
+
+  drawingContext.beginPath();
+  drawingContext.arc(centerX, centerY, discRadius * 0.11, 0, FULL_CIRCLE_RADIANS);
+  drawingContext.fillStyle = "#060709";
+  drawingContext.fill();
+
+  drawingContext.beginPath();
+  drawingContext.arc(centerX, centerY, discRadius + 0.8, -Math.PI * 0.42, Math.PI * 0.42);
+  drawingContext.strokeStyle = accentColor;
+  drawingContext.lineWidth = 1.4;
+  drawingContext.stroke();
+  drawingContext.restore();
+}
+
+function renderLibraryHubAlbumsTransition(
+  drawingContext,
+  libraryState,
+  {
+    crateFactor,
+    palette,
+    appearance,
+    coverCache,
+    animationTimeSeconds,
+    playbackIsPlaying,
+  },
+) {
+  const clampedFactor = clamp(crateFactor, 0, 1);
+  const clockSeconds = Number.isFinite(libraryState.idleClockSeconds)
+    ? libraryState.idleClockSeconds
+    : animationTimeSeconds;
+  const marqueeTimeSeconds = Number.isFinite(animationTimeSeconds)
+    ? animationTimeSeconds
+    : clockSeconds;
+  const hubScroll = Number.isFinite(libraryState.albumsTransitionHubScroll)
+    ? Math.max(0, libraryState.albumsTransitionHubScroll)
+    : 0;
+  const crateAlbums = Array.isArray(libraryState.catalog?.albums)
+    ? libraryState.catalog.albums
+    : [];
+  const crateScroll = Number.isFinite(libraryState.albumsTransitionCrateScroll)
+    ? clamp(libraryState.albumsTransitionCrateScroll, 0, Math.max(0, crateAlbums.length - 1))
+    : 0;
+  const matchedHeroIndex = libraryState.albumsTransitionAlbumId
+    ? crateAlbums.findIndex((albumEntry) => albumEntry.id === libraryState.albumsTransitionAlbumId)
+    : -1;
+  const heroAlbumIndex =
+    matchedHeroIndex >= 0
+      ? matchedHeroIndex
+      : clamp(Math.round(crateScroll), 0, Math.max(0, crateAlbums.length - 1));
+  const heroAlbum = crateAlbums[heroAlbumIndex] || null;
+
+  const hubRows = buildHubSectionRowsFromCounts(libraryState.counts || libraryState.catalog?.counts);
+  const totalTrackCount = Number(
+    libraryState.counts?.tracks ?? libraryState.catalog?.allTracks?.length ?? 0,
+  );
+  const hubSubtitle =
+    totalTrackCount === 0
+      ? "0 TRACKS \u00b7 EMPTY COLLECTION"
+      : `2-UP CRYSTAL HUB \u00b7 ${formatIntegerCount(totalTrackCount)} TRACKS`;
+  const albumsSubtitle =
+    crateAlbums.length === 0
+      ? "VINYL CRATE \u00b7 00 / 00"
+      : `VINYL CRATE \u00b7 ${String(heroAlbumIndex + 1).padStart(2, "0")} / ${String(crateAlbums.length).padStart(2, "0")}`;
+
+  /* 1. Anchored spatial perspective floor */
+  drawLibraryPerspectiveFloor(
+    drawingContext,
+    lerp(hubScroll, crateScroll, easeInOutCubic(clampedFactor)),
+    1,
+    palette,
+    appearance,
+  );
+
+  /* 2. Clean non-colliding header crossfade (Library <-> Albums) */
+  const hubHeaderExit = normalizeRange(clampedFactor, 0.0, ALBUMS_BLOOM_HUB_HEADER_END);
+  const hubHeaderAlpha = 1 - easeOutCubic(hubHeaderExit);
+  if (hubHeaderAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+    drawLibraryPeripheralChrome(
+      drawingContext,
+      "Library",
+      hubSubtitle,
+      lerp(0, -ALBUMS_BLOOM_HEADER_DRIFT_Y_PX, hubHeaderExit),
+      hubHeaderAlpha,
+      palette,
+      appearance,
+      marqueeTimeSeconds,
+    );
+  }
+
+  const crateHeaderEnter = normalizeRange(
+    clampedFactor,
+    ALBUMS_BLOOM_CRATE_HEADER_START,
+    ALBUMS_BLOOM_CRATE_HEADER_END,
+  );
+  const crateHeaderAlpha = easeOutCubic(crateHeaderEnter);
+  if (crateHeaderAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+    drawLibraryPeripheralChrome(
+      drawingContext,
+      "Albums",
+      albumsSubtitle,
+      lerp(ALBUMS_BLOOM_HEADER_DRIFT_Y_PX, 0, easeOutExpo(crateHeaderEnter)),
+      crateHeaderAlpha,
+      palette,
+      appearance,
+      marqueeTimeSeconds,
+    );
+  }
+
+  /* 3. Surrounding Hub tiles parting outward & Albums tile shell dissolving in place */
+  const albumsTileRect = computeLibraryHubTileRect(HUB_ALBUMS_TILE_INDEX, hubScroll);
+  const hubPartFactor = easeInOutCubic(
+    normalizeRange(clampedFactor, 0.0, ALBUMS_BLOOM_HUB_PART_END),
+  );
+  const albumsShellAlpha =
+    1 - easeOutCubic(normalizeRange(clampedFactor, 0.0, ALBUMS_BLOOM_TILE_SHELL_END));
+
+  if (1 - hubPartFactor > CONTENT_VISIBILITY_THRESHOLD || albumsShellAlpha > CONTENT_VISIBILITY_THRESHOLD) {
     drawingContext.save();
-    drawingContext.globalAlpha = waveTwo;
-
-    const clampedVolume = clamp(volumeLevel, 0, 1);
     drawingContext.beginPath();
-    drawingContext.arc(
-      DISPLAY_CENTER_PX,
-      DISPLAY_CENTER_PX,
-      SCROLL_ARC_RADIUS_PX,
-      VOLUME_ARC_START_RADIANS,
-      VOLUME_ARC_END_RADIANS,
+    drawingContext.rect(
+      0,
+      HEADER_CLIP_TOP_Y,
+      DISPLAY_DIAMETER_PX,
+      DISPLAY_DIAMETER_PX - HEADER_CLIP_TOP_Y,
     );
-    drawingContext.strokeStyle = "rgba(245, 246, 248, 0.26)";
-    drawingContext.lineWidth = 4;
-    drawingContext.lineCap = "butt";
-    drawingContext.stroke();
+    drawingContext.clip();
 
-    drawingContext.beginPath();
-    drawingContext.arc(
-      DISPLAY_CENTER_PX,
-      DISPLAY_CENTER_PX,
-      SCROLL_ARC_RADIUS_PX,
-      lerp(VOLUME_ARC_END_RADIANS, VOLUME_ARC_START_RADIANS, clampedVolume),
-      VOLUME_ARC_END_RADIANS,
-    );
-    drawingContext.strokeStyle = palette.signalHighlight;
-    drawingContext.lineWidth = 4.2;
-    drawingContext.stroke();
+    for (let tileIndex = 0; tileIndex < hubRows.length; tileIndex += 1) {
+      const tileRect = computeLibraryHubTileRect(tileIndex, hubScroll);
+      if (tileRect.alpha <= CONTENT_VISIBILITY_THRESHOLD) {
+        continue;
+      }
+
+      if (tileIndex === HUB_ALBUMS_TILE_INDEX) {
+        if (albumsShellAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+          drawSingleHubCrystalTile(drawingContext, hubRows[tileIndex], {
+            centerX: tileRect.centerX,
+            centerY: tileRect.centerY,
+            width: tileRect.width,
+            height: tileRect.height,
+            isPeeking: tileRect.isPeeking,
+            tileAlpha: tileRect.alpha * albumsShellAlpha,
+            pressIntensity: 0,
+            clockSeconds,
+            showIcon: false,
+            palette,
+            appearance,
+          });
+        }
+        continue;
+      }
+
+      const neighborTileAlpha = tileRect.alpha * (1 - hubPartFactor);
+      if (neighborTileAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+        continue;
+      }
+      const horizontalSign = tileIndex % 2 === 0 ? -1 : 1;
+      const verticalSign = tileRect.centerY < albumsTileRect.centerY ? -1 : 1;
+      drawSingleHubCrystalTile(drawingContext, hubRows[tileIndex], {
+        centerX: tileRect.centerX + horizontalSign * ALBUMS_BLOOM_HUB_PART_X_PX * hubPartFactor,
+        centerY: tileRect.centerY + verticalSign * ALBUMS_BLOOM_HUB_PART_Y_PX * hubPartFactor,
+        width: tileRect.width,
+        height: tileRect.height,
+        isPeeking: tileRect.isPeeking,
+        tileAlpha: neighborTileAlpha,
+        pressIntensity: 0,
+        clockSeconds,
+        showIcon: true,
+        palette,
+        appearance,
+      });
+    }
 
     drawingContext.restore();
+  }
+
+  const hubArcAlpha = 1 - easeOutCubic(normalizeRange(clampedFactor, 0.0, ALBUMS_BLOOM_ARC_EXIT_END));
+  if (hubArcAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+    const hubScrollRowSpan = Math.ceil(hubRows.length / 2) + 1;
+    drawLibraryScrollArc(drawingContext, hubScroll, hubScrollRowSpan, hubArcAlpha * 0.85, palette);
+  }
+
+  /* 4. Albums Roulette shelf line, opacity-tiered neighbor covers & bottom metadata deal-in */
+  const shelfEase = easeOutCubic(
+    normalizeRange(clampedFactor, ALBUMS_BLOOM_SHELF_START, ALBUMS_BLOOM_SHELF_END),
+  );
+  if (shelfEase > CONTENT_VISIBILITY_THRESHOLD) {
+    const shelfHalfSpan = lerp(24, 118, shelfEase);
+    drawingContext.save();
+    drawingContext.globalAlpha = shelfEase * 0.45;
+    drawingContext.strokeStyle = palette.hairlineStrong;
+    drawingContext.lineWidth = 1;
+    drawingContext.beginPath();
+    drawingContext.moveTo(DISPLAY_CENTER_PX - shelfHalfSpan, 224);
+    drawingContext.lineTo(DISPLAY_CENTER_PX + shelfHalfSpan, 224);
+    drawingContext.stroke();
+    drawingContext.restore();
+  }
+
+  const neighborDealEase = easeOutExpo(
+    normalizeRange(clampedFactor, ALBUMS_BLOOM_NEIGHBOR_DEAL_START, ALBUMS_BLOOM_NEIGHBOR_DEAL_END),
+  );
+  const neighborAlphaEase = easeOutCubic(
+    normalizeRange(clampedFactor, ALBUMS_BLOOM_NEIGHBOR_ALPHA_START, ALBUMS_BLOOM_NEIGHBOR_ALPHA_END),
+  );
+  if (neighborAlphaEase > CONTENT_VISIBILITY_THRESHOLD && crateAlbums.length > 1) {
+    const neighborEntries = [];
+    const crateStartIndex = Math.max(0, Math.floor(crateScroll) - 3);
+    const crateEndIndex = Math.min(crateAlbums.length - 1, Math.ceil(crateScroll) + 3);
+    for (let albumIndex = crateStartIndex; albumIndex <= crateEndIndex; albumIndex += 1) {
+      if (albumIndex === heroAlbumIndex) {
+        continue;
+      }
+      neighborEntries.push({ albumIndex, absDelta: Math.abs(albumIndex - crateScroll) });
+    }
+    neighborEntries.sort((firstEntry, secondEntry) => secondEntry.absDelta - firstEntry.absDelta);
+
+    for (let entryIndex = 0; entryIndex < neighborEntries.length; entryIndex += 1) {
+      const albumIndex = neighborEntries[entryIndex].albumIndex;
+      const album = crateAlbums[albumIndex];
+      const delta = albumIndex - crateScroll;
+      const absDelta = Math.abs(delta);
+      if (absDelta > 1.85) {
+        continue;
+      }
+      const focusWeight = clamp(1 - absDelta, 0, 1);
+      const focusOpacity = lerp(CRATE_MIN_OPACITY, 1.0, easeInOutCubic(focusWeight));
+      const outerEdgeFade = 1 - normalizeRange(absDelta, 1.15, 1.85);
+      const neighborAlpha = outerEdgeFade * focusOpacity * neighborAlphaEase;
+      if (neighborAlpha <= CONTENT_VISIBILITY_THRESHOLD) {
+        continue;
+      }
+      const neighborScale = lerp(0.86, 1.0, neighborDealEase);
+      const sleeveSize =
+        lerp(CRATE_MIN_SLEEVE_PX, CRATE_MAX_SLEEVE_PX, easeInOutCubic(focusWeight)) * neighborScale;
+      const focusShiftLeft = focusWeight * 8;
+      const dealSpreadX =
+        Math.sign(delta || 1) * ALBUMS_BLOOM_NEIGHBOR_SPREAD_PX * (1 - neighborDealEase);
+      const centerX =
+        DISPLAY_CENTER_PX -
+        focusShiftLeft +
+        delta * LIBRARY_CONSTANTS.CRATE_SPACING_PX +
+        dealSpreadX;
+      const centerY = LIBRARY_CONSTANTS.CRATE_CENTER_Y + Math.min(absDelta, 1.5) * 6;
+
+      drawCrateAlbumSleeveBox(drawingContext, album, {
+        centerX,
+        centerY,
+        sleeveSize,
+        focusWeight,
+        delta,
+        baseAlpha: neighborAlpha,
+        palette,
+        appearance,
+        coverCache,
+      });
+    }
+  }
+
+  const bottomReveal = easeOutCubic(
+    normalizeRange(clampedFactor, ALBUMS_BLOOM_BOTTOM_START, ALBUMS_BLOOM_BOTTOM_END),
+  );
+  if (bottomReveal > CONTENT_VISIBILITY_THRESHOLD && heroAlbum) {
+    const bottomRiseY = lerp(
+      ALBUMS_BLOOM_BOTTOM_RISE_Y_PX,
+      0,
+      easeOutExpo(normalizeRange(clampedFactor, ALBUMS_BLOOM_BOTTOM_START, 1.0)),
+    );
+    const trackCount = Array.isArray(heroAlbum.tracks) ? heroAlbum.tracks.length : 0;
+
+    drawingContext.save();
+    drawingContext.translate(0, bottomRiseY);
+
+    drawingContext.save();
+    drawingContext.globalAlpha = bottomReveal;
+    drawingContext.font = `700 19px ${FONT_DISPLAY}`;
+    drawingContext.fillStyle = palette.inkPrimary;
+    drawingContext.textAlign = "center";
+    drawingContext.textBaseline = "middle";
+    drawMarqueeCanvasText(
+      drawingContext,
+      heroAlbum.title,
+      DISPLAY_CENTER_PX,
+      246,
+      224,
+      marqueeTimeSeconds,
+    );
+
+    drawingContext.font = `600 9.5px ${FONT_MONO}`;
+    drawingContext.fillStyle = palette.inkSecondary;
+    const metaLine = `${String(heroAlbum.artist || "").toUpperCase()} \u00b7 ${formatIntegerCount(trackCount)} TRACKS`;
+    drawMarqueeCanvasText(
+      drawingContext,
+      metaLine,
+      DISPLAY_CENTER_PX,
+      268,
+      214,
+      marqueeTimeSeconds,
+    );
+    drawingContext.restore();
+
+    const crateBars = computeWindowedCrateBars(crateScroll, crateAlbums.length, CRATE_BAR_LIMIT);
+    let totalStripWidth = 0;
+    for (let barIndex = 0; barIndex < crateBars.length; barIndex += 1) {
+      totalStripWidth += crateBars[barIndex].width;
+      if (barIndex < crateBars.length - 1) {
+        totalStripWidth += CRATE_BAR_GAP_PX;
+      }
+    }
+    let cursorX = DISPLAY_CENTER_PX - totalStripWidth / 2;
+    for (let barIndex = 0; barIndex < crateBars.length; barIndex += 1) {
+      const bar = crateBars[barIndex];
+      drawingContext.fillStyle =
+        bar.focus > 0.5 ? palette.signalHighlight : palette.hairlineStrong;
+      drawingContext.globalAlpha = bottomReveal * lerp(0.55, 1.0, bar.focus);
+      drawingContext.fillRect(cursorX, CRATE_BAR_Y, bar.width, CRATE_BAR_HEIGHT_PX);
+      cursorX += bar.width + CRATE_BAR_GAP_PX;
+    }
+
+    drawCrateFloatingNoteButton(drawingContext, clockSeconds, bottomReveal, palette, appearance);
+    drawingContext.restore();
+  }
+
+  /* 5. Shared-element 1:1 Hero Sleeve Bloom (Albums tile icon <-> centered crate sleeve) */
+  const iconRadius = albumsTileRect.isPeeking
+    ? HUB_TILE_PEEK_ICON_RADIUS_PX
+    : HUB_TILE_FULL_ICON_RADIUS_PX;
+  const startSleeveHalf = iconRadius * HUB_ALBUMS_ICON_SLEEVE_RATIO;
+  const startSleeveSize = startSleeveHalf * 2;
+  const startCenterX = albumsTileRect.centerX - iconRadius * HUB_ALBUMS_ICON_SHIFT_X_RATIO;
+  const startCenterY = albumsTileRect.centerY - HUB_TILE_ICON_OFFSET_Y_PX;
+
+  const endCenterX = CRATE_SLEEVE_START_X_PX;
+  const endCenterY = LIBRARY_CONSTANTS.CRATE_CENTER_Y;
+  const endSleeveSize = CRATE_MAX_SLEEVE_PX;
+
+  const glideEase = easeInOutCubic(clampedFactor);
+  const sizeEase = easeOutCubic(clampedFactor);
+  const heroCenterX = lerp(startCenterX, endCenterX, glideEase);
+  const heroCenterY = lerp(startCenterY, endCenterY, glideEase);
+  const heroSleeveSize = lerp(startSleeveSize, endSleeveSize, sizeEase);
+  const heroAlpha = lerp(
+    albumsTileRect.alpha,
+    1.0,
+    easeOutCubic(normalizeRange(clampedFactor, 0.0, ALBUMS_BLOOM_HERO_ALPHA_END)),
+  );
+
+  const activeTrackId = libraryState.activeTrackId || null;
+  const isHeroAlbumPlaying = Boolean(
+    heroAlbum &&
+      activeTrackId &&
+      Array.isArray(heroAlbum.tracks) &&
+      heroAlbum.tracks.some((trackEntry) => trackEntry.id === activeTrackId),
+  );
+  const startDiscOffsetX = startSleeveHalf * HUB_ALBUMS_ICON_DISC_OFFSET_RATIO;
+  const startDiscRadius = startSleeveHalf * HUB_ALBUMS_ICON_DISC_OFFSET_RATIO;
+
+  if (isHeroAlbumPlaying) {
+    const endDiscOffsetX = (endSleeveSize / 2) * 0.42 + 22;
+    const endDiscRadius = (endSleeveSize / 2) * 0.88;
+    const discCenterX = heroCenterX + lerp(startDiscOffsetX, endDiscOffsetX, glideEase);
+    const discRadius = lerp(startDiscRadius, endDiscRadius, glideEase);
+    const discRotation = playbackIsPlaying ? libraryState.vinylRotationRadians : 0;
+    drawLibraryVinylDisc(
+      drawingContext,
+      heroAlbum,
+      discCenterX,
+      heroCenterY,
+      discRadius,
+      discRotation,
+      palette,
+      appearance,
+      heroAlpha * 0.96,
+      coverCache,
+      { showCenterLabel: false },
+    );
+  } else {
+    const tuckProgress = easeInOutCubic(
+      normalizeRange(clampedFactor, 0.0, ALBUMS_BLOOM_DISC_TUCK_END),
+    );
+    const miniDiscAlpha = heroAlpha * (1 - tuckProgress);
+    if (miniDiscAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+      const discCenterX = heroCenterX + lerp(startDiscOffsetX, 0, tuckProgress);
+      drawMiniaturePeekingVinylDisc(
+        drawingContext,
+        discCenterX,
+        heroCenterY,
+        startDiscRadius,
+        clockSeconds,
+        miniDiscAlpha,
+        palette,
+        appearance,
+      );
+    }
+  }
+
+  const realSleeveAlpha =
+    heroAlpha *
+    easeOutCubic(
+      normalizeRange(clampedFactor, ALBUMS_BLOOM_ARTWORK_FADE_START, ALBUMS_BLOOM_ARTWORK_FADE_END),
+    );
+  const bracketFocusWeight = lerp(
+    0,
+    1,
+    easeOutCubic(normalizeRange(clampedFactor, ALBUMS_BLOOM_BRACKET_START, 1.0)),
+  );
+  if (heroAlbum && realSleeveAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+    drawCrateAlbumSleeveBox(drawingContext, heroAlbum, {
+      centerX: heroCenterX,
+      centerY: heroCenterY,
+      sleeveSize: heroSleeveSize,
+      focusWeight: bracketFocusWeight,
+      delta: 0,
+      baseAlpha: realSleeveAlpha,
+      palette,
+      appearance,
+      coverCache,
+    });
+  }
+
+  const miniOverlayAlpha =
+    heroAlpha *
+    (1 -
+      easeOutCubic(
+        normalizeRange(
+          clampedFactor,
+          ALBUMS_BLOOM_MINI_ICON_FADE_START,
+          ALBUMS_BLOOM_MINI_ICON_FADE_END,
+        ),
+      ));
+  if (miniOverlayAlpha > CONTENT_VISIBILITY_THRESHOLD) {
+    drawMiniatureAlbumsIconOverlay(
+      drawingContext,
+      heroCenterX,
+      heroCenterY,
+      heroSleeveSize,
+      miniOverlayAlpha,
+      palette,
+      appearance,
+    );
   }
 }
 
@@ -2710,17 +4313,6 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
     typeof libraryState.isPlaying === "boolean"
       ? libraryState.isPlaying
       : Boolean(playback.isPlaying);
-  const elapsedSeconds =
-    Number.isFinite(playback.elapsedSeconds) && playback.elapsedSeconds >= 0
-      ? playback.elapsedSeconds
-      : 0;
-  const durationSeconds =
-    Number.isFinite(playback.durationSeconds) && playback.durationSeconds > 0
-      ? playback.durationSeconds
-      : DEFAULT_TRACK_DURATION_SECONDS;
-  const volumeLevel = Number.isFinite(playback.volumeLevel)
-    ? clamp(playback.volumeLevel, 0, 1)
-    : DEFAULT_VOLUME_LEVEL;
 
   const viewStack = Array.isArray(libraryState.viewStack) ? libraryState.viewStack : [];
   const currentView = libraryState.currentView || viewStack[viewStack.length - 1];
@@ -2741,6 +4333,33 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
     : (1 - transitionEase) * 28 * transitionDirection;
   const verticalSheetSlideY = isAlbumTracklistOverlay ? (1 - transitionEase) * 42 : 0;
   const launchProgress = clamp(Number(libraryState.vinylLaunchProgress ?? 0), 0, 1);
+
+  const albumsTransitionMode = libraryState.albumsTransitionMode || "none";
+  const albumsTransitionProgress = clamp(
+    Number(libraryState.albumsTransitionProgress ?? 1),
+    0,
+    1,
+  );
+  const isAlbumsHeroTransitionActive =
+    launchProgress <= CONTENT_VISIBILITY_THRESHOLD &&
+    (albumsTransitionMode === "hub-to-albums" || albumsTransitionMode === "albums-to-hub") &&
+    albumsTransitionProgress < 1;
+
+  if (isAlbumsHeroTransitionActive) {
+    const crateFactor =
+      albumsTransitionMode === "hub-to-albums"
+        ? albumsTransitionProgress
+        : 1 - albumsTransitionProgress;
+    renderLibraryHubAlbumsTransition(drawingContext, libraryState, {
+      crateFactor,
+      palette,
+      appearance,
+      coverCache,
+      animationTimeSeconds,
+      playbackIsPlaying,
+    });
+    return;
+  }
 
   const headerLaunchExit = easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.44));
   const headerOffsetY = lerp(0, -34, headerLaunchExit);
@@ -2776,16 +4395,38 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
   }
 
   drawLibraryPerspectiveFloor(drawingContext, scrollPosition, chromeAlpha, palette, appearance);
-  drawLibraryPeripheralChrome(
-    drawingContext,
-    currentView.title || "Library",
-    dynamicSubtitle,
-    headerOffsetY,
-    chromeAlpha,
-    palette,
-    appearance,
-    animationTimeSeconds,
-  );
+  if (currentView.isArtistView || currentView.isFavoritesView) {
+    const activeBlend = currentView.isFavoritesView
+      ? (libraryState.favoritesModeBlend ?? (currentView.favoritesViewMode === "songs" ? 1 : 0))
+      : (libraryState.artistModeBlend ?? (currentView.artistViewMode === "songs" ? 1 : 0));
+    drawArtistHeaderChrome(
+      drawingContext,
+      currentView.title || (currentView.isFavoritesView ? "Favorites" : "Artist"),
+      activeBlend,
+      headerOffsetY,
+      chromeAlpha,
+      palette,
+      appearance,
+      animationTimeSeconds,
+    );
+  } else {
+    drawLibraryPeripheralChrome(
+      drawingContext,
+      currentView.title || "Library",
+      dynamicSubtitle,
+      headerOffsetY,
+      chromeAlpha,
+      palette,
+      appearance,
+      animationTimeSeconds,
+    );
+  }
+
+  const artistTabFade = currentView.isArtistView
+    ? easeOutCubic(clamp(Number(libraryState.artistTabFadeProgress ?? 1), 0, 1))
+    : currentView.isFavoritesView
+      ? easeOutCubic(clamp(Number(libraryState.favoritesTabFadeProgress ?? 1), 0, 1))
+      : 1;
 
   drawingContext.save();
   drawingContext.translate(slideOffsetX, 0);
@@ -2807,19 +4448,30 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
       );
     }
   } else if (currentView.kind === "albums") {
-    renderLibraryAlbumCrate(
-      drawingContext,
-      currentView,
-      crateAlbums,
-      libraryState,
-      easeOutCubic(transitionProgress),
-      launchProgress,
-      palette,
-      appearance,
-      coverCache,
-      animationTimeSeconds,
-      playbackIsPlaying,
-    );
+    if (currentView.isFavoritesView && crateAlbums.length === 0) {
+      renderFavoritesInlineEmptyState(
+        drawingContext,
+        "albums",
+        libraryState.idleClockSeconds,
+        easeOutCubic(transitionProgress) * artistTabFade * (1 - headerLaunchExit),
+        palette,
+        appearance,
+      );
+    } else {
+      renderLibraryAlbumCrate(
+        drawingContext,
+        currentView,
+        crateAlbums,
+        libraryState,
+        easeOutCubic(transitionProgress) * artistTabFade,
+        launchProgress,
+        palette,
+        appearance,
+        coverCache,
+        animationTimeSeconds,
+        playbackIsPlaying,
+      );
+    }
   } else if (currentView.kind === "empty") {
     renderLibraryEmptyState(
       drawingContext,
@@ -2833,8 +4485,19 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
     const rows = resolveRowsFromState(libraryState, currentView);
     const listFade =
       easeOutCubic(transitionProgress) *
+      artistTabFade *
       (1 - easeInOutCubic(normalizeRange(launchProgress, 0.0, 0.40)));
-    if (isAlbumTracklistOverlay) {
+    if (currentView.isFavoritesView && rows.length === 0) {
+      renderFavoritesInlineEmptyState(
+        drawingContext,
+        "songs",
+        libraryState.idleClockSeconds,
+        listFade,
+        palette,
+        appearance,
+      );
+    } else {
+      if (isAlbumTracklistOverlay) {
       const catalogAlbums = Array.isArray(libraryState.catalog?.albums)
         ? libraryState.catalog.albums
         : [];
@@ -2887,6 +4550,7 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
         animationTimeSeconds,
       );
       drawingContext.restore();
+    }
     }
   }
   drawingContext.restore();
@@ -2976,17 +4640,6 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
         });
       }
     }
-
-    if (launchProgress > EXPANDED_CHROME_MIN_PROGRESS) {
-      drawNowPlayingExpandedChrome(
-        drawingContext,
-        launchProgress,
-        elapsedSeconds,
-        durationSeconds,
-        volumeLevel,
-        palette,
-      );
-    }
   }
 
   if (Number(libraryState.playlistSheetProgress ?? 0) > CONTENT_VISIBILITY_THRESHOLD) {
@@ -2999,10 +4652,32 @@ export function renderLibraryScreen(drawingContext, libraryState, renderContext 
     );
   }
 
+  const quickActionsActiveProgress = Math.max(
+    Number(libraryState.quickActionsProgress ?? 0),
+    Number(libraryState.albumQuickActionsProgress ?? 0),
+    Number(libraryState.artistQuickActionsProgress ?? 0),
+  );
+  if (quickActionsActiveProgress > CONTENT_VISIBILITY_THRESHOLD) {
+    renderLibraryQuickActions(
+      drawingContext,
+      libraryState,
+      palette,
+      appearance,
+      animationTimeSeconds,
+    );
+  }
+
+  if (Number(libraryState.sortWheelProgress ?? 0) > CONTENT_VISIBILITY_THRESHOLD) {
+    renderLibrarySortWheel(drawingContext, libraryState, palette, appearance);
+  }
+
   if (
     launchProgress < 0.05 &&
-    Number(libraryState.playlistSheetProgress ?? 0) < 0.05
+    Number(libraryState.playlistSheetProgress ?? 0) < 0.05 &&
+    quickActionsActiveProgress < 0.05 &&
+    Number(libraryState.sortWheelProgress ?? 0) < 0.05
   ) {
+    renderLibrarySortToast(drawingContext, libraryState, palette, appearance);
     renderLibraryLetterSearchHud(drawingContext, libraryState, currentView, palette, appearance);
     drawLibraryRimArcFeedback(drawingContext, libraryState, currentView, palette, appearance);
   }
@@ -3066,6 +4741,37 @@ export function hitTestLibraryInteractive(pointX, pointY, libraryState) {
     return hitPlayButton || hitShuffleButton || hitDeleteButton;
   }
 
+  if (
+    libraryState.quickActionsOpen ||
+    libraryState.albumQuickActionsOpen ||
+    libraryState.artistQuickActionsOpen ||
+    Math.max(
+      Number(libraryState.quickActionsProgress ?? 0),
+      Number(libraryState.albumQuickActionsProgress ?? 0),
+      Number(libraryState.artistQuickActionsProgress ?? 0),
+    ) > 0.5
+  ) {
+    return (
+      Math.hypot(pointX - DISPLAY_CENTER_PX, pointY - ALBUM_QUICK_ACTION_BUTTON_CENTER_Y) <=
+      ALBUM_QUICK_ACTION_BUTTON_HIT_RADIUS_PX
+    );
+  }
+
+  if (libraryState.sortWheelOpen || Number(libraryState.sortWheelProgress ?? 0) > 0.5) {
+    const isArtistsWheel =
+      libraryState?.sortWheelScope === "artists" ||
+      (!libraryState?.sortWheelScope && libraryState?.currentView?.kind === "artists");
+    const slots = isArtistsWheel
+      ? computeSortWheelSlots(
+          LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_X,
+          LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_Y,
+        )
+      : computeSortWheelSlots();
+    return slots.some(
+      (slot) => Math.hypot(pointX - slot.centerX, pointY - slot.centerY) <= slot.radius + 6,
+    );
+  }
+
   const viewStack = Array.isArray(libraryState.viewStack) ? libraryState.viewStack : [];
   const currentView = libraryState.currentView || viewStack[viewStack.length - 1];
   if (!currentView) {
@@ -3078,6 +4784,15 @@ export function hitTestLibraryInteractive(pointX, pointY, libraryState) {
       pointY >= EMPTY_BACK_CTA_TOP_Y &&
       pointY <= EMPTY_BACK_CTA_BOTTOM_Y
     );
+  }
+
+  if (
+    (currentView.isArtistView || currentView.isFavoritesView) &&
+    pointY >= LIBRARY_CONSTANTS.ARTIST_TOGGLE_HIT_TOP_Y &&
+    pointY <= LIBRARY_CONSTANTS.ARTIST_TOGGLE_HIT_BOTTOM_Y &&
+    Math.abs(pointX - DISPLAY_CENTER_PX) <= LIBRARY_CONSTANTS.ARTIST_TOGGLE_HIT_HALF_WIDTH_PX
+  ) {
+    return true;
   }
 
   const scrollPosition = Number.isFinite(currentView.scrollPosition) ? currentView.scrollPosition : 0;
@@ -3097,10 +4812,13 @@ export function hitTestLibraryInteractive(pointX, pointY, libraryState) {
       pointX <= CRATE_PEEK_RIGHT_X &&
       pointY >= CRATE_PEEK_TOP_Y &&
       pointY <= CRATE_PEEK_BOTTOM_Y;
-    const hitFloatingNoteButton =
-      Math.hypot(pointX - DISPLAY_CENTER_PX, pointY - CRATE_NOTE_BUTTON_CENTER_Y) <=
+    const hitFloatingSortButton =
+      Math.hypot(pointX - CRATE_SORT_BUTTON_CENTER_X, pointY - CRATE_NOTE_BUTTON_CENTER_Y) <=
       CRATE_NOTE_BUTTON_HIT_RADIUS_PX;
-    if (hitCenterSleeve || hitPeekingDisc || hitFloatingNoteButton) {
+    const hitFloatingNoteButton =
+      Math.hypot(pointX - CRATE_NOTE_BUTTON_CENTER_X, pointY - CRATE_NOTE_BUTTON_CENTER_Y) <=
+      CRATE_NOTE_BUTTON_HIT_RADIUS_PX;
+    if (hitCenterSleeve || hitPeekingDisc || hitFloatingSortButton || hitFloatingNoteButton) {
       return true;
     }
 
@@ -3137,6 +4855,16 @@ export function hitTestLibraryInteractive(pointX, pointY, libraryState) {
   }
 
   const rows = resolveRowsFromState(libraryState, currentView);
+  if (
+    currentView.kind === "artists" &&
+    rows.length > 0 &&
+    Math.hypot(
+      pointX - LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_X,
+      pointY - LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_Y,
+    ) <= CRATE_NOTE_BUTTON_HIT_RADIUS_PX
+  ) {
+    return true;
+  }
   if (currentView.kind === "hub") {
     for (let tileIndex = 0; tileIndex < rows.length; tileIndex += 1) {
       const tileRect = computeLibraryHubTileRect(tileIndex, scrollPosition);

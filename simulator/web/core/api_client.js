@@ -133,3 +133,45 @@ export function setTrackFavorite(trackId, isFavorite) {
     cache: "no-store",
   });
 }
+
+/**
+ * Update or toggle the favorite flag for an album in the simulator backend.
+ *
+ * @param {string} albumId Canonical album identifier.
+ * @param {boolean} [isFavorite] Explicit favorite state, or omit to toggle on server.
+ * @returns {Promise<{ ok: true, payload: object } | { ok: false, error: string }>} Updated album favorite state response.
+ */
+export function setAlbumFavorite(albumId, isFavorite) {
+  if (typeof albumId !== "string" || albumId.trim().length === 0) {
+    return Promise.resolve({ ok: false, error: "invalid_album_id" });
+  }
+  const requestBody =
+    isFavorite === undefined ? {} : { isFavorite: Boolean(isFavorite) };
+  return requestJson(`/api/favorite-albums/${encodeURIComponent(albumId.trim())}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
+    cache: "no-store",
+  });
+}
+
+/**
+ * Update or toggle the favorite flag for an artist in the simulator backend.
+ *
+ * @param {string} artistId Canonical artist identifier.
+ * @param {boolean} [isFavorite] Explicit favorite state, or omit to toggle on server.
+ * @returns {Promise<{ ok: true, payload: object } | { ok: false, error: string }>} Updated artist favorite state response.
+ */
+export function setArtistFavorite(artistId, isFavorite) {
+  if (typeof artistId !== "string" || artistId.trim().length === 0) {
+    return Promise.resolve({ ok: false, error: "invalid_artist_id" });
+  }
+  const requestBody =
+    isFavorite === undefined ? {} : { isFavorite: Boolean(isFavorite) };
+  return requestJson(`/api/favorite-artists/${encodeURIComponent(artistId.trim())}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
+    cache: "no-store",
+  });
+}

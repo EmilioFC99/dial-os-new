@@ -1264,3 +1264,635 @@ describe("now_playing_screen.js marquee scrolling and entrance transitions", () 
     assert.equal(innerLabelRings.length, 0, "entrance vinyl must keep { showCenterLabel: false }");
   });
 });
+
+describe("now_playing_screen.js 3+3 Quick Actions, Queue telemetry, and honest drag-peek", () => {
+  test("renders 3+3 Quick Actions with SHUFFLE and REPEAT states and reflects active modes in Queue subtitle", () => {
+    const { nowPlayingController, catalog } = createNowPlayingScreenHarness();
+    const quickSnapshot = {
+      ...nowPlayingController.getRenderSnapshot(),
+      quickActionsOpen: true,
+      quickActionsProgress: 1,
+      shuffleEnabled: true,
+      repeatMode: "one",
+    };
+    const quickContext = createRecordingCanvasContext();
+    nowPlayingScreen.renderNowPlayingScreen(quickContext, quickSnapshot, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+      catalogAlbums: catalog.albums,
+    });
+
+    const renderedQuickLabels = quickContext.recordedTextCalls.map((call) => call.text.toUpperCase());
+    assert.ok(renderedQuickLabels.includes("SHUFFLE"));
+    const shuffleLabelCall = quickContext.recordedTextCalls.find(
+      (call) => call.text.toUpperCase() === "SHUFFLE",
+    );
+    assert.equal(shuffleLabelCall.fillStyle, APPEARANCE_PALETTES.dark.signalHighlight);
+    assert.ok(renderedQuickLabels.includes("REP 1"));
+    assert.ok(renderedQuickLabels.includes("1"), "Repeat One button should draw the '1' badge");
+    assert.ok(renderedQuickLabels.includes("MIX+"));
+    assert.ok(renderedQuickLabels.includes("LYRICS"));
+    assert.ok(renderedQuickLabels.includes("INFO"));
+
+    const queueSnapshot = {
+      ...nowPlayingController.getRenderSnapshot(),
+      queueSheetOpen: true,
+      queueSheetProgress: 1,
+      shuffleEnabled: true,
+      repeatMode: "all",
+    };
+    const queueContext = createRecordingCanvasContext();
+    nowPlayingScreen.renderNowPlayingScreen(queueContext, queueSnapshot, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+      catalogAlbums: catalog.albums,
+    });
+
+    const subtitleHasModes = queueContext.recordedTextCalls.some(
+      (call) => /SHUFFLE/i.test(call.text) && /REP ALL/i.test(call.text),
+    );
+    assert.equal(subtitleHasModes, true);
+  });
+
+  test("only peeks cross-album neighbor cover when manual skip actually changes track", () => {
+    const trackOne = {
+      id: "t1",
+      title: "01 Dawn",
+      artist: "Aurora",
+      albumId: "a1",
+      albumTitle: "Alpha",
+      genre: "Ambient",
+      duration: "03:00",
+      durationSeconds: 180,
+      isFavorite: false,
+      audioUrl: "/api/audio/t1",
+    };
+    const trackTwo = {
+      id: "t2",
+      title: "01 Horizon",
+      artist: "Boreal",
+      albumId: "a2",
+      albumTitle: "Zenith",
+      genre: "Jazz",
+      duration: "04:00",
+      durationSeconds: 240,
+      isFavorite: false,
+      audioUrl: "/api/audio/t2",
+    };
+    const multiAlbumCatalog = {
+      albums: [
+        { id: "a1", title: "Alpha", artist: "Aurora", motif: "prism", tracks: [trackOne] },
+        { id: "a2", title: "Zenith", artist: "Boreal", motif: "ring", tracks: [trackTwo] },
+      ],
+      allTracks: [trackOne, trackTwo],
+      playlists: [],
+      lyricsCatalog: {},
+    };
+
+    const audioEngine = createAudioEngine();
+    audioEngine.playTrackFromSource({ trackId: "t1", queueSource: "all-songs" }, multiAlbumCatalog);
+    const controller = createNowPlayingController();
+    controller.hydrateCatalog(multiAlbumCatalog);
+    controller.enterFromHome({ returnScreen: "home", audioState: audioEngine.getState() });
+    for (let stepIndex = 0; stepIndex < 30; stepIndex += 1) {
+      controller.step(0.05);
+    }
+    controller.syncAudioState(audioEngine.getState());
+
+    function countFullDiscClipArcs(snapshotOverride) {
+      const drawingContext = createRecordingCanvasContext();
+      nowPlayingScreen.renderNowPlayingScreen(
+        drawingContext,
+        { ...controller.getRenderSnapshot(), ...snapshotOverride },
+        {
+          appearance: "dark",
+          palette: APPEARANCE_PALETTES.dark,
+          catalogAlbums: multiAlbumCatalog.albums,
+        },
+      );
+      return drawingContext.recordedClips
+        .flatMap((clipEntry) => clipEntry.arcs)
+        .filter((arcEntry) => arcEntry.worldRadius >= 170).length;
+    }
+
+    // 1. t1 dragging left -> t2 (different album) DOES peek neighbor disc
+    assert.ok(countFullDiscClipArcs({ skipDragOffsetX: -48 }) >= 2);
+
+    // 2. t1 dragging right at elapsed 0s (Repeat Off boundary) does NOT peek neighbor disc
+    assert.equal(countFullDiscClipArcs({ skipDragOffsetX: 48, trackElapsedSeconds: 0 }), 1);
+
+    // 3. t2 dragging right at elapsed 60s (> 3s restart rule) does NOT peek t1 cover
+    audioEngine.skipTrack(1);
+    audioEngine.seekTo(60);
+    controller.syncAudioState(audioEngine.getState());
+    for (let stepIndex = 0; stepIndex < 30; stepIndex += 1) {
+      controller.step(0.05);
+    }
+    assert.equal(countFullDiscClipArcs({ skipDragOffsetX: 48, trackElapsedSeconds: 60 }), 1);
+
+    // 4. t2 dragging left under Repeat Off (END OF ALL SONGS boundary) does NOT peek neighbor disc
+    assert.equal(countFullDiscClipArcs({ skipDragOffsetX: -48, repeatMode: "off" }), 1);
+  });
+
+  test("LYRICS quick action draws a chamfered speech bubble with two quote marks instead of the legacy text-bar glyph", () => {
+    const LYRICS_BUTTON_CENTER_X = 180;
+    const LYRICS_BUTTON_CENTER_Y = 238;
+    const LYRICS_BUTTON_RADIUS_PX = 24;
+    const ICON_RADIUS_PX = 10.8;
+    const LEGACY_BAR_WIDTH_PX = ICON_RADIUS_PX * 1.44;
+    const LEGACY_BAR_HEIGHT_PX = 3;
+    const QUOTE_HEAD_SIZE_PX = ICON_RADIUS_PX * 0.22;
+    const MIN_BUBBLE_POINT_COUNT = 10;
+
+    const { nowPlayingController, catalog } = createNowPlayingScreenHarness();
+    const drawingContext = createRecordingCanvasContext();
+    nowPlayingScreen.renderNowPlayingScreen(
+      drawingContext,
+      {
+        ...nowPlayingController.getRenderSnapshot(),
+        quickActionsOpen: true,
+        quickActionsProgress: 1,
+        lyricsOpen: false,
+      },
+      {
+        appearance: "dark",
+        palette: APPEARANCE_PALETTES.dark,
+        catalogAlbums: catalog.albums,
+      },
+    );
+
+    function isInsideLyricsButton(pointX, pointY) {
+      return (
+        Math.abs(pointX - LYRICS_BUTTON_CENTER_X) <= LYRICS_BUTTON_RADIUS_PX &&
+        Math.abs(pointY - LYRICS_BUTTON_CENTER_Y) <= LYRICS_BUTTON_RADIUS_PX
+      );
+    }
+
+    const lyricsRects = drawingContext.recordedRects.filter(
+      (rectEntry) =>
+        rectEntry.kind === "fillRect" &&
+        isInsideLyricsButton(rectEntry.worldLeftX, rectEntry.worldTopY),
+    );
+
+    const legacyBars = lyricsRects.filter(
+      (rectEntry) =>
+        Math.abs(rectEntry.height - LEGACY_BAR_HEIGHT_PX) <= 0.5 &&
+        Math.abs(rectEntry.width - LEGACY_BAR_WIDTH_PX) <= 1,
+    );
+    assert.equal(legacyBars.length, 0, "legacy lyrics text bar must be removed");
+
+    const quoteHeads = lyricsRects.filter(
+      (rectEntry) =>
+        Math.abs(rectEntry.width - QUOTE_HEAD_SIZE_PX) <= 0.6 &&
+        Math.abs(rectEntry.height - QUOTE_HEAD_SIZE_PX) <= 0.6 &&
+        rectEntry.fillStyle === APPEARANCE_PALETTES.dark.signalHighlight,
+    );
+    assert.equal(quoteHeads.length, 2, "speech bubble must contain exactly two quote heads");
+    const quoteHeadCenters = quoteHeads
+      .map((rectEntry) => rectEntry.worldLeftX + rectEntry.width / 2)
+      .sort((leftX, rightX) => leftX - rightX);
+    assert.ok(quoteHeadCenters[0] < LYRICS_BUTTON_CENTER_X);
+    assert.ok(quoteHeadCenters[1] > LYRICS_BUTTON_CENTER_X);
+
+    const bubbleStrokes = drawingContext.recordedStrokes.filter(
+      (strokeEntry) =>
+        strokeEntry.points.length >= MIN_BUBBLE_POINT_COUNT &&
+        strokeEntry.points.every((point) => isInsideLyricsButton(point.worldX, point.worldY)),
+    );
+    assert.ok(bubbleStrokes.length >= 1, "speech bubble outline must be stroked inside the button");
+  });
+});
+
+describe("now_playing_screen.js lyrics Isometric Field art layer", () => {
+  const SAFE_CLIP_RADIUS_PX = 174;
+  const OUTER_CROSSHAIR_POSITIONS = [
+    { centerX: 74, centerY: 84, kind: "plus" },
+    { centerX: 286, centerY: 84, kind: "cross" },
+    { centerX: 52, centerY: 274, kind: "cross" },
+    { centerX: 308, centerY: 274, kind: "plus" },
+  ];
+
+  function hasMarkStrokeNear(recordedStrokes, targetX, targetY, strokeStyleFilter = null) {
+    return recordedStrokes.some((strokeEntry) => {
+      if (strokeStyleFilter && strokeEntry.strokeStyle !== strokeStyleFilter) {
+        return false;
+      }
+      if (strokeEntry.points.length !== 4) {
+        return false;
+      }
+      const averageX =
+        strokeEntry.points.reduce((sum, point) => sum + point.worldX, 0) / strokeEntry.points.length;
+      const averageY =
+        strokeEntry.points.reduce((sum, point) => sum + point.worldY, 0) / strokeEntry.points.length;
+      return Math.hypot(averageX - targetX, averageY - targetY) <= 1.0;
+    });
+  }
+
+  function hasHorizonDividerLine(recordedStrokes) {
+    return recordedStrokes.some(
+      (strokeEntry) =>
+        strokeEntry.points.length === 2 &&
+        Math.abs(strokeEntry.points[0].worldX - 116) <= 1 &&
+        Math.abs(strokeEntry.points[1].worldX - 244) <= 1 &&
+        strokeEntry.points[0].worldY >= 214 &&
+        strokeEntry.points[0].worldY <= 234 &&
+        Math.abs(strokeEntry.points[0].worldY - strokeEntry.points[1].worldY) <= 0.5,
+    );
+  }
+
+  test("renders clipped perspective field, 4 peripheral crosshairs with active highlight, and horizon divider in Dark and Light Mode", () => {
+    for (const appearance of ["dark", "light"]) {
+      const palette = APPEARANCE_PALETTES[appearance];
+      const { nowPlayingController, catalog } = createNowPlayingScreenHarness();
+      const drawingContext = createRecordingCanvasContext();
+      const lyricsState = {
+        ...nowPlayingController.getRenderSnapshot(),
+        lyricsOpen: true,
+        lyricsProgress: 1,
+        vinylRotationRadians: 0.4,
+        lyricsFrame: {
+          kind: "timed",
+          modeLabel: "TIMED SYNC",
+          note: "",
+          activeIndex: 0,
+          activeText: "Through the static and the glass",
+          upcomingText: "Every signal finds its cadence",
+          lineProgress: 0.3,
+          isIntroCue: false,
+        },
+      };
+
+      nowPlayingScreen.renderNowPlayingScreen(drawingContext, lyricsState, {
+        appearance,
+        palette,
+        catalogAlbums: catalog.albums,
+      });
+
+      const safeClips = drawingContext.recordedClips.filter((clipEntry) =>
+        clipEntry.arcs.some(
+          (arcEntry) =>
+            Math.abs(arcEntry.worldCenterX - DISPLAY_CENTER_PX) <= 1 &&
+            Math.abs(arcEntry.worldCenterY - DISPLAY_CENTER_PX) <= 1 &&
+            Math.abs(arcEntry.worldRadius - SAFE_CLIP_RADIUS_PX) <= 1,
+        ),
+      );
+      assert.ok(
+        safeClips.length >= 1,
+        `Isometric Field must clip inside SAFE_CLIP_RADIUS_PX (${appearance})`,
+      );
+
+      const gridStrokes = drawingContext.recordedStrokes.filter(
+        (strokeEntry) => strokeEntry.strokeStyle === "rgba(245, 250, 255, 0.085)",
+      );
+      assert.ok(gridStrokes.length >= 2, `perspective grid must stroke rays and depth lines (${appearance})`);
+      for (const gridStroke of gridStrokes) {
+        for (const point of gridStroke.points) {
+          assert.ok(
+            point.worldY <= 114 + FLOAT_TOLERANCE || point.worldY >= 238 - FLOAT_TOLERANCE,
+            `grid point y=${point.worldY} must stay outside central reading zone (${appearance})`,
+          );
+        }
+      }
+
+      for (const mark of OUTER_CROSSHAIR_POSITIONS) {
+        assert.ok(
+          hasMarkStrokeNear(drawingContext.recordedStrokes, mark.centerX, mark.centerY),
+          `outer crosshair at (${mark.centerX}, ${mark.centerY}) must be drawn (${appearance})`,
+        );
+      }
+
+      assert.ok(
+        hasMarkStrokeNear(
+          drawingContext.recordedStrokes,
+          OUTER_CROSSHAIR_POSITIONS[0].centerX,
+          OUTER_CROSSHAIR_POSITIONS[0].centerY,
+          palette.signalHighlight,
+        ),
+        `activeIndex 0 must highlight first outer crosshair with signalHighlight (${appearance})`,
+      );
+
+      assert.ok(
+        hasHorizonDividerLine(drawingContext.recordedStrokes),
+        `horizon divider line must be drawn when upcomingText is present (${appearance})`,
+      );
+      assert.ok(
+        drawingContext.recordedStrokes.some(
+          (strokeEntry) =>
+            strokeEntry.points.length === 4 &&
+            Math.abs(strokeEntry.points[0].worldX - 107.6) <= 1 &&
+            strokeEntry.points[0].worldY >= 210 &&
+            strokeEntry.points[0].worldY <= 238,
+        ),
+        `left horizon divider end-cap must be drawn (${appearance})`,
+      );
+    }
+  });
+
+  test("shifts highlighted crosshair on activeIndex advance, omits divider when upcomingText is empty, and handles negative rotation", () => {
+    const palette = APPEARANCE_PALETTES.dark;
+    const { nowPlayingController, catalog } = createNowPlayingScreenHarness();
+    const drawingContext = createRecordingCanvasContext();
+    const lyricsState = {
+      ...nowPlayingController.getRenderSnapshot(),
+      lyricsOpen: true,
+      lyricsProgress: 1,
+      vinylRotationRadians: -3.7,
+      lyricsFrame: {
+        kind: "timed",
+        modeLabel: "TIMED SYNC",
+        note: "",
+        activeIndex: 1,
+        activeText: "Hold the moment till it fades",
+        upcomingText: "",
+        lineProgress: 0.9,
+        isIntroCue: false,
+      },
+    };
+
+    nowPlayingScreen.renderNowPlayingScreen(drawingContext, lyricsState, {
+      appearance: "dark",
+      palette,
+      catalogAlbums: catalog.albums,
+    });
+
+    assert.equal(
+      hasMarkStrokeNear(
+        drawingContext.recordedStrokes,
+        OUTER_CROSSHAIR_POSITIONS[0].centerX,
+        OUTER_CROSSHAIR_POSITIONS[0].centerY,
+        palette.signalHighlight,
+      ),
+      false,
+      "first crosshair must no longer be highlighted when activeIndex is 1",
+    );
+    assert.ok(
+      hasMarkStrokeNear(
+        drawingContext.recordedStrokes,
+        OUTER_CROSSHAIR_POSITIONS[1].centerX,
+        OUTER_CROSSHAIR_POSITIONS[1].centerY,
+        palette.signalHighlight,
+      ),
+      "second crosshair must be highlighted when activeIndex is 1",
+    );
+    assert.equal(
+      hasHorizonDividerLine(drawingContext.recordedStrokes),
+      false,
+      "horizon divider must be omitted when upcomingText is empty",
+    );
+
+    const gridStrokes = drawingContext.recordedStrokes.filter(
+      (strokeEntry) => strokeEntry.strokeStyle === "rgba(245, 250, 255, 0.085)",
+    );
+    assert.ok(gridStrokes.length >= 2);
+    for (const gridStroke of gridStrokes) {
+      for (const point of gridStroke.points) {
+        assert.ok(Number.isFinite(point.worldY));
+        assert.ok(
+          (point.worldY >= -8 - FLOAT_TOLERANCE && point.worldY <= 114 + FLOAT_TOLERANCE) ||
+            (point.worldY >= 238 - FLOAT_TOLERANCE && point.worldY <= 368 + FLOAT_TOLERANCE),
+          `negative rotation depth line y=${point.worldY} must remain in [-8, 114] or [238, 368]`,
+        );
+      }
+    }
+  });
+
+  test("keeps all outer crosshairs neutral for No Lyrics and Intro Cue, and omits divider for No Lyrics", () => {
+    const palette = APPEARANCE_PALETTES.dark;
+    const { nowPlayingController, catalog } = createNowPlayingScreenHarness({ includeLyrics: false });
+
+    for (const scenario of [
+      {
+        label: "no-lyrics",
+        lyricsFrame: {
+          kind: "none",
+          modeLabel: "NO LYRICS",
+          note: "NO EMBEDDED OR .LRC FILE",
+          activeIndex: -1,
+          activeText: "",
+          upcomingText: "",
+          lineProgress: 0,
+          isIntroCue: false,
+        },
+        expectDivider: false,
+      },
+      {
+        label: "intro-cue",
+        lyricsFrame: {
+          kind: "timed",
+          modeLabel: "TIMED SYNC",
+          note: "",
+          activeIndex: -1,
+          activeText: "",
+          upcomingText: "First lyric line",
+          lineProgress: 0.4,
+          isIntroCue: true,
+        },
+        expectDivider: true,
+      },
+    ]) {
+      const drawingContext = createRecordingCanvasContext();
+      const lyricsState = {
+        ...nowPlayingController.getRenderSnapshot(),
+        lyricsOpen: true,
+        lyricsProgress: 1,
+        lyricsFrame: scenario.lyricsFrame,
+      };
+
+      nowPlayingScreen.renderNowPlayingScreen(drawingContext, lyricsState, {
+        appearance: "dark",
+        palette,
+        catalogAlbums: catalog.albums,
+      });
+
+      for (const mark of OUTER_CROSSHAIR_POSITIONS) {
+        assert.equal(
+          hasMarkStrokeNear(
+            drawingContext.recordedStrokes,
+            mark.centerX,
+            mark.centerY,
+            palette.signalHighlight,
+          ),
+          false,
+          `outer crosshair (${mark.centerX}, ${mark.centerY}) must stay neutral in ${scenario.label}`,
+        );
+      }
+      assert.equal(
+        hasHorizonDividerLine(drawingContext.recordedStrokes),
+        scenario.expectDivider,
+        `divider presence mismatch for ${scenario.label}`,
+      );
+    }
+  });
+});
+
+describe("now_playing_screen.js No Lyrics medallion icon", () => {
+  const MEDALLION_CENTER_Y_PX = 148;
+  const MEDALLION_RADIUS_PX = 32;
+  const NO_LYRICS_ICON_RADIUS_PX = 16;
+  const QUOTE_HEAD_SIZE_PX = NO_LYRICS_ICON_RADIUS_PX * 0.22;
+  const SLASH_HALF_SPAN_X_PX = 15;
+  const SLASH_HALF_SPAN_Y_PX = 14;
+  const MIN_BUBBLE_POINT_COUNT = 10;
+
+  function renderNoLyricsMedallion(appearance, overrides = {}) {
+    const palette = APPEARANCE_PALETTES[appearance];
+    const { nowPlayingController, catalog } = createNowPlayingScreenHarness({ includeLyrics: false });
+    const drawingContext = createRecordingCanvasContext();
+    const lyricsState = {
+      ...nowPlayingController.getRenderSnapshot(),
+      lyricsOpen: true,
+      lyricsProgress: 1,
+      lyricsFrame: {
+        kind: "none",
+        modeLabel: "NO LYRICS",
+        note: "NO EMBEDDED OR .LRC FILE",
+        activeIndex: -1,
+        activeText: "",
+        upcomingText: "",
+        lineProgress: 0,
+        isIntroCue: false,
+      },
+      ...overrides,
+    };
+
+    nowPlayingScreen.renderNowPlayingScreen(drawingContext, lyricsState, {
+      appearance,
+      palette,
+      catalogAlbums: catalog.albums,
+    });
+    return { drawingContext, palette };
+  }
+
+  function isInsideMedallion(pointX, pointY, medallionY = MEDALLION_CENTER_Y_PX) {
+    return Math.hypot(pointX - DISPLAY_CENTER_PX, pointY - medallionY) <= MEDALLION_RADIUS_PX;
+  }
+
+  function findSlashStrokeIndex(recordedStrokes, strokeStyle, medallionY = MEDALLION_CENTER_Y_PX) {
+    return recordedStrokes.findIndex(
+      (strokeEntry) =>
+        strokeEntry.strokeStyle === strokeStyle &&
+        strokeEntry.points.length === 2 &&
+        Math.hypot(
+          strokeEntry.points[0].worldX - (DISPLAY_CENTER_PX - SLASH_HALF_SPAN_X_PX),
+          strokeEntry.points[0].worldY - (medallionY + SLASH_HALF_SPAN_Y_PX),
+        ) <= 1.0 &&
+        Math.hypot(
+          strokeEntry.points[1].worldX - (DISPLAY_CENTER_PX + SLASH_HALF_SPAN_X_PX),
+          strokeEntry.points[1].worldY - (medallionY - SLASH_HALF_SPAN_Y_PX),
+        ) <= 1.0,
+    );
+  }
+
+  test("renders the chamfered speech bubble with two quote marks crossed by a diagonal not-slash in Dark and Light Mode", () => {
+    for (const appearance of ["dark", "light"]) {
+      const { drawingContext, palette } = renderNoLyricsMedallion(appearance);
+
+      const medallionRects = drawingContext.recordedRects.filter(
+        (rectEntry) =>
+          rectEntry.kind === "fillRect" &&
+          isInsideMedallion(rectEntry.worldLeftX + rectEntry.width / 2, rectEntry.worldTopY + rectEntry.height / 2),
+      );
+
+      const legacyBars = medallionRects.filter(
+        (rectEntry) =>
+          (Math.abs(rectEntry.width - 22) <= 0.5 && Math.abs(rectEntry.height - 2.2) <= 0.5) ||
+          (Math.abs(rectEntry.width - 28) <= 0.5 && Math.abs(rectEntry.height - 3) <= 0.5) ||
+          (Math.abs(rectEntry.width - 18) <= 0.5 && Math.abs(rectEntry.height - 2.2) <= 0.5),
+      );
+      assert.equal(legacyBars.length, 0, `legacy horizontal bars must be removed (${appearance})`);
+
+      const quoteHeads = medallionRects.filter(
+        (rectEntry) =>
+          Math.abs(rectEntry.width - QUOTE_HEAD_SIZE_PX) <= 0.4 &&
+          Math.abs(rectEntry.height - QUOTE_HEAD_SIZE_PX) <= 0.4,
+      );
+      assert.equal(quoteHeads.length, 2, `must draw two quote-mark heads (${appearance})`);
+      const quoteCentersX = quoteHeads
+        .map((rectEntry) => rectEntry.worldLeftX + rectEntry.width / 2)
+        .sort((leftX, rightX) => leftX - rightX);
+      assert.ok(quoteCentersX[0] < DISPLAY_CENTER_PX, `left quote must sit left of center (${appearance})`);
+      assert.ok(quoteCentersX[1] > DISPLAY_CENTER_PX, `right quote must sit right of center (${appearance})`);
+
+      const quoteTailStrokes = drawingContext.recordedStrokes.filter(
+        (strokeEntry) =>
+          strokeEntry.points.length === 2 &&
+          strokeEntry.points.every((point) => isInsideMedallion(point.worldX, point.worldY)) &&
+          Math.abs(strokeEntry.points[0].worldX - strokeEntry.points[1].worldX) < 5 &&
+          strokeEntry.points[1].worldY > strokeEntry.points[0].worldY,
+      );
+      assert.equal(quoteTailStrokes.length, 2, `must draw two quote-tail strokes (${appearance})`);
+
+      const bubbleStrokeIndex = drawingContext.recordedStrokes.findIndex(
+        (strokeEntry) =>
+          strokeEntry.points.length >= MIN_BUBBLE_POINT_COUNT &&
+          strokeEntry.points.every((point) => isInsideMedallion(point.worldX, point.worldY)),
+      );
+      assert.ok(bubbleStrokeIndex >= 0, `speech bubble outline must be stroked (${appearance})`);
+
+      const slashStrokeIndex = findSlashStrokeIndex(drawingContext.recordedStrokes, palette.signalHighlight);
+      assert.ok(slashStrokeIndex > bubbleStrokeIndex, `diagonal not-slash must be drawn on top of speech bubble (${appearance})`);
+
+      assert.ok(
+        drawingContext.recordedTextCalls.some((textEntry) => textEntry.text === "No lyrics found"),
+        `No lyrics found label must still be rendered (${appearance})`,
+      );
+    }
+  });
+
+  test("tracks partial entrance lyricsProgress: 0.5 with shifted medallionY and finite coordinates", () => {
+    const shiftedMedallionY = 153;
+    const { drawingContext, palette } = renderNoLyricsMedallion("dark", { lyricsProgress: 0.5 });
+
+    const quoteHeads = drawingContext.recordedRects.filter(
+      (rectEntry) =>
+        rectEntry.kind === "fillRect" &&
+        isInsideMedallion(
+          rectEntry.worldLeftX + rectEntry.width / 2,
+          rectEntry.worldTopY + rectEntry.height / 2,
+          shiftedMedallionY,
+        ) &&
+        Math.abs(rectEntry.width - QUOTE_HEAD_SIZE_PX) <= 0.4 &&
+        Math.abs(rectEntry.height - QUOTE_HEAD_SIZE_PX) <= 0.4,
+    );
+    assert.equal(quoteHeads.length, 2);
+    for (const head of quoteHeads) {
+      assert.ok(Number.isFinite(head.worldLeftX) && Number.isFinite(head.worldTopY));
+    }
+
+    const bubbleStroke = drawingContext.recordedStrokes.find(
+      (strokeEntry) =>
+        strokeEntry.points.length >= MIN_BUBBLE_POINT_COUNT &&
+        strokeEntry.points.every((point) => isInsideMedallion(point.worldX, point.worldY, shiftedMedallionY)),
+    );
+    assert.ok(bubbleStroke, "speech bubble must track shifted medallionY");
+
+    const slashIndex = findSlashStrokeIndex(
+      drawingContext.recordedStrokes,
+      palette.signalHighlight,
+      shiftedMedallionY,
+    );
+    assert.ok(slashIndex >= 0, "diagonal slash must track shifted medallionY");
+  });
+
+  test("falls back gracefully when lyricsFrame is null", () => {
+    const { drawingContext, palette } = renderNoLyricsMedallion("dark", { lyricsFrame: null });
+
+    const quoteHeads = drawingContext.recordedRects.filter(
+      (rectEntry) =>
+        rectEntry.kind === "fillRect" &&
+        isInsideMedallion(rectEntry.worldLeftX + rectEntry.width / 2, rectEntry.worldTopY + rectEntry.height / 2) &&
+        Math.abs(rectEntry.width - QUOTE_HEAD_SIZE_PX) <= 0.4 &&
+        Math.abs(rectEntry.height - QUOTE_HEAD_SIZE_PX) <= 0.4,
+    );
+    assert.equal(quoteHeads.length, 2);
+    assert.ok(
+      drawingContext.recordedStrokes.some(
+        (strokeEntry) =>
+          strokeEntry.points.length >= MIN_BUBBLE_POINT_COUNT &&
+          strokeEntry.points.every((point) => isInsideMedallion(point.worldX, point.worldY)),
+      ),
+    );
+    assert.ok(findSlashStrokeIndex(drawingContext.recordedStrokes, palette.signalHighlight) >= 0);
+    assert.ok(drawingContext.recordedTextCalls.some((textEntry) => textEntry.text === "No lyrics found"));
+  });
+});

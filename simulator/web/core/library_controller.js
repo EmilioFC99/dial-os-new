@@ -4,6 +4,7 @@
  * mechanics for the DialOS 360x360 display simulator.
  */
 
+import { trackMatchesGenreName } from "./audio_engine.js";
 import {
   DISPLAY_CENTER_PX,
   FULL_CIRCLE_RADIANS,
@@ -32,13 +33,82 @@ export const LIBRARY_CONSTANTS = Object.freeze({
   LETTER_STEP_RADIANS,
   RIM_SLICE_COUNT,
   TRANSITION_DURATION_SECONDS: 0.28,
+  ALBUMS_TRANSITION_DURATION_SECONDS: 0.52,
   VINYL_LAUNCH_DURATION_SECONDS: 0.62,
   DELETE_HOLD_DURATION_SECONDS: 1.10,
   LONG_PRESS_DURATION_SECONDS: 0.48,
   BACK_SWIPE_DISTANCE_PX: 96,
   BACK_SWIPE_COMMIT_THRESHOLD: 0.45,
   TAP_DRIFT_LIMIT_PX: 10,
+  ARTIST_TOGGLE_CENTER_Y: 63,
+  ARTIST_TOGGLE_TOP_Y: 53,
+  ARTIST_TOGGLE_WIDTH_PX: 148,
+  ARTIST_TOGGLE_HEIGHT_PX: 20,
+  ARTIST_TOGGLE_CHAMFER_PX: 5,
+  ARTIST_TOGGLE_HIT_TOP_Y: 48,
+  ARTIST_TOGGLE_HIT_BOTTOM_Y: 77,
+  ARTIST_TOGGLE_HIT_HALF_WIDTH_PX: 78,
+  ARTIST_HEADER_DIVIDER_Y: 79,
+  CRATE_SORT_BUTTON_X: 152,
+  CRATE_SORT_BUTTON_Y: 325,
+  CRATE_NOTE_BUTTON_X: 208,
+  CRATE_NOTE_BUTTON_Y: 325,
+  ARTISTS_SORT_BUTTON_X: DISPLAY_CENTER_PX,
+  ARTISTS_SORT_BUTTON_Y: 325,
+  CRATE_BOTTOM_BUTTON_RADIUS_PX: 17,
+  CRATE_BOTTOM_BUTTON_HIT_RADIUS_PX: 22,
+  ALBUM_QUICK_ACTION_BUTTON_CENTER_Y: 196,
+  ALBUM_QUICK_ACTION_BUTTON_RADIUS_PX: 34,
+  ALBUM_QUICK_ACTION_BUTTON_HIT_RADIUS_PX: 40,
+  ALBUM_QUICK_ACTION_AUTO_CLOSE_SECONDS: 0.24,
+  SORT_TOAST_DURATION_SECONDS: 1.35,
+  SORT_WHEEL_LONG_PRESS_SECONDS: 0.36,
+  SORT_WHEEL_RADIUS_PX: 76,
+  SORT_WHEEL_SLOT_RADIUS_PX: 16.5,
+  SORT_WHEEL_ENGAGE_RADIUS_PX: 26,
+  SORT_WHEEL_START_ANGLE_RADIANS: -Math.PI * 0.88,
+  SORT_WHEEL_END_ANGLE_RADIANS: -Math.PI * 0.12,
 });
+
+export const COLLECTION_SORT_MODES = Object.freeze([
+  "alphabetical",
+  "reverse-alphabetical",
+  "liked-first",
+  "recent",
+  "oldest",
+]);
+
+export const ALBUM_SORT_MODES = COLLECTION_SORT_MODES;
+
+export const COLLECTION_SORT_MODE_LABELS = Object.freeze({
+  alphabetical: Object.freeze({
+    id: "alphabetical",
+    shortLabel: "A\u2013Z",
+    toastLabel: "A\u2013Z",
+  }),
+  "reverse-alphabetical": Object.freeze({
+    id: "reverse-alphabetical",
+    shortLabel: "Z\u2013A",
+    toastLabel: "Z\u2013A",
+  }),
+  "liked-first": Object.freeze({
+    id: "liked-first",
+    shortLabel: "LIKED",
+    toastLabel: "LIKED FIRST",
+  }),
+  recent: Object.freeze({
+    id: "recent",
+    shortLabel: "RECENT",
+    toastLabel: "MOST RECENT",
+  }),
+  oldest: Object.freeze({
+    id: "oldest",
+    shortLabel: "OLDEST",
+    toastLabel: "OLDEST FIRST",
+  }),
+});
+
+export const ALBUM_SORT_MODE_LABELS = COLLECTION_SORT_MODE_LABELS;
 
 export const LIBRARY_HUB_SECTIONS = Object.freeze([
   Object.freeze({ id: "favorites", title: "Favorites" }),
@@ -79,6 +149,23 @@ const HUB_HIT_MIN_ALPHA = 0.25;
 const SLICE_BOUNDARY_EPSILON = 1e-9;
 const MIN_ALPHABETICAL_INDEX_COUNT = 3;
 const MIN_LETTER_GROUPS_FOR_SEEK = 2;
+const MILLISECONDS_PER_SECOND = 1000;
+const MONTHS_PER_YEAR = 12;
+const TWO_DIGIT_YEAR_MODULUS = 100;
+const MONTH_SHORT_NAMES = Object.freeze([
+  "JAN",
+  "FEB",
+  "MAR",
+  "APR",
+  "MAY",
+  "JUN",
+  "JUL",
+  "AUG",
+  "SEP",
+  "OCT",
+  "NOV",
+  "DEC",
+]);
 const CRATE_BAR_MIN_WIDTH_PX = 6;
 const CRATE_BAR_MAX_WIDTH_PX = 18;
 const DEFAULT_CRATE_BAR_LIMIT = 7;
@@ -91,6 +178,9 @@ const VINYL_SPIN_RADIANS_PER_SECOND =
 const VINYL_NUDGE_SPRING_RATE = 8.5;
 const SHEET_SPRING_RATE = 14;
 const SHEET_SETTLE_EPSILON = 0.004;
+const ARTIST_MODE_BLEND_RATE = 15;
+const ARTIST_MODE_SETTLE_EPSILON = 0.004;
+const ARTIST_TAB_FADE_DURATION_SECONDS = 0.20;
 const PRESS_ATTACK_RATE = 32;
 const PRESS_RELEASE_RATE = 18;
 const PRESS_INITIAL_LEVEL = 0.35;
@@ -99,8 +189,7 @@ const PRESS_FLASH_DECAY_RATE = 7.5;
 const DELETE_HOLD_DECAY_RATE = 3.8;
 const DELETE_FLASH_DECAY_RATE = 2.8;
 
-const RIM_SLAB_NEIGHBOR_ONE_PULL = 0.34;
-const RIM_SLAB_NEIGHBOR_TWO_PULL = 0.10;
+const RIM_SLAB_NEIGHBOR_ONE_PULL = 0.24;
 const RIM_SLAB_RISE_RATE = 30;
 const RIM_SLAB_FALL_RATE = 11;
 const RIM_SLAB_PEAK_SNAP_THRESHOLD = 0.94;
@@ -158,11 +247,15 @@ const CRATE_PEEK_RIGHT_X = 272;
 const CRATE_PEEK_TOP_Y = 96;
 const CRATE_PEEK_BOTTOM_Y = 212;
 const CRATE_SLEEVE_LEFT_X = 108;
+const CRATE_SLEEVE_RIGHT_X = 232;
 const CRATE_SLEEVE_TOP_Y = 90;
 const CRATE_SLEEVE_BOTTOM_Y = 216;
-const CRATE_NOTE_BUTTON_X = DISPLAY_CENTER_PX;
-const CRATE_NOTE_BUTTON_Y = 325;
-const CRATE_NOTE_BUTTON_RADIUS_PX = 22;
+const CRATE_SORT_BUTTON_X = LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_X;
+const CRATE_SORT_BUTTON_Y = LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_Y;
+const CRATE_NOTE_BUTTON_X = LIBRARY_CONSTANTS.CRATE_NOTE_BUTTON_X;
+const CRATE_NOTE_BUTTON_Y = LIBRARY_CONSTANTS.CRATE_NOTE_BUTTON_Y;
+const CRATE_NOTE_BUTTON_RADIUS_PX = LIBRARY_CONSTANTS.CRATE_BOTTOM_BUTTON_HIT_RADIUS_PX;
+const SORT_TOAST_FADE_WINDOW_SECONDS = 0.35;
 
 const EMPTY_COPY_BY_SECTION = Object.freeze({
   favorites: Object.freeze({
@@ -221,6 +314,81 @@ export function sortAlphabeticallyBy(
   }
   return entries.slice().sort((firstEntry, secondEntry) =>
     compareAlphabetically(labelSelector(firstEntry), labelSelector(secondEntry)),
+  );
+}
+
+/**
+ * Return a sorted shallow copy of `entries` ordered by `sortMode` without mutating the source array.
+ *
+ * @param {Array<object>} entries Source collection entries.
+ * @param {"alphabetical" | "reverse-alphabetical" | "liked-first" | "recent" | "oldest"} [sortMode="alphabetical"] Active sort mode.
+ * @param {(entry: object) => string} [labelSelector] Selector extracting sortable label text.
+ * @returns {Array<object>} Sorted shallow copy.
+ */
+export function sortCollectionByMode(
+  entries,
+  sortMode = "alphabetical",
+  labelSelector = (entry) => entry?.title ?? entry?.name ?? "",
+) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  const normalizedMode = COLLECTION_SORT_MODES.includes(sortMode) ? sortMode : "alphabetical";
+  return entries.slice().sort((firstEntry, secondEntry) => {
+    const firstLabel = labelSelector(firstEntry);
+    const secondLabel = labelSelector(secondEntry);
+    if (normalizedMode === "reverse-alphabetical") {
+      return compareAlphabetically(secondLabel, firstLabel);
+    }
+    if (normalizedMode === "liked-first") {
+      const firstLiked = firstEntry?.isFavorite ? 1 : 0;
+      const secondLiked = secondEntry?.isFavorite ? 1 : 0;
+      if (firstLiked !== secondLiked) {
+        return secondLiked - firstLiked;
+      }
+      return compareAlphabetically(firstLabel, secondLabel);
+    }
+    if (normalizedMode === "recent" || normalizedMode === "oldest") {
+      const firstTimestamp = Number.isFinite(Number(firstEntry?.addedAt))
+        ? Number(firstEntry.addedAt)
+        : 0;
+      const secondTimestamp = Number.isFinite(Number(secondEntry?.addedAt))
+        ? Number(secondEntry.addedAt)
+        : 0;
+      if (firstTimestamp !== secondTimestamp) {
+        return normalizedMode === "recent"
+          ? secondTimestamp - firstTimestamp
+          : firstTimestamp - secondTimestamp;
+      }
+      return compareAlphabetically(firstLabel, secondLabel);
+    }
+    return compareAlphabetically(firstLabel, secondLabel);
+  });
+}
+
+/**
+ * Return a sorted shallow copy of `albums` ordered by `sortMode` without mutating the source array.
+ *
+ * @param {Array<object>} albums Source album entries.
+ * @param {"alphabetical" | "reverse-alphabetical" | "liked-first" | "recent" | "oldest"} [sortMode="alphabetical"] Active sort mode.
+ * @returns {Array<object>} Sorted shallow copy.
+ */
+export function sortAlbumsByMode(albums, sortMode = "alphabetical") {
+  return sortCollectionByMode(albums, sortMode, (albumEntry) => albumEntry?.title ?? "");
+}
+
+/**
+ * Return a sorted shallow copy of `artists` ordered by `sortMode` without mutating the source array.
+ *
+ * @param {Array<object>} artists Source artist entries.
+ * @param {"alphabetical" | "reverse-alphabetical" | "liked-first" | "recent" | "oldest"} [sortMode="alphabetical"] Active sort mode.
+ * @returns {Array<object>} Sorted shallow copy.
+ */
+export function sortArtistsByMode(artists, sortMode = "alphabetical") {
+  return sortCollectionByMode(
+    artists,
+    sortMode,
+    (artistEntry) => artistEntry?.name ?? artistEntry?.title ?? "",
   );
 }
 
@@ -378,6 +546,15 @@ export function shortestSliceDistance(
   return distance;
 }
 
+function extractNormalizedInitialLetter(labelText) {
+  const trimmedLabel = String(labelText ?? "").trim();
+  const firstCharacter = trimmedLabel.charAt(0).toUpperCase();
+  return {
+    trimmedLabel,
+    normalizedLetter: /[A-Z]/.test(firstCharacter) ? firstCharacter : "#",
+  };
+}
+
 /**
  * Group sorted entries by initial character (A-Z or `#`) for Crystal-Slab Letter Seek.
  *
@@ -395,19 +572,179 @@ export function buildAlphabeticalLetterIndex(
   const letterEntries = [];
   const seenLetters = new Set();
   for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
-    const labelText = String(labelSelector(entries[entryIndex]) ?? "").trim();
-    const firstCharacter = labelText.charAt(0).toUpperCase();
-    const normalizedLetter = /[A-Z]/.test(firstCharacter) ? firstCharacter : "#";
+    const { trimmedLabel, normalizedLetter } = extractNormalizedInitialLetter(
+      labelSelector(entries[entryIndex]),
+    );
     if (!seenLetters.has(normalizedLetter)) {
       seenLetters.add(normalizedLetter);
       letterEntries.push({
         letter: normalizedLetter,
         itemIndex: entryIndex,
-        label: labelText,
+        label: trimmedLabel,
       });
     }
   }
   return letterEntries;
+}
+
+/**
+ * Build sort-aware quick-seek anchors for an already-sorted collection (albums or artists).
+ *
+ * @param {Array<object>} entries Sorted collection entries.
+ * @param {"alphabetical" | "reverse-alphabetical" | "liked-first" | "recent" | "oldest"} [sortMode="alphabetical"] Active sort mode.
+ * @param {(entry: object) => string} [labelSelector] Label accessor for each entry.
+ * @returns {Array<{
+ *   letter: string,
+ *   subLabel: string,
+ *   shortLabel: string,
+ *   itemIndex: number,
+ *   label: string,
+ *   isFavorite: boolean,
+ *   kind: string
+ * }>} Quick-seek anchor descriptors.
+ */
+export function buildCollectionSeekIndex(
+  entries,
+  sortMode = "alphabetical",
+  labelSelector = (entry) => entry?.title ?? entry?.name ?? "",
+) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return [];
+  }
+  const normalizedMode = COLLECTION_SORT_MODES.includes(sortMode) ? sortMode : "alphabetical";
+
+  if (normalizedMode === "alphabetical" || normalizedMode === "reverse-alphabetical") {
+    return buildAlphabeticalLetterIndex(entries, labelSelector).map((anchorEntry) => ({
+      ...anchorEntry,
+      subLabel: "",
+      shortLabel: anchorEntry.letter,
+      isFavorite: false,
+      kind: "letter",
+    }));
+  }
+
+  if (normalizedMode === "liked-first") {
+    const likedAnchors = [];
+    const seenKeys = new Set();
+    for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+      const entry = entries[entryIndex];
+      const isFavorite = Boolean(entry?.isFavorite);
+      const { trimmedLabel, normalizedLetter } = extractNormalizedInitialLetter(
+        labelSelector(entry),
+      );
+      const groupKey = `${isFavorite ? "liked" : "other"}:${normalizedLetter}`;
+      if (!seenKeys.has(groupKey)) {
+        seenKeys.add(groupKey);
+        likedAnchors.push({
+          letter: normalizedLetter,
+          subLabel: "",
+          shortLabel: normalizedLetter,
+          itemIndex: entryIndex,
+          label: trimmedLabel,
+          isFavorite,
+          kind: isFavorite ? "liked-letter" : "letter",
+        });
+      }
+    }
+    return likedAnchors;
+  }
+
+  const distinctMonthKeys = new Set();
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+    const timestampSeconds = Number(entries[entryIndex]?.addedAt);
+    if (!Number.isFinite(timestampSeconds) || timestampSeconds <= 0) {
+      continue;
+    }
+    const addedDate = new Date(timestampSeconds * MILLISECONDS_PER_SECOND);
+    distinctMonthKeys.add(`${addedDate.getFullYear()}-${addedDate.getMonth()}`);
+  }
+
+  const dateGranularity =
+    distinctMonthKeys.size > MONTHS_PER_YEAR
+      ? "year"
+      : distinctMonthKeys.size >= MIN_LETTER_GROUPS_FOR_SEEK
+        ? "month"
+        : "day";
+
+  const dateAnchors = [];
+  const seenBuckets = new Set();
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+    const entry = entries[entryIndex];
+    const trimmedLabel = String(labelSelector(entry) ?? "").trim();
+    const timestampSeconds = Number(entry?.addedAt);
+    if (!Number.isFinite(timestampSeconds) || timestampSeconds <= 0) {
+      if (!seenBuckets.has("date-unknown")) {
+        seenBuckets.add("date-unknown");
+        dateAnchors.push({
+          letter: "\u2014",
+          subLabel: "NO DATE",
+          shortLabel: "\u2014",
+          itemIndex: entryIndex,
+          label: trimmedLabel,
+          isFavorite: false,
+          kind: "date-unknown",
+        });
+      }
+      continue;
+    }
+
+    const addedDate = new Date(timestampSeconds * MILLISECONDS_PER_SECOND);
+    const fullYear = addedDate.getFullYear();
+    const shortYear = String(fullYear % TWO_DIGIT_YEAR_MODULUS).padStart(2, "0");
+    const monthIndex = addedDate.getMonth();
+    const monthShortName = MONTH_SHORT_NAMES[monthIndex];
+    const dayOfMonth = addedDate.getDate();
+
+    let bucketKey = "";
+    let primaryLabel = "";
+    let subLabel = "";
+    let shortLabel = "";
+    let kind = "";
+
+    if (dateGranularity === "year") {
+      bucketKey = `year:${fullYear}`;
+      primaryLabel = String(fullYear);
+      shortLabel = primaryLabel;
+      kind = "date-year";
+    } else if (dateGranularity === "month") {
+      bucketKey = `month:${fullYear}-${monthIndex}`;
+      primaryLabel = monthShortName;
+      subLabel = String(fullYear);
+      shortLabel = `${monthShortName} \u2019${shortYear}`;
+      kind = "date-month";
+    } else {
+      bucketKey = `day:${fullYear}-${monthIndex}-${dayOfMonth}`;
+      primaryLabel = String(dayOfMonth);
+      subLabel = `${monthShortName} \u2019${shortYear}`;
+      shortLabel = `${monthShortName} ${dayOfMonth}`;
+      kind = "date-day";
+    }
+
+    if (!seenBuckets.has(bucketKey)) {
+      seenBuckets.add(bucketKey);
+      dateAnchors.push({
+        letter: primaryLabel,
+        subLabel,
+        shortLabel,
+        itemIndex: entryIndex,
+        label: trimmedLabel,
+        isFavorite: false,
+        kind,
+      });
+    }
+  }
+  return dateAnchors;
+}
+
+/**
+ * Build sort-aware quick-seek anchors for an already-sorted Album Crate list.
+ *
+ * @param {Array<object>} albums Sorted album entries.
+ * @param {"alphabetical" | "reverse-alphabetical" | "liked-first" | "recent" | "oldest"} [sortMode="alphabetical"] Active sort mode.
+ * @returns {Array<object>} Quick-seek anchor descriptors.
+ */
+export function buildAlbumSeekIndex(albums, sortMode = "alphabetical") {
+  return buildCollectionSeekIndex(albums, sortMode, (albumEntry) => albumEntry?.title ?? "");
 }
 
 /**
@@ -463,6 +800,82 @@ function normalizeAngleDelta(nextAngle, previousAngle) {
   return Math.atan2(Math.sin(nextAngle - previousAngle), Math.cos(nextAngle - previousAngle));
 }
 
+const SORT_WHEEL_MAX_ANGLE_DISTANCE_RADIANS = 0.34;
+const SORT_WHEEL_DOWNWARD_CANCEL_OFFSET_PX = 24;
+
+/**
+ * Compute the 5 radial half-wheel slot positions anchored around `(anchorX, anchorY)`.
+ *
+ * @param {number} [anchorX=LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_X] Wheel anchor X coordinate.
+ * @param {number} [anchorY=LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_Y] Wheel anchor Y coordinate.
+ * @returns {Array<{ mode: string, angleRadians: number, centerX: number, centerY: number, radius: number }>} Slot descriptors.
+ */
+export function computeSortWheelSlots(
+  anchorX = LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_X,
+  anchorY = LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_Y,
+) {
+  const slotCount = COLLECTION_SORT_MODES.length;
+  const startAngle = LIBRARY_CONSTANTS.SORT_WHEEL_START_ANGLE_RADIANS;
+  const endAngle = LIBRARY_CONSTANTS.SORT_WHEEL_END_ANGLE_RADIANS;
+  const wheelRadius = LIBRARY_CONSTANTS.SORT_WHEEL_RADIUS_PX;
+  const slotRadius = LIBRARY_CONSTANTS.SORT_WHEEL_SLOT_RADIUS_PX;
+
+  return COLLECTION_SORT_MODES.map((mode, slotIndex) => {
+    const ratio = slotCount > 1 ? slotIndex / (slotCount - 1) : 0.5;
+    const angleRadians = lerp(startAngle, endAngle, ratio);
+    return {
+      mode,
+      angleRadians,
+      centerX: anchorX + Math.cos(angleRadians) * wheelRadius,
+      centerY: anchorY + Math.sin(angleRadians) * wheelRadius,
+      radius: slotRadius,
+    };
+  });
+}
+
+/**
+ * Resolve which Sort mode on the radial half-wheel is currently hovered for `(pointX, pointY)`.
+ * Returns `null` inside the center cancel hub, below the anchor, or for non-finite coordinates.
+ *
+ * @param {number} pointX Display coordinate X in [0, 360].
+ * @param {number} pointY Display coordinate Y in [0, 360].
+ * @param {number} [anchorX=LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_X] Wheel anchor X coordinate.
+ * @param {number} [anchorY=LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_Y] Wheel anchor Y coordinate.
+ * @returns {"alphabetical" | "reverse-alphabetical" | "liked-first" | "recent" | "oldest" | null} Hovered sort mode or `null`.
+ */
+export function resolveSortWheelHoveredMode(
+  pointX,
+  pointY,
+  anchorX = LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_X,
+  anchorY = LIBRARY_CONSTANTS.CRATE_SORT_BUTTON_Y,
+) {
+  if (!Number.isFinite(pointX) || !Number.isFinite(pointY)) {
+    return null;
+  }
+  const offsetX = pointX - anchorX;
+  const offsetY = pointY - anchorY;
+  const distance = Math.hypot(offsetX, offsetY);
+  if (
+    distance < LIBRARY_CONSTANTS.SORT_WHEEL_ENGAGE_RADIUS_PX ||
+    offsetY > SORT_WHEEL_DOWNWARD_CANCEL_OFFSET_PX
+  ) {
+    return null;
+  }
+  const pointerAngle = Math.atan2(offsetY, offsetX);
+  const slots = computeSortWheelSlots(anchorX, anchorY);
+  let bestMode = null;
+  let bestAngularDistance = SORT_WHEEL_MAX_ANGLE_DISTANCE_RADIANS;
+  for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+    const slot = slots[slotIndex];
+    const angularDistance = Math.abs(normalizeAngleDelta(pointerAngle, slot.angleRadians));
+    if (angularDistance <= bestAngularDistance) {
+      bestAngularDistance = angularDistance;
+      bestMode = slot.mode;
+    }
+  }
+  return bestMode;
+}
+
 function clonePlaylists(playlists) {
   return playlists.map((playlistEntry) => ({
     ...playlistEntry,
@@ -487,18 +900,31 @@ function normalizeCatalogPayload(incomingCatalog) {
         title: String(albumEntry?.title ?? ""),
         artist: String(albumEntry?.artist ?? ""),
         genre: String(albumEntry?.genre ?? ""),
+        isFavorite: Boolean(albumEntry?.isFavorite),
+        addedAt: Number.isFinite(Number(albumEntry?.addedAt)) ? Number(albumEntry.addedAt) : 0,
         // Preserve each album's internal track sequencing while sorting albums A-Z.
-        tracks: albumTracks.map((trackEntry, trackPosition) => ({
-          ...trackEntry,
-          title: String(trackEntry?.title ?? ""),
-          artist: String(trackEntry?.artist || albumEntry?.artist || ""),
-          albumId: trackEntry?.albumId || albumEntry?.id || "",
-          albumTitle: trackEntry?.albumTitle || albumEntry?.title || "",
-          genre: String(trackEntry?.genre || albumEntry?.genre || ""),
-          isFavorite: Boolean(trackEntry?.isFavorite),
-          trackNumber: trackEntry?.trackNumber || String(trackPosition + 1).padStart(2, "0"),
-          audioUrl: trackEntry?.audioUrl || null,
-        })),
+        tracks: albumTracks.map((trackEntry, trackPosition) => {
+          const genres =
+            Array.isArray(trackEntry?.genres) && trackEntry.genres.length > 0
+              ? trackEntry.genres.slice()
+              : trackEntry?.genre
+                ? [String(trackEntry.genre)]
+                : albumEntry?.genre
+                  ? [String(albumEntry.genre)]
+                  : [];
+          return {
+            ...trackEntry,
+            title: String(trackEntry?.title ?? ""),
+            artist: String(trackEntry?.artist || albumEntry?.artist || ""),
+            albumId: trackEntry?.albumId || albumEntry?.id || "",
+            albumTitle: trackEntry?.albumTitle || albumEntry?.title || "",
+            genre: String(trackEntry?.genre || genres[0] || albumEntry?.genre || ""),
+            genres,
+            isFavorite: Boolean(trackEntry?.isFavorite),
+            trackNumber: trackEntry?.trackNumber || String(trackPosition + 1).padStart(2, "0"),
+            audioUrl: trackEntry?.audioUrl || null,
+          };
+        }),
       };
     }),
     (albumEntry) => albumEntry.title,
@@ -517,16 +943,35 @@ function normalizeCatalogPayload(incomingCatalog) {
     }
   }
 
+  const artistByIdMap = new Map();
   const normalizedArtists = sortAlphabeticallyBy(
-    rawArtists.map((artistEntry) => ({
-      ...artistEntry,
-      name: String(artistEntry?.name ?? ""),
-      albumIds: Array.isArray(artistEntry?.albumIds) ? artistEntry.albumIds.slice() : [],
-      countLabel: String(
-        artistEntry?.countLabel ??
-          (Array.isArray(artistEntry?.albumIds) ? artistEntry.albumIds.length : 0),
-      ),
-    })),
+    rawArtists.map((artistEntry) => {
+      const artistAlbumIds = Array.isArray(artistEntry?.albumIds) ? artistEntry.albumIds.slice() : [];
+      const explicitAddedAt = Number(artistEntry?.addedAt);
+      let derivedAddedAt = 0;
+      if (Number.isFinite(explicitAddedAt) && explicitAddedAt > 0) {
+        derivedAddedAt = explicitAddedAt;
+      } else {
+        for (const albumId of artistAlbumIds) {
+          const matchedAlbum = albumByIdMap.get(albumId);
+          if (matchedAlbum && Number.isFinite(matchedAlbum.addedAt) && matchedAlbum.addedAt > derivedAddedAt) {
+            derivedAddedAt = matchedAlbum.addedAt;
+          }
+        }
+      }
+      const normalizedArtist = {
+        ...artistEntry,
+        name: String(artistEntry?.name ?? ""),
+        albumIds: artistAlbumIds,
+        countLabel: String(artistEntry?.countLabel ?? artistAlbumIds.length),
+        isFavorite: Boolean(artistEntry?.isFavorite),
+        addedAt: derivedAddedAt,
+      };
+      if (normalizedArtist.id) {
+        artistByIdMap.set(normalizedArtist.id, normalizedArtist);
+      }
+      return normalizedArtist;
+    }),
     (artistEntry) => artistEntry.name,
   );
 
@@ -545,6 +990,14 @@ function normalizeCatalogPayload(incomingCatalog) {
   const normalizedAllTracks = sortAlphabeticallyBy(
     allTrackSource.map((trackEntry) => {
       const existingTrack = trackByIdMap.get(trackEntry?.id) || {};
+      const genres =
+        Array.isArray(trackEntry?.genres) && trackEntry.genres.length > 0
+          ? trackEntry.genres.slice()
+          : Array.isArray(existingTrack.genres) && existingTrack.genres.length > 0
+            ? existingTrack.genres.slice()
+            : trackEntry?.genre || existingTrack.genre
+              ? [String(trackEntry?.genre ?? existingTrack.genre ?? "")]
+              : [];
       const mergedTrack = {
         ...existingTrack,
         ...trackEntry,
@@ -552,7 +1005,8 @@ function normalizeCatalogPayload(incomingCatalog) {
         artist: String(trackEntry?.artist ?? existingTrack.artist ?? ""),
         albumId: trackEntry?.albumId || existingTrack.albumId || "",
         albumTitle: trackEntry?.albumTitle || existingTrack.albumTitle || "",
-        genre: String(trackEntry?.genre ?? existingTrack.genre ?? ""),
+        genre: String(trackEntry?.genre ?? existingTrack.genre ?? genres[0] ?? ""),
+        genres,
         isFavorite: Boolean(trackEntry?.isFavorite),
         audioUrl: trackEntry?.audioUrl || existingTrack.audioUrl || null,
       };
@@ -583,6 +1037,7 @@ function normalizeCatalogPayload(incomingCatalog) {
       playlists: normalizedPlaylists,
     },
     albumByIdMap,
+    artistByIdMap,
     trackByIdMap,
     playlists: normalizedPlaylists,
   };
@@ -597,12 +1052,16 @@ function normalizeCatalogPayload(incomingCatalog) {
  * @param {(launchPayload: object) => void} [callbacks.onLaunchTrack] Invoked when a track/vinyl launches.
  * @param {() => void} [callbacks.onExitToHome] Invoked when stepping back at the Hub root.
  * @param {(playlists: Array<object>) => void} [callbacks.onPersistPlaylists] Invoked after playlist deletion.
+ * @param {(albumId: string, isFavorite: boolean) => void} [callbacks.onToggleAlbumFavorite] Invoked when album favorite changes.
+ * @param {(artistId: string, isFavorite: boolean) => void} [callbacks.onToggleArtistFavorite] Invoked when artist favorite changes.
  * @returns {object} Library controller API.
  */
 export function createLibraryController({
   onLaunchTrack,
   onExitToHome,
   onPersistPlaylists,
+  onToggleAlbumFavorite,
+  onToggleArtistFavorite,
 } = {}) {
   let catalog = {
     albums: [],
@@ -612,6 +1071,7 @@ export function createLibraryController({
     playlists: [],
   };
   let albumByIdMap = new Map();
+  let artistByIdMap = new Map();
   let trackByIdMap = new Map();
   let playlists = [];
   let counts = computeCounts();
@@ -632,6 +1092,11 @@ export function createLibraryController({
 
   let transitionProgress = 1;
   let transitionDirection = 1;
+  let albumsTransitionMode = "none";
+  let albumsTransitionProgress = 1;
+  let albumsTransitionHubScroll = 0;
+  let albumsTransitionAlbumId = null;
+  let albumsTransitionCrateScroll = 0;
   let backSwipeProgress = 0;
   let cratePullUpProgress = 0;
 
@@ -639,12 +1104,32 @@ export function createLibraryController({
   let pressHighlightLevel = 0;
   let pressFlashRowIndex = null;
   let pressFlashLevel = 0;
+  let preferredArtistViewMode = "albums";
+  let artistModeBlend = 0;
+  let artistTabFadeProgress = 1;
+  let pressedArtistSegment = null;
+  let preferredFavoritesViewMode = "albums";
+  let favoritesModeBlend = 0;
+  let favoritesTabFadeProgress = 1;
+  let pressedFavoritesSegment = null;
+
+  let albumSortMode = "alphabetical";
+  let artistSortMode = "alphabetical";
+  let sortToastAlpha = 0;
+  let sortToastLabel = "";
+  let sortToastRemainingSeconds = 0;
+  let sortWheelOpen = false;
+  let sortWheelScope = "albums";
+  let sortWheelProgress = 0;
+  let sortWheelHoveredMode = null;
 
   let arcStartAngle = 0;
   let arcLastAngle = 0;
   let arcCurrentAngle = 0;
   let arcSignedSweepRadians = 0;
   let arcAbsoluteSweepRadians = 0;
+  let arcSweepDirection = 0;
+  let arcPeakSweepRadians = 0;
   let arcFeedbackAlpha = 0;
 
   let letterSearchActive = false;
@@ -656,6 +1141,13 @@ export function createLibraryController({
   let playlistSheetOpen = false;
   let playlistSheetIndex = 0;
   let playlistSheetProgress = 0;
+  let quickActionsOpen = false;
+  let quickActionsKind = null;
+  let quickActionsTargetId = null;
+  let quickActionsProgress = 0;
+  let quickActionsAutoCloseTimer = 0;
+  let pressedQuickAction = false;
+  let crateLongPressEligible = false;
   let deleteHoldActive = false;
   let deleteHoldProgress = 0;
   let deleteCompletedFlash = 0;
@@ -673,13 +1165,16 @@ export function createLibraryController({
   let pointerMovedDistance = 0;
 
   function computeCounts() {
-    const favoriteCount = catalog.allTracks.filter((trackEntry) => trackEntry.isFavorite).length;
+    const favoriteTracks = catalog.allTracks.filter((trackEntry) => trackEntry.isFavorite).length;
+    const favoriteAlbums = catalog.albums.filter((albumEntry) => albumEntry.isFavorite).length;
     return {
       tracks: catalog.allTracks.length,
       albums: catalog.albums.length,
       artists: catalog.artists.length,
       genres: catalog.genres.length,
-      favorites: favoriteCount,
+      favorites: favoriteTracks + favoriteAlbums,
+      favoriteTracks,
+      favoriteAlbums,
       playlists: playlists.length,
     };
   }
@@ -727,11 +1222,22 @@ export function createLibraryController({
     longPressSeconds = 0;
     longPressTriggered = false;
     deleteHoldActive = false;
+    pressedArtistSegment = null;
+    pressedFavoritesSegment = null;
+    pressedQuickAction = false;
+    crateLongPressEligible = false;
   }
 
   function resetTransientUiState() {
     playlistSheetOpen = false;
     playlistSheetProgress = 0;
+    quickActionsOpen = false;
+    quickActionsKind = null;
+    quickActionsTargetId = null;
+    quickActionsProgress = 0;
+    quickActionsAutoCloseTimer = 0;
+    pressedQuickAction = false;
+    crateLongPressEligible = false;
     deleteHoldActive = false;
     deleteHoldProgress = 0;
     deleteCompletedFlash = 0;
@@ -742,28 +1248,314 @@ export function createLibraryController({
     arcFeedbackAlpha = 0;
     arcSignedSweepRadians = 0;
     arcAbsoluteSweepRadians = 0;
+    arcSweepDirection = 0;
+    arcPeakSweepRadians = 0;
     rimSlabPullLevels.fill(0);
     pressedRowIndex = null;
     pressHighlightLevel = 0;
     pressFlashRowIndex = null;
     pressFlashLevel = 0;
+    artistModeBlend = preferredArtistViewMode === "songs" ? 1 : 0;
+    artistTabFadeProgress = 1;
+    pressedArtistSegment = null;
+    favoritesModeBlend = preferredFavoritesViewMode === "songs" ? 1 : 0;
+    favoritesTabFadeProgress = 1;
+    pressedFavoritesSegment = null;
+    sortToastAlpha = 0;
+    sortToastLabel = "";
+    sortToastRemainingSeconds = 0;
+    sortWheelOpen = false;
+    sortWheelScope = "albums";
+    sortWheelProgress = 0;
+    sortWheelHoveredMode = null;
     vinylLaunchTarget = 0;
     vinylLaunchProgress = 0;
     vinylLaunchAlbumId = null;
     vinylLaunchSource = "albums";
+    albumsTransitionMode = "none";
+    albumsTransitionProgress = 1;
+    albumsTransitionHubScroll = 0;
+    albumsTransitionAlbumId = null;
+    albumsTransitionCrateScroll = 0;
     backSwipeProgress = 0;
     cratePullUpProgress = 0;
     clearPointerState();
   }
 
   function resolveCrateAlbums(viewEntry) {
-    if (Array.isArray(viewEntry.albumIds) && viewEntry.albumIds.length > 0) {
+    if (viewEntry?.isFavoritesView) {
+      const favoriteAlbums = catalog.albums.filter((albumEntry) => Boolean(albumEntry.isFavorite));
+      return sortAlbumsByMode(favoriteAlbums, albumSortMode);
+    }
+    if (Array.isArray(viewEntry?.albumIds) && viewEntry.albumIds.length > 0) {
       const matchedAlbums = viewEntry.albumIds
         .map((albumId) => albumByIdMap.get(albumId))
         .filter(Boolean);
-      return sortAlphabeticallyBy(matchedAlbums, (albumEntry) => albumEntry.title);
+      return sortAlbumsByMode(matchedAlbums, albumSortMode);
     }
-    return catalog.albums;
+    return sortAlbumsByMode(catalog.albums, albumSortMode);
+  }
+
+  function resolveArtistTracks(albumIds) {
+    const albumIdList = Array.isArray(albumIds) ? albumIds : [];
+    const albumIdSet = new Set(albumIdList);
+    const seenTrackIds = new Set();
+    const collectedTracks = [];
+
+    for (const albumId of albumIdList) {
+      const targetAlbum = albumByIdMap.get(albumId);
+      if (!targetAlbum || !Array.isArray(targetAlbum.tracks)) {
+        continue;
+      }
+      for (const trackEntry of targetAlbum.tracks) {
+        if (!trackEntry || typeof trackEntry.id !== "string" || seenTrackIds.has(trackEntry.id)) {
+          continue;
+        }
+        seenTrackIds.add(trackEntry.id);
+        collectedTracks.push(trackEntry);
+      }
+    }
+
+    for (const trackEntry of catalog.allTracks) {
+      if (
+        trackEntry &&
+        typeof trackEntry.id === "string" &&
+        albumIdSet.has(trackEntry.albumId) &&
+        !seenTrackIds.has(trackEntry.id)
+      ) {
+        seenTrackIds.add(trackEntry.id);
+        collectedTracks.push(trackEntry);
+      }
+    }
+
+    return sortAlphabeticallyBy(collectedTracks, (trackEntry) => trackEntry.title);
+  }
+
+  function hitTestHeaderToggle(pointX, pointY, viewEntry) {
+    if (!viewEntry || (!viewEntry.isArtistView && !viewEntry.isFavoritesView)) {
+      return null;
+    }
+    if (
+      pointY >= LIBRARY_CONSTANTS.ARTIST_TOGGLE_HIT_TOP_Y &&
+      pointY <= LIBRARY_CONSTANTS.ARTIST_TOGGLE_HIT_BOTTOM_Y &&
+      Math.abs(pointX - DISPLAY_CENTER_PX) <= LIBRARY_CONSTANTS.ARTIST_TOGGLE_HIT_HALF_WIDTH_PX
+    ) {
+      return pointX < DISPLAY_CENTER_PX ? "albums" : "songs";
+    }
+    return null;
+  }
+
+  /**
+   * Switch the active Artist view in-place between `albums` (vinyl crate) and `songs` (A-Z list),
+   * preserving per-tab scroll positions and persisting the session preference across artists.
+   *
+   * @param {"albums" | "songs"} nextMode Target Artist tab mode.
+   */
+  function setArtistViewMode(nextMode) {
+    if (
+      (nextMode !== "albums" && nextMode !== "songs") ||
+      vinylLaunchTarget === 1 ||
+      playlistSheetOpen ||
+      quickActionsOpen ||
+      sortWheelOpen
+    ) {
+      return;
+    }
+    const currentView = getCurrentView();
+    if (!currentView || !currentView.isArtistView) {
+      return;
+    }
+    preferredArtistViewMode = nextMode;
+    if (currentView.artistViewMode === nextMode) {
+      return;
+    }
+
+    if (currentView.artistViewMode === "albums") {
+      currentView.albumsScrollPosition = currentView.scrollPosition;
+      currentView.albumsTargetIndex = currentView.targetIndex;
+    } else {
+      currentView.songsScrollPosition = currentView.scrollPosition;
+      currentView.songsTargetIndex = currentView.targetIndex;
+    }
+
+    currentView.artistViewMode = nextMode;
+    if (nextMode === "songs") {
+      currentView.kind = "tracks";
+      currentView.sourceType = "artist";
+      const artistTracks = resolveArtistTracks(currentView.albumIds);
+      currentView.subtitle = `${formatIntegerCount(artistTracks.length)} TRACKS \u00b7 A\u2013Z`;
+    } else {
+      currentView.kind = "albums";
+      delete currentView.sourceType;
+      currentView.subtitle = "ARTIST CRATE";
+    }
+
+    const maxScroll = getViewMaxScroll(currentView);
+    const restoredScroll =
+      nextMode === "songs"
+        ? Number(currentView.songsScrollPosition ?? 0)
+        : Number(currentView.albumsScrollPosition ?? 0);
+    const restoredTarget =
+      nextMode === "songs"
+        ? Number(currentView.songsTargetIndex ?? 0)
+        : Number(currentView.albumsTargetIndex ?? 0);
+    currentView.scrollPosition = clamp(
+      Number.isFinite(restoredScroll) ? restoredScroll : 0,
+      0,
+      maxScroll,
+    );
+    currentView.targetIndex = clamp(
+      Number.isFinite(restoredTarget) ? restoredTarget : 0,
+      0,
+      maxScroll,
+    );
+
+    pressedRowIndex = null;
+    pressHighlightLevel = 0;
+    pressFlashRowIndex = null;
+    pressFlashLevel = 0;
+    letterSearchActive = false;
+    letterSearchHudAlpha = 0;
+    arcFeedbackAlpha = 0;
+    cratePullUpProgress = 0;
+    artistTabFadeProgress = 0;
+  }
+
+  /**
+   * Switch the active Favorites view in-place between `albums` (liked albums crate)
+   * and `songs` (liked songs A-Z list), preserving per-tab scroll positions.
+   *
+   * @param {"albums" | "songs"} nextMode Target Favorites tab mode.
+   */
+  function setFavoritesViewMode(nextMode) {
+    if (
+      (nextMode !== "albums" && nextMode !== "songs") ||
+      vinylLaunchTarget === 1 ||
+      playlistSheetOpen ||
+      quickActionsOpen ||
+      sortWheelOpen
+    ) {
+      return;
+    }
+    const currentView = getCurrentView();
+    if (!currentView || !currentView.isFavoritesView) {
+      return;
+    }
+    preferredFavoritesViewMode = nextMode;
+    if (currentView.favoritesViewMode === nextMode) {
+      return;
+    }
+
+    if (currentView.favoritesViewMode === "albums") {
+      currentView.albumsScrollPosition = currentView.scrollPosition;
+      currentView.albumsTargetIndex = currentView.targetIndex;
+    } else {
+      currentView.songsScrollPosition = currentView.scrollPosition;
+      currentView.songsTargetIndex = currentView.targetIndex;
+    }
+
+    currentView.favoritesViewMode = nextMode;
+    if (nextMode === "songs") {
+      currentView.kind = "tracks";
+      currentView.sourceType = "favorites";
+      currentView.subtitle = `${formatIntegerCount(counts.favoriteTracks)} HEARTED TRACKS`;
+    } else {
+      currentView.kind = "albums";
+      currentView.sourceType = "favorite-albums";
+      currentView.subtitle = `${formatIntegerCount(counts.favoriteAlbums)} HEARTED ALBUMS`;
+    }
+
+    const maxScroll = getViewMaxScroll(currentView);
+    const restoredScroll =
+      nextMode === "songs"
+        ? Number(currentView.songsScrollPosition ?? 0)
+        : Number(currentView.albumsScrollPosition ?? 0);
+    const restoredTarget =
+      nextMode === "songs"
+        ? Number(currentView.songsTargetIndex ?? 0)
+        : Number(currentView.albumsTargetIndex ?? 0);
+    currentView.scrollPosition = clamp(
+      Number.isFinite(restoredScroll) ? restoredScroll : 0,
+      0,
+      maxScroll,
+    );
+    currentView.targetIndex = clamp(
+      Number.isFinite(restoredTarget) ? restoredTarget : 0,
+      0,
+      maxScroll,
+    );
+
+    pressedRowIndex = null;
+    pressHighlightLevel = 0;
+    pressFlashRowIndex = null;
+    pressFlashLevel = 0;
+    letterSearchActive = false;
+    letterSearchHudAlpha = 0;
+    arcFeedbackAlpha = 0;
+    cratePullUpProgress = 0;
+    favoritesTabFadeProgress = 0;
+  }
+
+  function applySortMode(scope, nextMode) {
+    if (!COLLECTION_SORT_MODES.includes(nextMode)) {
+      return;
+    }
+    if (scope === "artists") {
+      artistSortMode = nextMode;
+    } else {
+      albumSortMode = nextMode;
+    }
+    sortToastLabel = COLLECTION_SORT_MODE_LABELS[nextMode].toastLabel;
+    sortToastRemainingSeconds = LIBRARY_CONSTANTS.SORT_TOAST_DURATION_SECONDS;
+    sortToastAlpha = 1;
+
+    const currentView = getCurrentView();
+    const matchesView =
+      (scope === "artists" && currentView?.kind === "artists") ||
+      (scope === "albums" && currentView?.kind === "albums");
+    if (matchesView) {
+      currentView.scrollPosition = 0;
+      currentView.targetIndex = 0;
+      letterSearchActive = false;
+      letterSearchIndex = 0;
+      letterSearchHudAlpha = 0;
+    }
+  }
+
+  /**
+   * Update the active Album Crate sort mode, jump to index 0, and trigger toast feedback.
+   *
+   * @param {"alphabetical" | "reverse-alphabetical" | "liked-first" | "recent" | "oldest"} nextMode Target album sort mode.
+   */
+  function setAlbumSortMode(nextMode) {
+    applySortMode("albums", nextMode);
+  }
+
+  /**
+   * Cycle to the next Album Crate sort mode (A-Z -> Z-A -> Liked First -> Recent -> Oldest).
+   */
+  function cycleAlbumSortMode() {
+    const currentIndex = COLLECTION_SORT_MODES.indexOf(albumSortMode);
+    const nextIndex = (currentIndex + 1) % COLLECTION_SORT_MODES.length;
+    applySortMode("albums", COLLECTION_SORT_MODES[nextIndex]);
+  }
+
+  /**
+   * Update the active Artists list sort mode, jump to index 0, and trigger toast feedback.
+   *
+   * @param {"alphabetical" | "reverse-alphabetical" | "liked-first" | "recent" | "oldest"} nextMode Target artist sort mode.
+   */
+  function setArtistSortMode(nextMode) {
+    applySortMode("artists", nextMode);
+  }
+
+  /**
+   * Cycle to the next Artists list sort mode (A-Z -> Z-A -> Liked First -> Recent -> Oldest).
+   */
+  function cycleArtistSortMode() {
+    const currentIndex = COLLECTION_SORT_MODES.indexOf(artistSortMode);
+    const nextIndex = (currentIndex + 1) % COLLECTION_SORT_MODES.length;
+    applySortMode("artists", COLLECTION_SORT_MODES[nextIndex]);
   }
 
   function resolveViewRows(viewEntry) {
@@ -796,13 +1588,15 @@ export function createLibraryController({
     }
 
     if (viewEntry.kind === "artists") {
-      return catalog.artists.map((artistEntry) => ({
+      return sortArtistsByMode(catalog.artists, artistSortMode).map((artistEntry) => ({
         id: artistEntry.id,
         rowType: "artist",
         title: artistEntry.name,
         countLabel: artistEntry.countLabel,
         countText: artistEntry.countLabel,
         albumIds: artistEntry.albumIds.slice(),
+        isFavorite: Boolean(artistEntry.isFavorite),
+        addedAt: Number.isFinite(Number(artistEntry.addedAt)) ? Number(artistEntry.addedAt) : 0,
       }));
     }
 
@@ -847,15 +1641,22 @@ export function createLibraryController({
         const playlistTrackIds = Array.isArray(targetPlaylist?.trackIds)
           ? targetPlaylist.trackIds
           : [];
-        trackEntries = sortAlphabeticallyBy(
-          playlistTrackIds.map((trackId) => trackByIdMap.get(trackId)).filter(Boolean),
-          (trackEntry) => trackEntry.title,
-        );
+        trackEntries = playlistTrackIds
+          .map((trackId) => trackByIdMap.get(trackId))
+          .filter(Boolean);
+      } else if (viewEntry.sourceType === "artist") {
+        trackEntries = resolveArtistTracks(viewEntry.albumIds);
       } else if (viewEntry.sourceType === "genre") {
-        const albumIdSet = new Set(Array.isArray(viewEntry.albumIds) ? viewEntry.albumIds : []);
-        trackEntries = catalog.allTracks.filter((trackEntry) =>
-          albumIdSet.has(trackEntry.albumId),
-        );
+        if (typeof viewEntry.title === "string" && viewEntry.title.trim().length > 0) {
+          trackEntries = catalog.allTracks.filter((trackEntry) =>
+            trackMatchesGenreName(trackEntry, viewEntry.title),
+          );
+        } else {
+          const albumIdSet = new Set(Array.isArray(viewEntry.albumIds) ? viewEntry.albumIds : []);
+          trackEntries = catalog.allTracks.filter((trackEntry) =>
+            albumIdSet.has(trackEntry.albumId),
+          );
+        }
       } else {
         trackEntries = catalog.allTracks;
       }
@@ -873,6 +1674,7 @@ export function createLibraryController({
         trackNumber: trackEntry.trackNumber,
         audioUrl: trackEntry.audioUrl || null,
         showTrackNumbers: viewEntry.sourceType === "album",
+        showAlbumSubtitle: viewEntry.sourceType === "artist",
       }));
     }
 
@@ -880,19 +1682,40 @@ export function createLibraryController({
   }
 
   function resolveViewLetterEntries(viewEntry) {
+    if (viewEntry.kind === "albums") {
+      const crateAlbums = resolveCrateAlbums(viewEntry);
+      if (crateAlbums.length < MIN_ALPHABETICAL_INDEX_COUNT) {
+        return [];
+      }
+      const anchors = buildAlbumSeekIndex(crateAlbums, albumSortMode);
+      return anchors.length >= MIN_LETTER_GROUPS_FOR_SEEK ? anchors : [];
+    }
+
+    if (viewEntry.kind === "artists") {
+      const sortedArtists = resolveViewRows(viewEntry);
+      if (sortedArtists.length < MIN_ALPHABETICAL_INDEX_COUNT) {
+        return [];
+      }
+      const anchors = buildCollectionSeekIndex(
+        sortedArtists,
+        artistSortMode,
+        (entry) => entry?.title ?? entry?.name ?? "",
+      );
+      return anchors.length >= MIN_LETTER_GROUPS_FOR_SEEK ? anchors : [];
+    }
+
     const isAlphabeticalView =
-      viewEntry.kind === "albums" ||
-      viewEntry.kind === "artists" ||
       viewEntry.kind === "genres" ||
       viewEntry.kind === "playlists" ||
-      (viewEntry.kind === "tracks" && viewEntry.sourceType !== "album");
+      (viewEntry.kind === "tracks" &&
+        viewEntry.sourceType !== "album" &&
+        viewEntry.sourceType !== "playlist");
 
     if (!isAlphabeticalView) {
       return [];
     }
 
-    const entries =
-      viewEntry.kind === "albums" ? resolveCrateAlbums(viewEntry) : resolveViewRows(viewEntry);
+    const entries = resolveViewRows(viewEntry);
     if (entries.length < MIN_ALPHABETICAL_INDEX_COUNT) {
       return [];
     }
@@ -951,6 +1774,13 @@ export function createLibraryController({
 
   function pushView(viewSpec) {
     playlistSheetOpen = false;
+    quickActionsOpen = false;
+    quickActionsKind = null;
+    quickActionsTargetId = null;
+    quickActionsAutoCloseTimer = 0;
+    pressedQuickAction = false;
+    sortWheelOpen = false;
+    sortWheelHoveredMode = null;
     deleteHoldActive = false;
     deleteHoldProgress = 0;
     letterSearchActive = false;
@@ -960,11 +1790,48 @@ export function createLibraryController({
     pressHighlightLevel = 0;
     pressFlashRowIndex = null;
     pressFlashLevel = 0;
+    artistModeBlend = preferredArtistViewMode === "songs" ? 1 : 0;
+    artistTabFadeProgress = 1;
+    pressedArtistSegment = null;
+    favoritesModeBlend = preferredFavoritesViewMode === "songs" ? 1 : 0;
+    favoritesTabFadeProgress = 1;
+    pressedFavoritesSegment = null;
     vinylLaunchTarget = 0;
     vinylLaunchProgress = 0;
+    albumsTransitionMode = "none";
+    albumsTransitionProgress = 1;
     viewStack.push(viewSpec);
     transitionDirection = 1;
     transitionProgress = 0;
+  }
+
+  function openQuickActions(kind, targetId) {
+    if (typeof targetId !== "string" || targetId.length === 0) {
+      return;
+    }
+    if (kind === "album" && !albumByIdMap.has(targetId)) {
+      return;
+    }
+    if (kind === "artist" && !artistByIdMap.has(targetId)) {
+      return;
+    }
+    quickActionsKind = kind;
+    quickActionsTargetId = targetId;
+    quickActionsOpen = true;
+    quickActionsAutoCloseTimer = 0;
+    pressedQuickAction = false;
+    pressedRowIndex = null;
+    pressHighlightLevel = 0;
+    letterSearchActive = false;
+    letterSearchHudAlpha = 0;
+  }
+
+  function openAlbumQuickActions(albumId) {
+    openQuickActions("album", albumId);
+  }
+
+  function openArtistQuickActions(artistId) {
+    openQuickActions("artist", artistId);
   }
 
   function openPlaylistActionSheet(playlistIndex) {
@@ -981,6 +1848,13 @@ export function createLibraryController({
 
   function launchVinyl(albumId, sourceKind, trackId, sourceSpec) {
     playlistSheetOpen = false;
+    quickActionsOpen = false;
+    quickActionsAutoCloseTimer = 0;
+    pressedQuickAction = false;
+    sortWheelOpen = false;
+    sortWheelHoveredMode = null;
+    albumsTransitionMode = "none";
+    albumsTransitionProgress = 1;
     pressedRowIndex = null;
     pressHighlightLevel = 0;
     vinylLaunchAlbumId = albumId;
@@ -1002,30 +1876,7 @@ export function createLibraryController({
     const maxScroll = getViewMaxScroll(currentView);
     const letterEntries = resolveViewLetterEntries(currentView);
 
-    arcSignedSweepRadians += deltaAngle;
-    arcAbsoluteSweepRadians += Math.abs(deltaAngle);
     arcFeedbackAlpha = 1;
-
-    if (
-      !letterSearchActive &&
-      letterEntries.length > 0 &&
-      arcAbsoluteSweepRadians >= LIBRARY_CONSTANTS.LETTER_SEARCH_THRESHOLD_RADIANS
-    ) {
-      letterSearchActive = true;
-      letterSearchAccumulator = 0;
-      const currentTopIndex = Math.round(currentView.scrollPosition);
-      let matchedLetterIndex = 0;
-      for (let letterIdx = 0; letterIdx < letterEntries.length; letterIdx += 1) {
-        if (letterEntries[letterIdx].itemIndex <= currentTopIndex) {
-          matchedLetterIndex = letterIdx;
-        }
-      }
-      letterSearchIndex = matchedLetterIndex;
-      const alignedItemIndex = clamp(letterEntries[letterSearchIndex].itemIndex, 0, maxScroll);
-      currentView.scrollPosition = alignedItemIndex;
-      currentView.targetIndex = alignedItemIndex;
-      return;
-    }
 
     if (letterSearchActive && letterEntries.length > 0) {
       letterSearchAccumulator += deltaAngle;
@@ -1040,6 +1891,51 @@ export function createLibraryController({
       const jumpedItemIndex = clamp(letterEntries[letterSearchIndex].itemIndex, 0, maxScroll);
       currentView.scrollPosition = jumpedItemIndex;
       currentView.targetIndex = jumpedItemIndex;
+      return;
+    }
+
+    arcSignedSweepRadians += deltaAngle;
+    if (arcSweepDirection === 0) {
+      arcSweepDirection = Math.sign(arcSignedSweepRadians);
+      arcPeakSweepRadians = arcSignedSweepRadians;
+    } else {
+      const directedSweepRadians = arcSignedSweepRadians * arcSweepDirection;
+      const directedPeakRadians = arcPeakSweepRadians * arcSweepDirection;
+      const pullbackRadians = directedPeakRadians - directedSweepRadians;
+      if (directedSweepRadians > directedPeakRadians) {
+        arcPeakSweepRadians = arcSignedSweepRadians;
+      } else if (
+        directedPeakRadians >= LIBRARY_CONSTANTS.ARC_RADIANS_PER_STEP &&
+        pullbackRadians >= LIBRARY_CONSTANTS.ARC_RADIANS_PER_STEP
+      ) {
+        arcStartAngle = normalizeAngleDelta(arcStartAngle + arcPeakSweepRadians, 0);
+        arcSignedSweepRadians -= arcPeakSweepRadians;
+        arcSweepDirection = Math.sign(arcSignedSweepRadians);
+        arcPeakSweepRadians = arcSignedSweepRadians;
+      } else if (directedSweepRadians < 0) {
+        arcSweepDirection = Math.sign(arcSignedSweepRadians);
+        arcPeakSweepRadians = arcSignedSweepRadians;
+      }
+    }
+    arcAbsoluteSweepRadians = Math.abs(arcSignedSweepRadians);
+
+    if (
+      letterEntries.length > 0 &&
+      arcAbsoluteSweepRadians >= LIBRARY_CONSTANTS.LETTER_SEARCH_THRESHOLD_RADIANS
+    ) {
+      letterSearchActive = true;
+      letterSearchAccumulator = 0;
+      const currentTopIndex = Math.round(currentView.scrollPosition);
+      let matchedLetterIndex = 0;
+      for (let letterIndex = 0; letterIndex < letterEntries.length; letterIndex += 1) {
+        if (letterEntries[letterIndex].itemIndex <= currentTopIndex) {
+          matchedLetterIndex = letterIndex;
+        }
+      }
+      letterSearchIndex = matchedLetterIndex;
+      const alignedItemIndex = clamp(letterEntries[letterSearchIndex].itemIndex, 0, maxScroll);
+      currentView.scrollPosition = alignedItemIndex;
+      currentView.targetIndex = alignedItemIndex;
       return;
     }
 
@@ -1062,6 +1958,7 @@ export function createLibraryController({
     const normalized = normalizeCatalogPayload(nextCatalog);
     catalog = normalized.catalog;
     albumByIdMap = normalized.albumByIdMap;
+    artistByIdMap = normalized.artistByIdMap;
     trackByIdMap = normalized.trackByIdMap;
     playlists = normalized.playlists;
     syncCounts();
@@ -1076,7 +1973,7 @@ export function createLibraryController({
     resetTransientUiState();
     viewStack = [createHubView()];
     transitionDirection = 1;
-    transitionProgress = 0;
+    transitionProgress = options?.skipEntryTransition ? 1 : 0;
     if (Number.isFinite(options?.vinylRotationRadians)) {
       vinylRotationRadians = options.vinylRotationRadians;
     }
@@ -1215,9 +2112,105 @@ export function createLibraryController({
 
     syncCounts();
     for (const viewEntry of viewStack) {
-      if (viewEntry.kind === "tracks" && viewEntry.sourceType === "favorites") {
-        viewEntry.subtitle = `${formatIntegerCount(counts.favorites)} HEARTED TRACKS`;
+      if (viewEntry.isFavoritesView) {
+        if (viewEntry.favoritesViewMode === "songs") {
+          viewEntry.subtitle = `${formatIntegerCount(counts.favoriteTracks)} HEARTED TRACKS`;
+          const maxScroll = getViewMaxScroll(viewEntry);
+          viewEntry.scrollPosition = clamp(viewEntry.scrollPosition, 0, maxScroll);
+          viewEntry.targetIndex = clamp(viewEntry.targetIndex, 0, maxScroll);
+        }
+      } else if (viewEntry.kind === "tracks" && viewEntry.sourceType === "favorites") {
+        viewEntry.subtitle = `${formatIntegerCount(counts.favoriteTracks)} HEARTED TRACKS`;
       }
+    }
+  }
+
+  /**
+   * Update favorite status for `albumId` across `catalog.albums` and `albumByIdMap`
+   * independently of track favorites, and synchronize counts and open Favorites views.
+   *
+   * @param {string} albumId Album identifier to update.
+   * @param {boolean} isFavorite Updated album favorite state.
+   * @param {object} [options={}] Optional notification flags.
+   * @param {boolean} [options.notify=false] Whether to invoke `onToggleAlbumFavorite`.
+   */
+  function setAlbumFavorite(albumId, isFavorite, { notify = false } = {}) {
+    if (typeof albumId !== "string" || albumId.length === 0) {
+      return;
+    }
+    const nextFavorite = Boolean(isFavorite);
+    let albumMatched = false;
+
+    catalog.albums = catalog.albums.map((albumEntry) => {
+      if (albumEntry.id !== albumId) {
+        return albumEntry;
+      }
+      albumMatched = true;
+      return { ...albumEntry, isFavorite: nextFavorite };
+    });
+
+    const mappedAlbum = albumByIdMap.get(albumId);
+    if (mappedAlbum) {
+      albumByIdMap.set(albumId, { ...mappedAlbum, isFavorite: nextFavorite });
+      albumMatched = true;
+    }
+
+    if (!albumMatched) {
+      return;
+    }
+
+    syncCounts();
+    for (const viewEntry of viewStack) {
+      if (viewEntry.isFavoritesView && viewEntry.favoritesViewMode === "albums") {
+        viewEntry.subtitle = `${formatIntegerCount(counts.favoriteAlbums)} HEARTED ALBUMS`;
+        const maxScroll = getViewMaxScroll(viewEntry);
+        viewEntry.scrollPosition = clamp(viewEntry.scrollPosition, 0, maxScroll);
+        viewEntry.targetIndex = clamp(viewEntry.targetIndex, 0, maxScroll);
+      }
+    }
+
+    if (notify && typeof onToggleAlbumFavorite === "function") {
+      onToggleAlbumFavorite(albumId, nextFavorite);
+    }
+  }
+
+  /**
+   * Update liked status for `artistId` across `catalog.artists` and `artistByIdMap`
+   * without affecting `counts.favorites` or `Library/Favorites`.
+   *
+   * @param {string} artistId Artist identifier to update.
+   * @param {boolean} isFavorite Updated artist liked state.
+   * @param {object} [options={}] Optional notification flags.
+   * @param {boolean} [options.notify=false] Whether to invoke `onToggleArtistFavorite`.
+   */
+  function setArtistFavorite(artistId, isFavorite, { notify = false } = {}) {
+    if (typeof artistId !== "string" || artistId.length === 0) {
+      return;
+    }
+    const nextFavorite = Boolean(isFavorite);
+    let artistMatched = false;
+
+    catalog.artists = catalog.artists.map((artistEntry) => {
+      if (artistEntry.id !== artistId) {
+        return artistEntry;
+      }
+      artistMatched = true;
+      return { ...artistEntry, isFavorite: nextFavorite };
+    });
+
+    const mappedArtist = artistByIdMap.get(artistId);
+    if (mappedArtist) {
+      artistByIdMap.set(artistId, { ...mappedArtist, isFavorite: nextFavorite });
+      artistMatched = true;
+    }
+
+    if (!artistMatched) {
+      return;
+    }
+
+    syncCounts();
+    if (notify && typeof onToggleArtistFavorite === "function") {
+      onToggleArtistFavorite(artistId, nextFavorite);
     }
   }
 
@@ -1281,12 +2274,60 @@ export function createLibraryController({
       deleteHoldProgress = 0;
       return;
     }
+    if (quickActionsOpen) {
+      quickActionsOpen = false;
+      quickActionsAutoCloseTimer = 0;
+      pressedQuickAction = false;
+      return;
+    }
+    if (sortWheelOpen) {
+      sortWheelOpen = false;
+      sortWheelHoveredMode = null;
+      return;
+    }
     if (viewStack.length > 1) {
-      viewStack.pop();
+      const poppedView = viewStack.pop();
       const restoredView = getCurrentView();
+      if (
+        poppedView?.kind === "albums" &&
+        poppedView.openedFromHubAlbumsTile &&
+        restoredView?.kind === "hub"
+      ) {
+        const maxHubScroll = getViewMaxScroll(restoredView);
+        const preservedScroll = clamp(
+          Number.isFinite(restoredView.scrollPosition) ? restoredView.scrollPosition : 0,
+          0,
+          maxHubScroll,
+        );
+        restoredView.scrollPosition = preservedScroll;
+        restoredView.targetIndex = clamp(Math.round(preservedScroll), 0, maxHubScroll);
+
+        const focusedCrateAlbum = resolveFocusedCrateAlbum(poppedView);
+        albumsTransitionMode = "albums-to-hub";
+        albumsTransitionProgress = 0;
+        albumsTransitionHubScroll = preservedScroll;
+        albumsTransitionAlbumId = focusedCrateAlbum?.id || catalog.albums[0]?.id || null;
+        albumsTransitionCrateScroll = Number.isFinite(poppedView.scrollPosition)
+          ? poppedView.scrollPosition
+          : 0;
+        transitionDirection = -1;
+        transitionProgress = 1;
+        return;
+      }
+
+      albumsTransitionMode = "none";
+      albumsTransitionProgress = 1;
       if (restoredView.kind === "hub") {
         restoredView.scrollPosition = 0;
         restoredView.targetIndex = 0;
+      }
+      if (restoredView?.isArtistView) {
+        artistModeBlend = restoredView.artistViewMode === "songs" ? 1 : 0;
+        artistTabFadeProgress = 1;
+      }
+      if (restoredView?.isFavoritesView) {
+        favoritesModeBlend = restoredView.favoritesViewMode === "songs" ? 1 : 0;
+        favoritesTabFadeProgress = 1;
       }
       transitionDirection = -1;
       transitionProgress = 0;
@@ -1306,6 +2347,8 @@ export function createLibraryController({
     if (
       vinylLaunchTarget === 1 ||
       playlistSheetOpen ||
+      quickActionsOpen ||
+      sortWheelOpen ||
       typeof direction !== "number" ||
       !Number.isFinite(direction)
     ) {
@@ -1367,7 +2410,7 @@ export function createLibraryController({
    * Open the tracklist view for the currently focused album in an Albums crate.
    */
   function openFocusedAlbumTracks() {
-    if (vinylLaunchTarget === 1 || playlistSheetOpen) {
+    if (vinylLaunchTarget === 1 || playlistSheetOpen || quickActionsOpen || sortWheelOpen) {
       return;
     }
     const currentView = getCurrentView();
@@ -1405,9 +2448,35 @@ export function createLibraryController({
             queueSource: "playlist",
             playlistId: playlistEntry.id,
             albumId: firstTrack.albumId,
+            shuffleOverride: false,
           });
         }
       }
+      return;
+    }
+
+    if (quickActionsOpen) {
+      if (quickActionsKind === "artist") {
+        const targetArtist = artistByIdMap.get(quickActionsTargetId);
+        if (targetArtist) {
+          setArtistFavorite(targetArtist.id, !targetArtist.isFavorite, { notify: true });
+          quickActionsAutoCloseTimer = LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_AUTO_CLOSE_SECONDS;
+        } else {
+          quickActionsOpen = false;
+        }
+      } else {
+        const targetAlbum = albumByIdMap.get(quickActionsTargetId);
+        if (targetAlbum) {
+          setAlbumFavorite(targetAlbum.id, !targetAlbum.isFavorite, { notify: true });
+          quickActionsAutoCloseTimer = LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_AUTO_CLOSE_SECONDS;
+        } else {
+          quickActionsOpen = false;
+        }
+      }
+      return;
+    }
+
+    if (sortWheelOpen) {
       return;
     }
 
@@ -1462,13 +2531,23 @@ export function createLibraryController({
       }
 
       if (sectionId === "albums") {
+        const capturedHubScroll = Number.isFinite(currentView.scrollPosition)
+          ? currentView.scrollPosition
+          : 0;
         pushView({
           kind: "albums",
           title: "Albums",
           subtitle: "VINYL CRATE",
           scrollPosition: 0,
           targetIndex: 0,
+          openedFromHubAlbumsTile: true,
         });
+        albumsTransitionMode = "hub-to-albums";
+        albumsTransitionProgress = 0;
+        albumsTransitionHubScroll = capturedHubScroll;
+        albumsTransitionAlbumId = catalog.albums[0]?.id || null;
+        albumsTransitionCrateScroll = 0;
+        transitionProgress = 1;
       } else if (sectionId === "artists") {
         pushView({
           kind: "artists",
@@ -1494,14 +2573,27 @@ export function createLibraryController({
           targetIndex: 0,
         });
       } else if (sectionId === "favorites") {
+        const initialMode = preferredFavoritesViewMode === "songs" ? "songs" : "albums";
+        const favoritesSubtitle =
+          initialMode === "songs"
+            ? `${formatIntegerCount(counts.favoriteTracks)} HEARTED TRACKS`
+            : `${formatIntegerCount(counts.favoriteAlbums)} HEARTED ALBUMS`;
         pushView({
-          kind: "tracks",
-          sourceType: "favorites",
+          isFavoritesView: true,
+          favoritesViewMode: initialMode,
+          kind: initialMode === "songs" ? "tracks" : "albums",
+          sourceType: initialMode === "songs" ? "favorites" : "favorite-albums",
           title: "Favorites",
-          subtitle: `${formatIntegerCount(counts.favorites)} HEARTED TRACKS`,
+          subtitle: favoritesSubtitle,
           scrollPosition: 0,
           targetIndex: 0,
+          albumsScrollPosition: 0,
+          albumsTargetIndex: 0,
+          songsScrollPosition: 0,
+          songsTargetIndex: 0,
         });
+        favoritesModeBlend = initialMode === "songs" ? 1 : 0;
+        favoritesTabFadeProgress = 1;
       } else {
         pushView({
           kind: "tracks",
@@ -1516,14 +2608,31 @@ export function createLibraryController({
     }
 
     if (currentView.kind === "artists") {
+      const initialMode = preferredArtistViewMode === "songs" ? "songs" : "albums";
+      const artistAlbumIds = selectedRow.albumIds.slice();
+      const artistSubtitle =
+        initialMode === "songs"
+          ? `${formatIntegerCount(resolveArtistTracks(artistAlbumIds).length)} TRACKS \u00b7 A\u2013Z`
+          : "ARTIST CRATE";
       pushView({
-        kind: "albums",
+        isArtistView: true,
+        artistId: selectedRow.id,
+        artistName: selectedRow.title,
+        artistViewMode: initialMode,
+        kind: initialMode === "songs" ? "tracks" : "albums",
+        ...(initialMode === "songs" ? { sourceType: "artist" } : {}),
         title: selectedRow.title,
-        subtitle: "ARTIST CRATE",
-        albumIds: selectedRow.albumIds.slice(),
+        subtitle: artistSubtitle,
+        albumIds: artistAlbumIds,
         scrollPosition: 0,
         targetIndex: 0,
+        albumsScrollPosition: 0,
+        albumsTargetIndex: 0,
+        songsScrollPosition: 0,
+        songsTargetIndex: 0,
       });
+      artistModeBlend = initialMode === "songs" ? 1 : 0;
+      artistTabFadeProgress = 1;
       return;
     }
 
@@ -1571,6 +2680,13 @@ export function createLibraryController({
           queueSource: "favorites",
           albumId: selectedRow.albumId,
         };
+      } else if (currentView.sourceType === "artist") {
+        sourceSpec = {
+          queueSource: "artist",
+          artistName: currentView.artistName || currentView.title,
+          artistAlbumIds: Array.isArray(currentView.albumIds) ? currentView.albumIds.slice() : [],
+          albumId: selectedRow.albumId,
+        };
       } else if (currentView.sourceType === "genre") {
         sourceSpec = {
           queueSource: "genre",
@@ -1611,6 +2727,18 @@ export function createLibraryController({
       );
     }
 
+    if (albumsTransitionMode !== "none") {
+      albumsTransitionProgress = clamp(
+        albumsTransitionProgress +
+          deltaSeconds / LIBRARY_CONSTANTS.ALBUMS_TRANSITION_DURATION_SECONDS,
+        0,
+        1,
+      );
+      if (albumsTransitionProgress >= 1) {
+        albumsTransitionMode = "none";
+      }
+    }
+
     if (vinylLaunchTarget === 1 && vinylLaunchProgress < 1) {
       vinylLaunchProgress = clamp(
         vinylLaunchProgress + deltaSeconds / LIBRARY_CONSTANTS.VINYL_LAUNCH_DURATION_SECONDS,
@@ -1630,6 +2758,61 @@ export function createLibraryController({
     playlistSheetProgress = lerp(playlistSheetProgress, sheetTarget, sheetFollow);
     if (Math.abs(playlistSheetProgress - sheetTarget) < SHEET_SETTLE_EPSILON) {
       playlistSheetProgress = sheetTarget;
+    }
+
+    const quickActionsTarget = quickActionsOpen ? 1 : 0;
+    quickActionsProgress = lerp(quickActionsProgress, quickActionsTarget, sheetFollow);
+    if (Math.abs(quickActionsProgress - quickActionsTarget) < SHEET_SETTLE_EPSILON) {
+      quickActionsProgress = quickActionsTarget;
+    }
+
+    const sortWheelTarget = sortWheelOpen ? 1 : 0;
+    sortWheelProgress = lerp(sortWheelProgress, sortWheelTarget, sheetFollow);
+    if (Math.abs(sortWheelProgress - sortWheelTarget) < SHEET_SETTLE_EPSILON) {
+      sortWheelProgress = sortWheelTarget;
+    }
+    if (quickActionsAutoCloseTimer > 0) {
+      quickActionsAutoCloseTimer = Math.max(0, quickActionsAutoCloseTimer - deltaSeconds);
+      if (quickActionsAutoCloseTimer === 0) {
+        quickActionsOpen = false;
+        pressedQuickAction = false;
+      }
+    }
+
+    const artistModeTarget =
+      currentView.isArtistView && currentView.artistViewMode === "songs" ? 1 : 0;
+    const artistModeFollow = 1 - Math.exp(-ARTIST_MODE_BLEND_RATE * deltaSeconds);
+    artistModeBlend = lerp(artistModeBlend, artistModeTarget, artistModeFollow);
+    if (Math.abs(artistModeBlend - artistModeTarget) < ARTIST_MODE_SETTLE_EPSILON) {
+      artistModeBlend = artistModeTarget;
+    }
+    if (artistTabFadeProgress < 1) {
+      artistTabFadeProgress = clamp(
+        artistTabFadeProgress + deltaSeconds / ARTIST_TAB_FADE_DURATION_SECONDS,
+        0,
+        1,
+      );
+    }
+
+    const favoritesModeTarget =
+      currentView.isFavoritesView && currentView.favoritesViewMode === "songs" ? 1 : 0;
+    favoritesModeBlend = lerp(favoritesModeBlend, favoritesModeTarget, artistModeFollow);
+    if (Math.abs(favoritesModeBlend - favoritesModeTarget) < ARTIST_MODE_SETTLE_EPSILON) {
+      favoritesModeBlend = favoritesModeTarget;
+    }
+    if (favoritesTabFadeProgress < 1) {
+      favoritesTabFadeProgress = clamp(
+        favoritesTabFadeProgress + deltaSeconds / ARTIST_TAB_FADE_DURATION_SECONDS,
+        0,
+        1,
+      );
+    }
+
+    if (sortToastRemainingSeconds > 0) {
+      sortToastRemainingSeconds = Math.max(0, sortToastRemainingSeconds - deltaSeconds);
+      sortToastAlpha = clamp(sortToastRemainingSeconds / SORT_TOAST_FADE_WINDOW_SECONDS, 0, 1);
+    } else {
+      sortToastAlpha = 0;
     }
 
     const pressTarget = pressedRowIndex !== null ? 1 : 0;
@@ -1654,6 +2837,7 @@ export function createLibraryController({
       (pointerMode === "list" || pointerMode === "rim-pending") &&
       currentView.kind === "playlists" &&
       !playlistSheetOpen &&
+      !quickActionsOpen &&
       pressedRowIndex !== null &&
       pointerMovedDistance < LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX &&
       !longPressTriggered
@@ -1663,6 +2847,71 @@ export function createLibraryController({
         longPressTriggered = true;
         pointerMode = "sheet";
         openPlaylistActionSheet(pressedRowIndex);
+      }
+    }
+
+    if (
+      pointerActive &&
+      (pointerMode === "list" || pointerMode === "rim-pending") &&
+      currentView.kind === "artists" &&
+      !playlistSheetOpen &&
+      !quickActionsOpen &&
+      !sortWheelOpen &&
+      pressedRowIndex !== null &&
+      pointerMovedDistance < LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX &&
+      !longPressTriggered
+    ) {
+      longPressSeconds += deltaSeconds;
+      if (longPressSeconds >= LIBRARY_CONSTANTS.LONG_PRESS_DURATION_SECONDS) {
+        const artistRows = resolveViewRows(currentView);
+        const targetArtistRow = artistRows[pressedRowIndex];
+        if (targetArtistRow) {
+          longPressTriggered = true;
+          pointerMode = "quick-actions";
+          openArtistQuickActions(targetArtistRow.id);
+        }
+      }
+    }
+
+    if (
+      pointerActive &&
+      pointerMode === "sort-button" &&
+      (currentView.kind === "albums" || currentView.kind === "artists") &&
+      !playlistSheetOpen &&
+      !quickActionsOpen &&
+      !sortWheelOpen &&
+      pointerMovedDistance < LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX &&
+      !longPressTriggered
+    ) {
+      longPressSeconds += deltaSeconds;
+      if (longPressSeconds >= LIBRARY_CONSTANTS.SORT_WHEEL_LONG_PRESS_SECONDS) {
+        longPressTriggered = true;
+        pointerMode = "sort-wheel";
+        sortWheelScope = currentView.kind === "artists" ? "artists" : "albums";
+        sortWheelOpen = true;
+        sortWheelHoveredMode = null;
+      }
+    }
+
+    if (
+      pointerActive &&
+      (pointerMode === "crate" || pointerMode === "rim-pending") &&
+      currentView.kind === "albums" &&
+      crateLongPressEligible &&
+      !playlistSheetOpen &&
+      !quickActionsOpen &&
+      !sortWheelOpen &&
+      pointerMovedDistance < LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX &&
+      !longPressTriggered
+    ) {
+      longPressSeconds += deltaSeconds;
+      if (longPressSeconds >= LIBRARY_CONSTANTS.LONG_PRESS_DURATION_SECONDS) {
+        const focusedAlbum = resolveFocusedCrateAlbum(currentView);
+        if (focusedAlbum) {
+          longPressTriggered = true;
+          pointerMode = "quick-actions";
+          openAlbumQuickActions(focusedAlbum.id);
+        }
       }
     }
 
@@ -1731,8 +2980,6 @@ export function createLibraryController({
           targetPull = 1.0;
         } else if (sliceDistance === 1) {
           targetPull = RIM_SLAB_NEIGHBOR_ONE_PULL;
-        } else if (sliceDistance === 2) {
-          targetPull = RIM_SLAB_NEIGHBOR_TWO_PULL;
         }
       }
       const previousPull = rimSlabPullLevels[sliceIndex] || 0;
@@ -1815,10 +3062,33 @@ export function createLibraryController({
     arcCurrentAngle = startAngle;
     arcSignedSweepRadians = 0;
     arcAbsoluteSweepRadians = 0;
+    arcSweepDirection = 0;
+    arcPeakSweepRadians = 0;
     letterSearchAccumulator = 0;
+    pressedArtistSegment = null;
+
+    if (quickActionsOpen && quickActionsAutoCloseTimer > 0) {
+      quickActionsOpen = false;
+      quickActionsAutoCloseTimer = 0;
+      pressedQuickAction = false;
+    }
 
     if (vinylLaunchTarget === 1) {
       pointerMode = "back-swipe";
+    } else if (quickActionsOpen) {
+      const hitLikeMedallion =
+        Math.hypot(
+          pointX - DISPLAY_CENTER_PX,
+          pointY - LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_BUTTON_CENTER_Y,
+        ) <= LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_BUTTON_HIT_RADIUS_PX;
+      if (hitLikeMedallion) {
+        pointerMode = "quick-actions";
+        pressedQuickAction = true;
+      } else if (pointX <= OVERLAY_LEFT_EDGE_SWIPE_MAX_X) {
+        pointerMode = "back-swipe";
+      } else {
+        pointerMode = "quick-actions";
+      }
     } else if (playlistSheetOpen) {
       const hitDeleteButton =
         pointX >= DELETE_BUTTON_LEFT_X &&
@@ -1835,25 +3105,82 @@ export function createLibraryController({
       }
     } else if (currentView.kind === "empty") {
       pointerMode = pointX <= OVERLAY_LEFT_EDGE_SWIPE_MAX_X ? "back-swipe" : "empty";
-    } else if (distanceFromCenter >= LIBRARY_CONSTANTS.ARC_RIM_MIN_RADIUS_PX) {
-      pointerMode = "rim-pending";
-      if (currentView.kind !== "albums") {
+    } else {
+      const hitToggleSegment = hitTestHeaderToggle(pointX, pointY, currentView);
+      if (hitToggleSegment) {
+        pointerMode = currentView.isFavoritesView ? "favorites-toggle" : "artist-toggle";
+        if (currentView.isFavoritesView) {
+          pressedFavoritesSegment = hitToggleSegment;
+        } else {
+          pressedArtistSegment = hitToggleSegment;
+        }
+      } else if (
+        (currentView.kind === "albums" &&
+          resolveCrateAlbums(currentView).length > 0 &&
+          Math.hypot(pointX - CRATE_SORT_BUTTON_X, pointY - CRATE_SORT_BUTTON_Y) <=
+            CRATE_NOTE_BUTTON_RADIUS_PX) ||
+        (currentView.kind === "artists" &&
+          catalog.artists.length > 0 &&
+          Math.hypot(
+            pointX - LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_X,
+            pointY - LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_Y,
+          ) <= CRATE_NOTE_BUTTON_RADIUS_PX)
+      ) {
+        pointerMode = "sort-button";
+        crateLongPressEligible = false;
+      } else if (distanceFromCenter >= LIBRARY_CONSTANTS.ARC_RIM_MIN_RADIUS_PX) {
+        pointerMode = "rim-pending";
+        if (currentView.kind === "albums") {
+          const hitSortButton =
+            Math.hypot(pointX - CRATE_SORT_BUTTON_X, pointY - CRATE_SORT_BUTTON_Y) <=
+            CRATE_NOTE_BUTTON_RADIUS_PX;
+          const hitNoteButton =
+            Math.hypot(pointX - CRATE_NOTE_BUTTON_X, pointY - CRATE_NOTE_BUTTON_Y) <=
+            CRATE_NOTE_BUTTON_RADIUS_PX;
+          const hitFocusedSleeve =
+            pointX >= CRATE_SLEEVE_LEFT_X &&
+            pointX <= CRATE_PEEK_RIGHT_X &&
+            pointY >= CRATE_SLEEVE_TOP_Y &&
+            pointY <= CRATE_SLEEVE_BOTTOM_Y;
+          crateLongPressEligible =
+            hitFocusedSleeve &&
+            !hitSortButton &&
+            !hitNoteButton &&
+            resolveCrateAlbums(currentView).length > 0;
+        } else {
+          const rows = resolveViewRows(currentView);
+          const hitIndex = hitTestListRow(pointX, pointY, currentView, rows);
+          pressedRowIndex = hitIndex;
+          if (hitIndex !== null) {
+            pressHighlightLevel = PRESS_INITIAL_LEVEL;
+          }
+        }
+      } else if (currentView.kind === "albums") {
+        pointerMode = "crate";
+        const hitSortButton =
+          Math.hypot(pointX - CRATE_SORT_BUTTON_X, pointY - CRATE_SORT_BUTTON_Y) <=
+          CRATE_NOTE_BUTTON_RADIUS_PX;
+        const hitNoteButton =
+          Math.hypot(pointX - CRATE_NOTE_BUTTON_X, pointY - CRATE_NOTE_BUTTON_Y) <=
+          CRATE_NOTE_BUTTON_RADIUS_PX;
+        const hitFocusedSleeve =
+          pointX >= CRATE_SLEEVE_LEFT_X &&
+          pointX <= CRATE_PEEK_RIGHT_X &&
+          pointY >= CRATE_SLEEVE_TOP_Y &&
+          pointY <= CRATE_SLEEVE_BOTTOM_Y;
+        crateLongPressEligible =
+          hitFocusedSleeve &&
+          !hitSortButton &&
+          !hitNoteButton &&
+          resolveCrateAlbums(currentView).length > 0;
+      } else {
+        pointerMode = "list";
         const rows = resolveViewRows(currentView);
         const hitIndex = hitTestListRow(pointX, pointY, currentView, rows);
         pressedRowIndex = hitIndex;
         if (hitIndex !== null) {
           pressHighlightLevel = PRESS_INITIAL_LEVEL;
         }
-      }
-    } else if (currentView.kind === "albums") {
-      pointerMode = "crate";
-    } else {
-      pointerMode = "list";
-      const rows = resolveViewRows(currentView);
-      const hitIndex = hitTestListRow(pointX, pointY, currentView, rows);
-      pressedRowIndex = hitIndex;
-      if (hitIndex !== null) {
-        pressHighlightLevel = PRESS_INITIAL_LEVEL;
       }
     }
   }
@@ -1888,6 +3215,48 @@ export function createLibraryController({
       if (!stayedInsideDeleteZone) {
         deleteHoldActive = false;
       }
+      return;
+    }
+
+    if (pointerMode === "artist-toggle") {
+      if (pointerMovedDistance >= LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX) {
+        pressedArtistSegment = null;
+      }
+      return;
+    }
+
+    if (pointerMode === "favorites-toggle") {
+      if (pointerMovedDistance >= LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX) {
+        pressedFavoritesSegment = null;
+      }
+      return;
+    }
+
+    if (pointerMode === "quick-actions") {
+      if (pointerMovedDistance >= LIBRARY_CONSTANTS.TAP_DRIFT_LIMIT_PX) {
+        pressedQuickAction = false;
+      }
+      if (!pressedQuickAction && deltaX > OVERLAY_BACK_SWIPE_MIN_DELTA_X) {
+        pointerMode = "back-swipe";
+        backSwipeProgress = clamp(deltaX / LIBRARY_CONSTANTS.BACK_SWIPE_DISTANCE_PX, 0, 1);
+      }
+      return;
+    }
+
+    if (pointerMode === "sort-button") {
+      return;
+    }
+
+    if (pointerMode === "sort-wheel") {
+      const anchorX =
+        sortWheelScope === "artists"
+          ? LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_X
+          : CRATE_SORT_BUTTON_X;
+      const anchorY =
+        sortWheelScope === "artists"
+          ? LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_Y
+          : CRATE_SORT_BUTTON_Y;
+      sortWheelHoveredMode = resolveSortWheelHoveredMode(pointX, pointY, anchorX, anchorY);
       return;
     }
 
@@ -2019,10 +3388,102 @@ export function createLibraryController({
     const wasLongPressTriggered = longPressTriggered;
     const releaseVelocity = pointerVelocity;
     const previouslyPressedRow = pressedRowIndex;
+    const previouslyPressedSegment = pressedArtistSegment;
+    const previouslyPressedFavoritesSegment = pressedFavoritesSegment;
+    const previousSortWheelHoveredMode = sortWheelHoveredMode;
 
     clearPointerState();
 
+    if (activeMode === "sort-wheel") {
+      const anchorX =
+        sortWheelScope === "artists"
+          ? LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_X
+          : CRATE_SORT_BUTTON_X;
+      const anchorY =
+        sortWheelScope === "artists"
+          ? LIBRARY_CONSTANTS.ARTISTS_SORT_BUTTON_Y
+          : CRATE_SORT_BUTTON_Y;
+      const resolvedHoveredMode = Number.isFinite(pointX) && Number.isFinite(pointY)
+        ? resolveSortWheelHoveredMode(releaseX, releaseY, anchorX, anchorY)
+        : previousSortWheelHoveredMode;
+      sortWheelOpen = false;
+      sortWheelHoveredMode = null;
+      if (resolvedHoveredMode) {
+        applySortMode(sortWheelScope, resolvedHoveredMode);
+      }
+      return;
+    }
+
+    if (activeMode === "sort-button") {
+      if (wasTap && !wasLongPressTriggered) {
+        if (currentView.kind === "artists") {
+          cycleArtistSortMode();
+        } else {
+          cycleAlbumSortMode();
+        }
+      }
+      return;
+    }
+
     if (wasLongPressTriggered) {
+      return;
+    }
+
+    if (activeMode === "artist-toggle") {
+      if (wasTap) {
+        const resolvedSegment =
+          hitTestHeaderToggle(releaseX, releaseY, currentView) || previouslyPressedSegment;
+        if (resolvedSegment) {
+          setArtistViewMode(resolvedSegment);
+        }
+      }
+      return;
+    }
+
+    if (activeMode === "favorites-toggle") {
+      if (wasTap) {
+        const resolvedSegment =
+          hitTestHeaderToggle(releaseX, releaseY, currentView) ||
+          previouslyPressedFavoritesSegment;
+        if (resolvedSegment) {
+          setFavoritesViewMode(resolvedSegment);
+        }
+      }
+      return;
+    }
+
+    if (activeMode === "quick-actions") {
+      if (wasTap && quickActionsOpen) {
+        const hitLikeMedallion =
+          Math.hypot(
+            releaseX - DISPLAY_CENTER_PX,
+            releaseY - LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_BUTTON_CENTER_Y,
+          ) <= LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_BUTTON_HIT_RADIUS_PX;
+        if (hitLikeMedallion) {
+          if (quickActionsKind === "artist") {
+            const targetArtist = artistByIdMap.get(quickActionsTargetId);
+            if (targetArtist) {
+              setArtistFavorite(targetArtist.id, !targetArtist.isFavorite, { notify: true });
+              quickActionsAutoCloseTimer =
+                LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_AUTO_CLOSE_SECONDS;
+            } else {
+              quickActionsOpen = false;
+            }
+          } else {
+            const targetAlbum = albumByIdMap.get(quickActionsTargetId);
+            if (targetAlbum) {
+              setAlbumFavorite(targetAlbum.id, !targetAlbum.isFavorite, { notify: true });
+              quickActionsAutoCloseTimer =
+                LIBRARY_CONSTANTS.ALBUM_QUICK_ACTION_AUTO_CLOSE_SECONDS;
+            } else {
+              quickActionsOpen = false;
+            }
+          }
+        } else {
+          quickActionsOpen = false;
+          quickActionsAutoCloseTimer = 0;
+        }
+      }
       return;
     }
 
@@ -2081,10 +3542,8 @@ export function createLibraryController({
                 queueSource: "playlist",
                 playlistId: playlistEntry.id,
                 albumId: chosenTrack.albumId,
+                shuffleOverride: Boolean(hitShuffleButton),
               };
-              if (hitShuffleButton) {
-                sourceSpec.shuffle = true;
-              }
               launchVinyl(chosenTrack.albumId, "tracks", chosenTrack.id, sourceSpec);
             }
           }
@@ -2113,10 +3572,18 @@ export function createLibraryController({
       const maxIndex = Math.max(0, albums.length - 1);
       cratePullUpProgress = 0;
       if (wasTap) {
+        if (albums.length === 0) {
+          return;
+        }
         const focusedIndex = clamp(Math.round(currentView.scrollPosition), 0, maxIndex);
+        const hitAlbumSortButton =
+          Math.hypot(releaseX - CRATE_SORT_BUTTON_X, releaseY - CRATE_SORT_BUTTON_Y) <=
+          CRATE_NOTE_BUTTON_RADIUS_PX;
         const hitAlbumTracksButton =
           Math.hypot(releaseX - CRATE_NOTE_BUTTON_X, releaseY - CRATE_NOTE_BUTTON_Y) <=
-          CRATE_NOTE_BUTTON_RADIUS_PX;
+            CRATE_NOTE_BUTTON_RADIUS_PX ||
+          Math.hypot(releaseX - DISPLAY_CENTER_PX, releaseY - CRATE_NOTE_BUTTON_Y) <=
+            CRATE_NOTE_BUTTON_RADIUS_PX;
         const hitPeekingVinyl =
           releaseX >= CRATE_PEEK_LEFT_X &&
           releaseX <= CRATE_PEEK_RIGHT_X &&
@@ -2124,11 +3591,13 @@ export function createLibraryController({
           releaseY <= CRATE_PEEK_BOTTOM_Y;
         const hitCenterSleeve =
           releaseX >= CRATE_SLEEVE_LEFT_X &&
-          releaseX < CRATE_PEEK_LEFT_X &&
+          releaseX <= CRATE_SLEEVE_RIGHT_X &&
           releaseY >= CRATE_SLEEVE_TOP_Y &&
           releaseY <= CRATE_SLEEVE_BOTTOM_Y;
 
-        if (hitAlbumTracksButton && albums[focusedIndex]) {
+        if (hitAlbumSortButton) {
+          cycleAlbumSortMode();
+        } else if (hitAlbumTracksButton && albums[focusedIndex]) {
           openFocusedAlbumTracks();
         } else if ((hitPeekingVinyl || hitCenterSleeve) && albums[focusedIndex]) {
           launchFocusedCrateAlbum(currentView);
@@ -2166,7 +3635,9 @@ export function createLibraryController({
           currentView.kind === "tracks" && currentView.sourceType === "album";
         const hitAlbumTracksButton =
           Math.hypot(releaseX - CRATE_NOTE_BUTTON_X, releaseY - CRATE_NOTE_BUTTON_Y) <=
-          CRATE_NOTE_BUTTON_RADIUS_PX;
+            CRATE_NOTE_BUTTON_RADIUS_PX ||
+          Math.hypot(releaseX - DISPLAY_CENTER_PX, releaseY - CRATE_NOTE_BUTTON_Y) <=
+            CRATE_NOTE_BUTTON_RADIUS_PX;
         if (isAlbumTracksOverlay && tappedRowIndex === null && hitAlbumTracksButton) {
           stepBack();
         } else if (tappedRowIndex !== null) {
@@ -2197,6 +3668,8 @@ export function createLibraryController({
     clearPointerState();
     pressedRowIndex = null;
     letterSearchActive = false;
+    sortWheelOpen = false;
+    sortWheelHoveredMode = null;
   }
 
   /**
@@ -2231,6 +3704,26 @@ export function createLibraryController({
       playlistSheetOpen,
       playlistSheetIndex,
       playlistSheetProgress,
+      quickActionsOpen,
+      quickActionsKind,
+      quickActionsTargetId,
+      quickActionsProgress,
+      pressedQuickAction,
+      albumQuickActionsOpen: quickActionsOpen && quickActionsKind === "album",
+      albumQuickActionsAlbumId: quickActionsKind === "album" ? quickActionsTargetId : null,
+      albumQuickActionsProgress: quickActionsKind === "album" ? quickActionsProgress : 0,
+      pressedAlbumQuickAction: quickActionsKind === "album" ? pressedQuickAction : false,
+      artistQuickActionsOpen: quickActionsOpen && quickActionsKind === "artist",
+      artistQuickActionsArtistId: quickActionsKind === "artist" ? quickActionsTargetId : null,
+      artistQuickActionsProgress: quickActionsKind === "artist" ? quickActionsProgress : 0,
+      albumSortMode,
+      artistSortMode,
+      sortToastAlpha,
+      sortToastLabel,
+      sortWheelOpen,
+      sortWheelScope,
+      sortWheelProgress,
+      sortWheelHoveredMode,
       deleteHoldActive,
       deleteHoldProgress,
       deleteCompletedFlash,
@@ -2243,10 +3736,23 @@ export function createLibraryController({
       idleClockSeconds,
       transitionDirection,
       transitionProgress,
+      albumsTransitionMode,
+      albumsTransitionProgress,
+      albumsTransitionHubScroll,
+      albumsTransitionAlbumId,
+      albumsTransitionCrateScroll,
       pressedRowIndex,
       pressHighlightLevel,
       pressFlashRowIndex,
       pressFlashLevel,
+      artistModeBlend,
+      artistTabFadeProgress,
+      preferredArtistViewMode,
+      pressedArtistSegment,
+      favoritesModeBlend,
+      favoritesTabFadeProgress,
+      preferredFavoritesViewMode,
+      pressedFavoritesSegment,
       arcFeedbackAlpha,
       arcStartAngle,
       arcCurrentAngle,
@@ -2273,6 +3779,8 @@ export function createLibraryController({
     setActiveTrackId,
     setPlaybackState,
     setTrackFavorite,
+    setAlbumFavorite,
+    setArtistFavorite,
     setPlaylists,
     resetVinylLaunch,
     step,
@@ -2280,6 +3788,14 @@ export function createLibraryController({
     stepDetent,
     activateFocused,
     openFocusedAlbumTracks,
+    setArtistViewMode,
+    setFavoritesViewMode,
+    setAlbumSortMode,
+    cycleAlbumSortMode,
+    setArtistSortMode,
+    cycleArtistSortMode,
+    openAlbumQuickActions,
+    openArtistQuickActions,
     handlePointerDown,
     handlePointerMove,
     handlePointerUp,

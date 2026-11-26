@@ -1,16 +1,18 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createLibraryController } from "../core/library_controller.js";
+import { computeSortWheelSlots, createLibraryController } from "../core/library_controller.js";
 import { APPEARANCE_PALETTES } from "../core/tokens.js";
 import * as libraryScreen from "../screens/library_screen.js";
 
 const DISPLAY_CENTER_PX = 180;
 const FLOAT_TOLERANCE = 1e-4;
-const CRATE_NOTE_BUTTON_X = 180;
+const CRATE_SORT_BUTTON_X = 152;
+const ARTISTS_SORT_BUTTON_X = 180;
+const CRATE_NOTE_BUTTON_X = 208;
 const CRATE_NOTE_BUTTON_Y = 325;
-const CRATE_NOTE_BUTTON_EDGE_X = 196;
-const CRATE_OLD_HINT_OUTSIDE_X = 220;
+const CRATE_NOTE_BUTTON_EDGE_X = 224;
+const CRATE_OLD_HINT_OUTSIDE_X = 248;
 
 const MARQUEE_SAMPLE_STEP_SECONDS = 0.05;
 const MARQUEE_MAX_CYCLE_SECONDS = 30;
@@ -899,7 +901,7 @@ describe("library_screen.js Albums Crate peeking disc, floating note button, and
     );
   });
 
-  test("renderLibraryAlbumCrate omits SWIPE UP · TRACKS, draws floating music-note button near (180, 325), and hitTestLibraryInteractive matches it", () => {
+  test("renderLibraryAlbumCrate omits SWIPE UP · TRACKS, draws Sort (152, 325) and Note (208, 325) buttons, and hitTestLibraryInteractive matches both", () => {
     const controller = createSettledLibraryViewController("albums");
     const idleCrateState = controller.getRenderSnapshot();
     assert.equal(idleCrateState.activeTrackId, null);
@@ -916,6 +918,20 @@ describe("library_screen.js Albums Crate peeking disc, floating note button, and
     );
     assert.equal(swipeUpHintTexts.length, 0, "must not draw SWIPE UP · TRACKS anywhere");
 
+    const sortButtonCircles = drawingContext.recordedArcs.filter(
+      (arcEntry) =>
+        Math.hypot(
+          arcEntry.worldCenterX - CRATE_SORT_BUTTON_X,
+          arcEntry.worldCenterY - CRATE_NOTE_BUTTON_Y,
+        ) <= 4 &&
+        arcEntry.worldRadius >= 14 &&
+        arcEntry.worldRadius <= 26,
+    );
+    assert.ok(
+      sortButtonCircles.length >= 1,
+      "must draw bottom-left floating sort button near (152, 325)",
+    );
+
     const noteButtonCircles = drawingContext.recordedArcs.filter(
       (arcEntry) =>
         Math.hypot(
@@ -927,9 +943,17 @@ describe("library_screen.js Albums Crate peeking disc, floating note button, and
     );
     assert.ok(
       noteButtonCircles.length >= 1,
-      "must draw bottom-center floating music-note button near (180, 325) even on non-playing album",
+      "must draw bottom-right floating music-note button near (208, 325) even on non-playing album",
     );
 
+    assert.equal(
+      libraryScreen.hitTestLibraryInteractive(
+        CRATE_SORT_BUTTON_X,
+        CRATE_NOTE_BUTTON_Y,
+        idleCrateState,
+      ),
+      true,
+    );
     assert.equal(
       libraryScreen.hitTestLibraryInteractive(
         CRATE_NOTE_BUTTON_X,
@@ -1076,6 +1100,64 @@ describe("library_screen.js Albums Crate peeking disc, floating note button, and
       ) < 0.002,
       "Now Playing -> Albums completion must advance +20 deg clockwise cleanly",
     );
+  });
+
+  test("Now Playing -> Albums return never draws a center spindle puck or inner volume arc over the vinyl", () => {
+    const CENTER_TOLERANCE_PX = 2.5;
+    const SPINDLE_MIN_RADIUS_PX = 3;
+    const SPINDLE_MAX_RADIUS_PX = 30;
+    const VOLUME_ARC_MIN_RADIUS_PX = 164;
+    const VOLUME_ARC_MAX_RADIUS_PX = 168;
+
+    function isCenteredArc(arcEntry) {
+      return (
+        Math.hypot(
+          arcEntry.worldCenterX - DISPLAY_CENTER_PX,
+          arcEntry.worldCenterY - DISPLAY_CENTER_PX,
+        ) <= CENTER_TOLERANCE_PX
+      );
+    }
+
+    function renderReturnFrame(stepFraction) {
+      const controller = createSettledLibraryViewController("albums");
+      controller.setActiveTrackId("t-a1");
+      controller.returnFromNowPlaying({
+        vinylRotationRadians: 1.15,
+        albumId: "album-a",
+        launchOrigin: "album-crate",
+        isPlaying: true,
+      });
+      if (stepFraction > 0) {
+        controller.step(stepFraction * 0.62);
+      }
+      const drawingContext = createRecordingCanvasContext();
+      libraryScreen.renderLibraryScreen(drawingContext, controller.getRenderSnapshot(), {
+        appearance: "dark",
+        palette: APPEARANCE_PALETTES.dark,
+        playback: { isPlaying: true, elapsedSeconds: 30, durationSeconds: 180, volumeLevel: 0.6 },
+      });
+      return [
+        ...drawingContext.recordedFills.flatMap((fillEntry) => fillEntry.arcs),
+        ...drawingContext.recordedStrokes.flatMap((strokeEntry) => strokeEntry.arcs),
+      ].filter(isCenteredArc);
+    }
+
+    for (const stepFraction of [0, 0.1, 0.2, 0.3]) {
+      const centeredArcs = renderReturnFrame(stepFraction);
+      const spindleArcs = centeredArcs.filter(
+        (arcEntry) =>
+          arcEntry.worldRadius >= SPINDLE_MIN_RADIUS_PX &&
+          arcEntry.worldRadius <= SPINDLE_MAX_RADIUS_PX,
+      );
+      assert.equal(spindleArcs.length, 0, `no center spindle puck at step fraction ${stepFraction}`);
+
+      const volumeArcs = centeredArcs.filter(
+        (arcEntry) =>
+          arcEntry.worldRadius >= VOLUME_ARC_MIN_RADIUS_PX &&
+          arcEntry.worldRadius <= VOLUME_ARC_MAX_RADIUS_PX,
+      );
+      assert.equal(volumeArcs.length, 0, `no inner volume arc at step fraction ${stepFraction}`);
+    }
   });
 });
 
@@ -1224,5 +1306,650 @@ describe("library_screen.js global marquee across curved lists, crate, tracklist
       "01 Long Overflowing Track Movement In C Sharp Minor Opus Ninety Nine",
       240,
     );
+  });
+});
+
+describe("library_screen.js Shared-Element Albums Tile <-> Albums Roulette transition", () => {
+  test("exports renderLibraryHubTransitionLayer and guards missing context or zero reveal cleanly", () => {
+    assert.equal(typeof libraryScreen.renderLibraryHubTransitionLayer, "function");
+    assert.doesNotThrow(() => libraryScreen.renderLibraryHubTransitionLayer(null, {}));
+
+    const silentContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryHubTransitionLayer(silentContext, {
+      revealProgress: 0,
+      counts: { tracks: 10, albums: 3, artists: 2, genres: 1, favorites: 1, playlists: 1 },
+      palette: APPEARANCE_PALETTES.dark,
+      appearance: "dark",
+    });
+    assert.equal(silentContext.recordedTextCalls.length, 0);
+  });
+
+  test("hub-to-albums blooms 1:1 hero sleeve monotonically from Albums tile to crate center (172, 152) and albums-to-hub reverses cleanly in Dark and Light modes", () => {
+    const controller = createLibraryController({});
+    controller.hydrateCatalog(buildLibraryScreenCatalog());
+    controller.enterFromHome({ skipEntryTransition: true });
+    controller.stepDetent(1);
+    for (let stepIndex = 0; stepIndex < 30; stepIndex += 1) {
+      controller.step(0.05);
+    }
+
+    /* Tap focused Albums tile (row 1 right column: x=244, y=152) */
+    controller.handlePointerDown(244, 152);
+    controller.handlePointerUp(244, 152);
+
+    function findHeroSleeveRect(drawingContext) {
+      const squareStrokes = drawingContext.recordedRects.filter(
+        (rectEntry) =>
+          rectEntry.kind === "strokeRect" &&
+          Math.abs(rectEntry.width - rectEntry.height) <= 1.5 &&
+          rectEntry.width >= 20 &&
+          rectEntry.width <= 122,
+      );
+      return squareStrokes.reduce(
+        (largest, candidate) => (!largest || candidate.width > largest.width ? candidate : largest),
+        null,
+      );
+    }
+
+    const startContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(startContext, controller.getRenderSnapshot(), {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    const startSleeve = findHeroSleeveRect(startContext);
+    assert.ok(startSleeve, "start of hub-to-albums must render hero square sleeve at Albums tile");
+
+    controller.step(0.26);
+    const midSnapshot = controller.getRenderSnapshot();
+    assert.equal(midSnapshot.albumsTransitionMode, "hub-to-albums");
+    const midContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(midContext, midSnapshot, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    const midSleeve = findHeroSleeveRect(midContext);
+    assert.ok(midSleeve, "midpoint of hub-to-albums must render growing 1:1 hero sleeve");
+    assert.ok(
+      midSleeve.width > startSleeve.width + 15 && midSleeve.width < 118,
+      `expected monotonic 1:1 growth, start=${startSleeve.width}, mid=${midSleeve.width}`,
+    );
+    assert.ok(
+      Math.abs(midSleeve.width - midSleeve.height) <= 1.5,
+      "hero sleeve must stay strictly 1:1 undeformed during transition",
+    );
+
+    const startCenterX = startSleeve.worldLeftX + startSleeve.width / 2;
+    const midCenterX = midSleeve.worldLeftX + midSleeve.width / 2;
+    assert.ok(
+      midCenterX < startCenterX && midCenterX > 170,
+      `hero sleeve should glide smoothly leftward from tile (${startCenterX}) toward crate center (172), got ${midCenterX}`,
+    );
+    assert.equal(midContext.getCounts().saveCount, midContext.getCounts().restoreCount);
+
+    controller.step(0.30);
+    const settledContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(settledContext, controller.getRenderSnapshot(), {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    const settledSleeve = findHeroSleeveRect(settledContext);
+    assert.ok(settledSleeve && Math.abs(settledSleeve.width - 119) <= 2);
+
+    /* Reverse (albums-to-hub) in Light Mode */
+    controller.stepBack();
+    controller.step(0.26);
+    const reverseSnapshot = controller.getRenderSnapshot();
+    assert.equal(reverseSnapshot.albumsTransitionMode, "albums-to-hub");
+    const reverseContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(reverseContext, reverseSnapshot, {
+      appearance: "light",
+      palette: APPEARANCE_PALETTES.light,
+    });
+    const reverseSleeve = findHeroSleeveRect(reverseContext);
+    assert.ok(
+      reverseSleeve && reverseSleeve.width > 30 && reverseSleeve.width < 118,
+      `reverse albums-to-hub should shrink 1:1 sleeve back toward Albums tile, got ${reverseSleeve?.width}`,
+    );
+    assert.equal(reverseContext.getCounts().saveCount, reverseContext.getCounts().restoreCount);
+  });
+
+  test("renders Artist header segmented toggle (ALBUMS | SONGS) in Dark and Light Mode, omits it on non-artist views, shows album subtitle in Artist Songs, and hit-tests cleanly", () => {
+    const controller = createLibraryController({});
+    controller.hydrateCatalog(buildLibraryScreenCatalog());
+    controller.enterFromHome({ skipEntryTransition: true });
+    // Open Artists (tile index 2), then first artist ("Alpha Ensemble")
+    controller.stepDetent(1);
+    for (let stepIndex = 0; stepIndex < 20; stepIndex += 1) {
+      controller.step(0.05);
+    }
+    controller.activateFocused(2);
+    controller.activateFocused(0);
+    for (let stepIndex = 0; stepIndex < 30; stepIndex += 1) {
+      controller.step(0.05);
+    }
+
+    const artistAlbumsState = controller.getRenderSnapshot();
+    assert.equal(artistAlbumsState.currentView.isArtistView, true);
+
+    const albumsDarkContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(albumsDarkContext, artistAlbumsState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    const albumsLabel = albumsDarkContext.recordedTextCalls.find((call) => call.text === "ALBUMS");
+    const songsLabel = albumsDarkContext.recordedTextCalls.find((call) => call.text === "SONGS");
+    assert.ok(albumsLabel && songsLabel, "Artist view must render ALBUMS and SONGS segmented labels");
+    assert.ok(albumsLabel.worldY >= 53 && albumsLabel.worldY <= 73);
+    assert.ok(songsLabel.worldY >= 53 && songsLabel.worldY <= 73);
+    assert.equal(libraryScreen.hitTestLibraryInteractive(144, 63, artistAlbumsState), true);
+    assert.equal(libraryScreen.hitTestLibraryInteractive(216, 63, artistAlbumsState), true);
+
+    // Switch to Songs mode and render in Light Mode: verify albumTitle subtitle is shown
+    controller.setArtistViewMode("songs");
+    for (let stepIndex = 0; stepIndex < 30; stepIndex += 1) {
+      controller.step(0.05);
+    }
+    const artistSongsState = controller.getRenderSnapshot();
+    const songsLightContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(songsLightContext, artistSongsState, {
+      appearance: "light",
+      palette: APPEARANCE_PALETTES.light,
+    });
+    assert.ok(songsLightContext.recordedTextCalls.some((call) => call.text === "ALBUMS"));
+    assert.ok(songsLightContext.recordedTextCalls.some((call) => call.text === "SONGS"));
+    assert.ok(
+      songsLightContext.recordedTextCalls.some((call) => call.text === "ALPHA HORIZONS"),
+      "Artist Songs rows must display uppercase albumTitle subtitle",
+    );
+    assert.equal(libraryScreen.hitTestLibraryInteractive(144, 63, artistSongsState), true);
+    assert.equal(libraryScreen.hitTestLibraryInteractive(216, 63, artistSongsState), true);
+
+    // Global Albums crate must NOT render segmented toggle or hit-test header toggle
+    const globalAlbumsController = createSettledLibraryViewController("albums");
+    const globalAlbumsState = globalAlbumsController.getRenderSnapshot();
+    const globalAlbumsContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(globalAlbumsContext, globalAlbumsState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.equal(
+      globalAlbumsContext.recordedTextCalls.some((call) => call.text === "SONGS"),
+      false,
+    );
+    assert.equal(libraryScreen.hitTestLibraryInteractive(216, 63, globalAlbumsState), false);
+  });
+
+  test("liked album sleeve renders top-right badge, sort toast & quick actions overlay render, and Favorites renders ALBUMS | SONGS + inline empty states", () => {
+    const controller = createSettledLibraryViewController("albums");
+    controller.setAlbumFavorite("album-a", true);
+    controller.cycleAlbumSortMode();
+    for (let stepIndex = 0; stepIndex < 15; stepIndex += 1) {
+      controller.step(0.05);
+    }
+
+    const sortedReverseState = controller.getRenderSnapshot();
+    const reverseCrateContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(reverseCrateContext, sortedReverseState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.ok(
+      reverseCrateContext.recordedTextCalls.some((call) => call.text === "SORT \u00b7 Z\u2013A"),
+      "must render Z-A sort toast pill on first cycle",
+    );
+
+    controller.cycleAlbumSortMode();
+    for (let stepIndex = 0; stepIndex < 15; stepIndex += 1) {
+      controller.step(0.05);
+    }
+    const sortedLikedState = controller.getRenderSnapshot();
+    const darkCrateContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(darkCrateContext, sortedLikedState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.ok(
+      darkCrateContext.recordedTextCalls.some((call) => call.text === "SORT \u00b7 LIKED FIRST"),
+      "must render sort toast pill when cycling to LIKED FIRST",
+    );
+
+    // Open Album Quick Action overlay and verify ALBUM ACTIONS + FAVORITED + hit-test isolation
+    controller.openAlbumQuickActions("album-a");
+    for (let stepIndex = 0; stepIndex < 20; stepIndex += 1) {
+      controller.step(0.05);
+    }
+    const quickActionState = controller.getRenderSnapshot();
+    const quickActionContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(quickActionContext, quickActionState, {
+      appearance: "light",
+      palette: APPEARANCE_PALETTES.light,
+    });
+    assert.ok(quickActionContext.recordedTextCalls.some((call) => call.text === "ALBUM ACTIONS"));
+    assert.ok(quickActionContext.recordedTextCalls.some((call) => call.text === "FAVORITED"));
+    assert.equal(libraryScreen.hitTestLibraryInteractive(180, 196, quickActionState), true);
+    assert.equal(libraryScreen.hitTestLibraryInteractive(CRATE_NOTE_BUTTON_X, CRATE_NOTE_BUTTON_Y, quickActionState), false);
+
+    // Favorites dual-mode view with liked album & 0 liked songs -> renders ALBUMS | SONGS and inline empty SONGS state
+    const favoritesController = createLibraryController();
+    const favCatalog = buildLibraryScreenCatalog();
+    favoritesController.hydrateCatalog(favCatalog);
+    for (const trackEntry of favCatalog.allTracks) {
+      favoritesController.setTrackFavorite(trackEntry.id, false);
+    }
+    favoritesController.setAlbumFavorite("album-a", true);
+    favoritesController.enterFromHome({ skipEntryTransition: true });
+    favoritesController.activateFocused(0);
+    for (let stepIndex = 0; stepIndex < 20; stepIndex += 1) {
+      favoritesController.step(0.05);
+    }
+    favoritesController.setFavoritesViewMode("songs");
+    for (let stepIndex = 0; stepIndex < 20; stepIndex += 1) {
+      favoritesController.step(0.05);
+    }
+    const favEmptySongsState = favoritesController.getRenderSnapshot();
+    const favContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(favContext, favEmptySongsState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.ok(favContext.recordedTextCalls.some((call) => call.text === "ALBUMS"));
+    assert.ok(favContext.recordedTextCalls.some((call) => call.text === "SONGS"));
+    assert.ok(favContext.recordedTextCalls.some((call) => call.text === "No Favorite Songs"));
+    assert.equal(libraryScreen.hitTestLibraryInteractive(144, 63, favEmptySongsState), true);
+  });
+
+  test("renderLibrarySortWheel draws 5 radial medallions, live mode readout, and hitTestLibraryInteractive matches slots", () => {
+    const controller = createSettledLibraryViewController("albums");
+    controller.handlePointerDown(CRATE_SORT_BUTTON_X, CRATE_NOTE_BUTTON_Y);
+    for (let stepIndex = 0; stepIndex < 12; stepIndex += 1) {
+      controller.step(0.05);
+    }
+
+    const neutralWheelState = controller.getRenderSnapshot();
+    assert.equal(neutralWheelState.sortWheelOpen, true);
+    const neutralContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(neutralContext, neutralWheelState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.ok(
+      neutralContext.recordedTextCalls.some((call) => call.text === "DRAG TO SORT"),
+      "neutral sort wheel must display DRAG TO SORT readout",
+    );
+
+    const slots = computeSortWheelSlots();
+    assert.equal(slots.length, 5);
+    for (const slot of slots) {
+      const matchedArc = neutralContext.recordedArcs.some(
+        (arcEntry) =>
+          Math.hypot(arcEntry.worldCenterX - slot.centerX, arcEntry.worldCenterY - slot.centerY) <=
+            3 && arcEntry.worldRadius >= 14,
+      );
+      assert.ok(matchedArc, `must render medallion arc for ${slot.mode}`);
+      assert.equal(
+        libraryScreen.hitTestLibraryInteractive(slot.centerX, slot.centerY, neutralWheelState),
+        true,
+      );
+    }
+
+    const reverseSlot = slots.find((slot) => slot.mode === "reverse-alphabetical");
+    controller.handlePointerMove(reverseSlot.centerX, reverseSlot.centerY);
+    controller.step(0.05);
+    const reverseHoveredContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(reverseHoveredContext, controller.getRenderSnapshot(), {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.ok(
+      reverseHoveredContext.recordedTextCalls.some((call) => call.text === "Z\u2013A"),
+      "hovering Z-A slot must update readout pill to Z-A",
+    );
+
+    const oldestSlot = slots.find((slot) => slot.mode === "oldest");
+    controller.handlePointerMove(oldestSlot.centerX, oldestSlot.centerY);
+    controller.step(0.05);
+    const hoveredWheelState = controller.getRenderSnapshot();
+    const hoveredContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(hoveredContext, hoveredWheelState, {
+      appearance: "light",
+      palette: APPEARANCE_PALETTES.light,
+    });
+    assert.ok(
+      hoveredContext.recordedTextCalls.some((call) => call.text === "OLDEST FIRST"),
+      "hovering oldest slot must update readout pill to OLDEST FIRST",
+    );
+  });
+
+  test("renderLibraryScreen adapts Seek HUD for alphabetical, liked-first, and date buckets in Dark and Light modes", () => {
+    const epochSecondsForLocalNoon = (year, monthIndex, dayOfMonth) =>
+      Math.floor(new Date(year, monthIndex, dayOfMonth, 12, 0, 0).getTime() / 1000);
+
+    const albums = [
+      {
+        id: "alb-1",
+        title: "Alpha",
+        artist: "Artist A",
+        isFavorite: true,
+        addedAt: epochSecondsForLocalNoon(2026, 10, 25),
+        tracks: [{ id: "t1", title: "One" }],
+      },
+      {
+        id: "alb-2",
+        title: "Beta",
+        artist: "Artist A",
+        isFavorite: false,
+        addedAt: epochSecondsForLocalNoon(2026, 9, 10),
+        tracks: [{ id: "t2", title: "Two" }],
+      },
+      {
+        id: "alb-3",
+        title: "Gamma",
+        artist: "Artist A",
+        isFavorite: false,
+        addedAt: epochSecondsForLocalNoon(2025, 4, 2),
+        tracks: [{ id: "t3", title: "Three" }],
+      },
+    ];
+
+    const baseState = {
+      currentView: { kind: "albums", title: "Albums", subtitle: "VINYL CRATE", scrollPosition: 0, targetIndex: 0 },
+      currentCrateAlbums: albums,
+      letterSearchActive: true,
+      letterSearchHudAlpha: 1,
+      rimSlabPullLevels: new Array(17).fill(0),
+      idleClockSeconds: 0,
+    };
+
+    // 1. Alphabetical HUD
+    const alphaContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(
+      alphaContext,
+      {
+        ...baseState,
+        albumSortMode: "alphabetical",
+        letterSearchIndex: 1,
+        letterEntries: [
+          { letter: "A", subLabel: "", shortLabel: "A", itemIndex: 0, label: "Alpha", isFavorite: false, kind: "letter" },
+          { letter: "B", subLabel: "", shortLabel: "B", itemIndex: 1, label: "Beta", isFavorite: false, kind: "letter" },
+          { letter: "G", subLabel: "", shortLabel: "G", itemIndex: 2, label: "Gamma", isFavorite: false, kind: "letter" },
+        ],
+      },
+      { appearance: "dark", palette: APPEARANCE_PALETTES.dark },
+    );
+    assert.equal(
+      alphaContext.recordedTextCalls.some((call) =>
+        ["LETTER SEEK", "LIKED SEEK", "DATE SEEK"].includes(call.text),
+      ),
+      false,
+    );
+    const alphaPrev = alphaContext.recordedTextCalls.find((call) => call.text === "A");
+    assert.ok(alphaPrev && Math.abs(alphaPrev.worldX - (DISPLAY_CENTER_PX - 40)) <= 1);
+
+    // 2. Liked First HUD: favorite anchor draws heart badge inside lower lens; non-favorite omits it
+    const likedActiveContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(
+      likedActiveContext,
+      {
+        ...baseState,
+        albumSortMode: "liked-first",
+        letterSearchIndex: 0,
+        letterEntries: [
+          { letter: "A", subLabel: "", shortLabel: "A", itemIndex: 0, label: "Alpha", isFavorite: true, kind: "liked-letter" },
+          { letter: "B", subLabel: "", shortLabel: "B", itemIndex: 1, label: "Beta", isFavorite: false, kind: "letter" },
+          { letter: "G", subLabel: "", shortLabel: "G", itemIndex: 2, label: "Gamma", isFavorite: false, kind: "letter" },
+        ],
+      },
+      { appearance: "light", palette: APPEARANCE_PALETTES.light },
+    );
+    assert.equal(
+      likedActiveContext.recordedTextCalls.some((call) =>
+        ["LETTER SEEK", "LIKED SEEK", "DATE SEEK"].includes(call.text),
+      ),
+      false,
+    );
+    assert.ok(
+      likedActiveContext.recordedTextCalls.some((call) => call.text === "A" && Math.abs(call.worldX - DISPLAY_CENTER_PX) <= 1),
+    );
+
+    // 3. Date Seek HUD: stacked NOV + 2026, flanking shortLabel outside 62px lens rim (x <= 118, x >= 242)
+    const dateMonthContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(
+      dateMonthContext,
+      {
+        ...baseState,
+        albumSortMode: "recent",
+        letterSearchIndex: 1,
+        letterEntries: [
+          { letter: "NOV", subLabel: "2026", shortLabel: "NOV \u201926", itemIndex: 0, label: "Alpha", isFavorite: false, kind: "date-month" },
+          { letter: "OCT", subLabel: "2026", shortLabel: "OCT \u201926", itemIndex: 1, label: "Beta", isFavorite: false, kind: "date-month" },
+          { letter: "MAY", subLabel: "2025", shortLabel: "MAY \u201925", itemIndex: 2, label: "Gamma", isFavorite: false, kind: "date-month" },
+        ],
+      },
+      { appearance: "dark", palette: APPEARANCE_PALETTES.dark },
+    );
+    assert.equal(
+      dateMonthContext.recordedTextCalls.some((call) =>
+        ["LETTER SEEK", "LIKED SEEK", "DATE SEEK"].includes(call.text),
+      ),
+      false,
+    );
+    assert.ok(dateMonthContext.recordedTextCalls.some((call) => call.text === "OCT"));
+    assert.ok(dateMonthContext.recordedTextCalls.some((call) => call.text === "2026"));
+    const prevDateCall = dateMonthContext.recordedTextCalls.find((call) => call.text === "NOV \u201926");
+    const nextDateCall = dateMonthContext.recordedTextCalls.find((call) => call.text === "MAY \u201925");
+    assert.ok(prevDateCall && prevDateCall.worldX <= DISPLAY_CENTER_PX - 62);
+    assert.ok(nextDateCall && nextDateCall.worldX >= DISPLAY_CENTER_PX + 62);
+
+    // 4. Fallback path when letterEntries is omitted in libraryState
+    const fallbackDateContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(
+      fallbackDateContext,
+      {
+        ...baseState,
+        albumSortMode: "recent",
+        letterSearchIndex: 0,
+      },
+      { appearance: "dark", palette: APPEARANCE_PALETTES.dark },
+    );
+    assert.equal(
+      fallbackDateContext.recordedTextCalls.some((call) =>
+        ["LETTER SEEK", "LIKED SEEK", "DATE SEEK"].includes(call.text),
+      ),
+      false,
+    );
+    assert.ok(fallbackDateContext.recordedTextCalls.some((call) => call.text === "NOV"));
+  });
+
+  test("Artists view renders centered Sort button, row heart badge for liked artists, Artist Quick Actions, centered 5-slot radial wheel, and Seek HUD", () => {
+    const controller = createSettledLibraryViewController("artists");
+
+    // 1. Centered Sort button at (180, 325) in Dark and Light modes + hit test
+    const unlikedArtistsState = controller.getRenderSnapshot();
+    assert.equal(
+      libraryScreen.hitTestLibraryInteractive(ARTISTS_SORT_BUTTON_X, CRATE_NOTE_BUTTON_Y, unlikedArtistsState),
+      true,
+    );
+    const unlikedContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(unlikedContext, unlikedArtistsState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.ok(
+      unlikedContext.recordedArcs.some(
+        (arcEntry) =>
+          Math.hypot(arcEntry.worldCenterX - ARTISTS_SORT_BUTTON_X, arcEntry.worldCenterY - CRATE_NOTE_BUTTON_Y) <= 3 &&
+          arcEntry.worldRadius >= 15,
+      ),
+      "Artists view must render floating Sort button centered at (180, 325)",
+    );
+
+    // 2. Liked Artist row renders filled accent heart beside countLabel on the right
+    const unlikedFilledHearts = unlikedContext.recordedFills.filter(
+      (fillEntry) => fillEntry.fillStyle === APPEARANCE_PALETTES.dark.signalHighlight && fillEntry.points.length >= 6,
+    ).length;
+
+    controller.setArtistFavorite("artist-a", true);
+    const likedArtistsState = controller.getRenderSnapshot();
+    const likedContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(likedContext, likedArtistsState, {
+      appearance: "light",
+      palette: APPEARANCE_PALETTES.light,
+    });
+    const likedFilledHearts = likedContext.recordedFills.filter(
+      (fillEntry) => fillEntry.fillStyle === APPEARANCE_PALETTES.light.signalHighlight && fillEntry.points.length >= 6,
+    ).length;
+    assert.ok(
+      likedFilledHearts > unlikedFilledHearts,
+      "Liked artist row must draw filled accent heart badge",
+    );
+
+    // 3. Artist Quick Actions renders ARTIST ACTIONS, artist name, album/track count, LIKE/LIKED, and isolates hit-test
+    controller.openArtistQuickActions("artist-c");
+    for (let stepIndex = 0; stepIndex < 20; stepIndex += 1) {
+      controller.step(0.05);
+    }
+    const unlikedQuickState = controller.getRenderSnapshot();
+    const unlikedQuickContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(unlikedQuickContext, unlikedQuickState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.ok(unlikedQuickContext.recordedTextCalls.some((call) => call.text === "ARTIST ACTIONS"));
+    assert.ok(unlikedQuickContext.recordedTextCalls.some((call) => call.text === "1 Album \u00b7 1 Track"));
+    assert.ok(unlikedQuickContext.recordedTextCalls.some((call) => call.text === "LIKE"));
+    assert.equal(libraryScreen.hitTestLibraryInteractive(180, 196, unlikedQuickState), true);
+    assert.equal(
+      libraryScreen.hitTestLibraryInteractive(ARTISTS_SORT_BUTTON_X, CRATE_NOTE_BUTTON_Y, unlikedQuickState),
+      false,
+    );
+
+    controller.setArtistFavorite("artist-c", true);
+    const likedQuickContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(likedQuickContext, controller.getRenderSnapshot(), {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    assert.ok(likedQuickContext.recordedTextCalls.some((call) => call.text === "LIKED"));
+    controller.stepBack();
+    for (let stepIndex = 0; stepIndex < 20; stepIndex += 1) {
+      controller.step(0.05);
+    }
+
+    // 4. Long-pressing Sort button on Artists opens centered 5-slot radial wheel around (180, 325)
+    controller.handlePointerDown(ARTISTS_SORT_BUTTON_X, CRATE_NOTE_BUTTON_Y);
+    for (let stepIndex = 0; stepIndex < 12; stepIndex += 1) {
+      controller.step(0.05);
+    }
+    const artistsWheelState = controller.getRenderSnapshot();
+    assert.equal(artistsWheelState.sortWheelOpen, true);
+    assert.equal(artistsWheelState.sortWheelScope, "artists");
+    const artistsWheelContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(artistsWheelContext, artistsWheelState, {
+      appearance: "dark",
+      palette: APPEARANCE_PALETTES.dark,
+    });
+    const artistSlots = computeSortWheelSlots(ARTISTS_SORT_BUTTON_X, CRATE_NOTE_BUTTON_Y);
+    for (const slot of artistSlots) {
+      const matchedArc = artistsWheelContext.recordedArcs.some(
+        (arcEntry) =>
+          Math.hypot(arcEntry.worldCenterX - slot.centerX, arcEntry.worldCenterY - slot.centerY) <=
+            3 && arcEntry.worldRadius >= 14,
+      );
+      assert.ok(matchedArc, `Artists wheel must render medallion arc for ${slot.mode}`);
+      assert.equal(
+        libraryScreen.hitTestLibraryInteractive(slot.centerX, slot.centerY, artistsWheelState),
+        true,
+      );
+    }
+    controller.handlePointerUp(ARTISTS_SORT_BUTTON_X, CRATE_NOTE_BUTTON_Y);
+
+    // 5. Seek HUD adapts title for Artists sort modes (LIKED SEEK / DATE SEEK)
+    const artistHudBase = {
+      currentView: { kind: "artists", title: "Artists", subtitle: "3 ARTISTS", scrollPosition: 0, targetIndex: 0 },
+      letterSearchActive: true,
+      letterSearchHudAlpha: 1,
+      letterSearchIndex: 0,
+      rimSlabPullLevels: new Array(17).fill(0),
+      idleClockSeconds: 0,
+    };
+    const artistLikedHudContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(
+      artistLikedHudContext,
+      {
+        ...artistHudBase,
+        artistSortMode: "liked-first",
+        letterEntries: [
+          { letter: "A", subLabel: "", shortLabel: "A", itemIndex: 0, label: "Aurora", isFavorite: true, kind: "liked-letter" },
+          { letter: "B", subLabel: "", shortLabel: "B", itemIndex: 1, label: "Beta", isFavorite: false, kind: "letter" },
+        ],
+      },
+      { appearance: "dark", palette: APPEARANCE_PALETTES.dark },
+    );
+    assert.equal(
+      artistLikedHudContext.recordedTextCalls.some((call) =>
+        ["LETTER SEEK", "LIKED SEEK", "DATE SEEK"].includes(call.text),
+      ),
+      false,
+    );
+    assert.ok(artistLikedHudContext.recordedTextCalls.some((call) => call.text === "A"));
+
+    const artistDateHudContext = createRecordingCanvasContext();
+    libraryScreen.renderLibraryScreen(
+      artistDateHudContext,
+      {
+        ...artistHudBase,
+        artistSortMode: "recent",
+        letterEntries: [
+          { letter: "NOV", subLabel: "2026", shortLabel: "NOV \u201926", itemIndex: 0, label: "Aurora", isFavorite: false, kind: "date-month" },
+          { letter: "OCT", subLabel: "2026", shortLabel: "OCT \u201926", itemIndex: 1, label: "Beta", isFavorite: false, kind: "date-month" },
+        ],
+      },
+      { appearance: "light", palette: APPEARANCE_PALETTES.light },
+    );
+    assert.equal(
+      artistDateHudContext.recordedTextCalls.some((call) =>
+        ["LETTER SEEK", "LIKED SEEK", "DATE SEEK"].includes(call.text),
+      ),
+      false,
+    );
+    assert.ok(artistDateHudContext.recordedTextCalls.some((call) => call.text === "NOV"));
+  });
+
+  test("Letter-Seek outer ring renders 50% compact crystal slabs (R161-R173) and R171.5 idle arcs", () => {
+    const pullLevels = new Array(17).fill(0);
+    pullLevels[2] = 1.0;
+    pullLevels[1] = 0.24;
+    pullLevels[3] = 0.24;
+
+    const seekState = {
+      currentView: { kind: "artists", title: "Artists", subtitle: "3 ARTISTS", scrollPosition: 0, targetIndex: 0 },
+      letterSearchActive: true,
+      letterSearchHudAlpha: 1,
+      letterSearchIndex: 0,
+      rimSlabPullLevels: pullLevels,
+      letterEntries: [
+        { letter: "A", subLabel: "", shortLabel: "A", itemIndex: 0, label: "Aurora", isFavorite: false, kind: "letter" },
+        { letter: "B", subLabel: "", shortLabel: "B", itemIndex: 1, label: "Beta", isFavorite: false, kind: "letter" },
+      ],
+      idleClockSeconds: 0,
+    };
+
+    for (const appearance of ["dark", "light"]) {
+      const recordingContext = createRecordingCanvasContext();
+      libraryScreen.renderLibraryScreen(recordingContext, seekState, {
+        appearance,
+        palette: APPEARANCE_PALETTES[appearance],
+      });
+      const rimArcs = recordingContext.recordedArcs.filter((arcEntry) => arcEntry.worldRadius >= 145);
+      assert.ok(rimArcs.length > 0, `Expected rim arcs in ${appearance} mode`);
+      assert.ok(
+        rimArcs.every((arcEntry) => arcEntry.worldRadius >= 160),
+        `All compact slab rim arcs must remain >= R160 in ${appearance} mode`,
+      );
+      assert.ok(
+        rimArcs.some((arcEntry) => Math.abs(arcEntry.worldRadius - 171.5) <= 0.5),
+        `Idle rim arcs must sit on R171.5 in ${appearance} mode`,
+      );
+    }
   });
 });

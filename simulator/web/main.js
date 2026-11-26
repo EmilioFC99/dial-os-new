@@ -9,6 +9,8 @@ import {
   fetchBootStatus,
   fetchLibraryCatalog,
   savePlaylists,
+  setAlbumFavorite,
+  setArtistFavorite,
   setTrackFavorite,
   triggerBootScan,
   triggerLibraryRescan,
@@ -56,6 +58,8 @@ const libraryController = createLibraryController({
   onLaunchTrack: handleLaunchLibraryTrack,
   onExitToHome: handleExitLibraryToHome,
   onPersistPlaylists: handlePersistPlaylists,
+  onToggleAlbumFavorite: handleLibraryToggleAlbumFavorite,
+  onToggleArtistFavorite: handleLibraryToggleArtistFavorite,
 });
 const nowPlayingController = createNowPlayingController({
   onBrowseLibrary: handleNowPlayingBrowseLibrary,
@@ -65,7 +69,8 @@ const nowPlayingController = createNowPlayingController({
   onSkipTrack: handleNowPlayingSkipTrack,
   onSelectQueueIndex: handleNowPlayingSelectQueueIndex,
   onToggleFavorite: handleNowPlayingToggleFavorite,
-  onPlayModeChange: handleNowPlayingPlayModeChange,
+  onToggleShuffle: handleNowPlayingToggleShuffle,
+  onCycleRepeatMode: handleNowPlayingCycleRepeatMode,
   onPersistPlaylists: handlePersistPlaylists,
   onExit: handleExitNowPlaying,
 });
@@ -184,8 +189,9 @@ function handleNowPlayingVolumeChange(nextVolume) {
 }
 
 function handleNowPlayingSkipTrack(direction) {
-  audioEngine.skipTrack(direction);
+  const outcome = audioEngine.skipTrack(direction);
   syncPlaybackAcrossControllers();
+  return outcome;
 }
 
 function handleNowPlayingSelectQueueIndex(rowIndex) {
@@ -194,8 +200,6 @@ function handleNowPlayingSelectQueueIndex(rowIndex) {
 }
 
 function handleNowPlayingToggleFavorite(trackId, nextState) {
-  audioEngine.updateTrackFavorite(trackId, nextState);
-  libraryController.setTrackFavorite(trackId, nextState);
   if (latestCatalog && typeof latestCatalog === "object") {
     const nextFavorite = Boolean(nextState);
     const nextAllTracks = Array.isArray(latestCatalog.allTracks)
@@ -218,23 +222,84 @@ function handleNowPlayingToggleFavorite(trackId, nextState) {
           };
         })
       : [];
+    const favoriteTracksCount = nextAllTracks.filter((trackEntry) =>
+      Boolean(trackEntry.isFavorite),
+    ).length;
+    const favoriteAlbumsCount = nextAlbums.filter((albumEntry) =>
+      Boolean(albumEntry.isFavorite),
+    ).length;
     latestCatalog = {
       ...latestCatalog,
       allTracks: nextAllTracks,
       albums: nextAlbums,
       counts: {
         ...(latestCatalog.counts || {}),
-        favorites: nextAllTracks.filter((trackEntry) => Boolean(trackEntry.isFavorite)).length,
+        favoriteTracks: favoriteTracksCount,
+        favoriteAlbums: favoriteAlbumsCount,
+        favorites: favoriteTracksCount + favoriteAlbumsCount,
       },
     };
   }
+  audioEngine.updateTrackFavorite(trackId, nextState, latestCatalog);
+  libraryController.setTrackFavorite(trackId, nextState);
   void setTrackFavorite(trackId, nextState);
   syncPlaybackAcrossControllers();
   syncShellIfNeeded(true);
 }
 
-function handleNowPlayingPlayModeChange(nextModeId) {
-  audioEngine.setPlayMode(nextModeId);
+function handleLibraryToggleAlbumFavorite(albumId, nextState) {
+  if (latestCatalog && typeof latestCatalog === "object") {
+    const nextFavorite = Boolean(nextState);
+    const nextAlbums = Array.isArray(latestCatalog.albums)
+      ? latestCatalog.albums.map((albumEntry) =>
+          albumEntry.id === albumId ? { ...albumEntry, isFavorite: nextFavorite } : albumEntry,
+        )
+      : [];
+    const favoriteTracksCount = Array.isArray(latestCatalog.allTracks)
+      ? latestCatalog.allTracks.filter((trackEntry) => Boolean(trackEntry.isFavorite)).length
+      : 0;
+    const favoriteAlbumsCount = nextAlbums.filter((albumEntry) =>
+      Boolean(albumEntry.isFavorite),
+    ).length;
+    latestCatalog = {
+      ...latestCatalog,
+      albums: nextAlbums,
+      counts: {
+        ...(latestCatalog.counts || {}),
+        favoriteTracks: favoriteTracksCount,
+        favoriteAlbums: favoriteAlbumsCount,
+        favorites: favoriteTracksCount + favoriteAlbumsCount,
+      },
+    };
+  }
+  void setAlbumFavorite(albumId, nextState);
+  syncShellIfNeeded(true);
+}
+
+function handleLibraryToggleArtistFavorite(artistId, nextState) {
+  if (latestCatalog && typeof latestCatalog === "object") {
+    const nextFavorite = Boolean(nextState);
+    const nextArtists = Array.isArray(latestCatalog.artists)
+      ? latestCatalog.artists.map((artistEntry) =>
+          artistEntry.id === artistId ? { ...artistEntry, isFavorite: nextFavorite } : artistEntry,
+        )
+      : [];
+    latestCatalog = {
+      ...latestCatalog,
+      artists: nextArtists,
+    };
+  }
+  void setArtistFavorite(artistId, nextState);
+  syncShellIfNeeded(true);
+}
+
+function handleNowPlayingToggleShuffle() {
+  audioEngine.toggleShuffle();
+  syncPlaybackAcrossControllers();
+}
+
+function handleNowPlayingCycleRepeatMode() {
+  audioEngine.cycleRepeatMode();
   syncPlaybackAcrossControllers();
 }
 
@@ -298,17 +363,22 @@ function handleLaunchLibraryTrack(selectionSpec) {
 function handleExitLibraryToHome() {
   const libraryState = libraryController.getRenderSnapshot();
   const handoffRotationRadians = resolveTotalVinylRotationRadians(libraryState);
+  const hubScrollPosition = Number.isFinite(libraryState.currentView?.scrollPosition)
+    ? libraryState.currentView.scrollPosition
+    : 0;
   clearActiveCanvasPointer();
   router.navigateTo("home");
   homeController.returnFromScreen("library", {
     vinylRotationRadians: handoffRotationRadians,
+    libraryHubScrollPosition: hubScrollPosition,
   });
   syncDisplayCanvasCursorClasses(lastHoverPoint);
   syncShellIfNeeded(true);
 }
 
 /**
- * Immediately switch from Home into launched destination apps (`library` or `now-playing`).
+ * Immediately switch from Home into launched destination apps (`library` or `now-playing`)
+ * once their hero transition completes.
  *
  * @returns {boolean} True when control transferred from Home to a dedicated screen.
  */
@@ -322,12 +392,16 @@ function handoffHomeAppIfLaunched() {
   }
   const handoffRotationRadians = resolveTotalVinylRotationRadians(launchedHomeState);
   if (launchedHomeState.launchedAppId === "library") {
+    if (launchedHomeState.launchProgress < 1) {
+      return false;
+    }
     const audioState = audioEngine.getState();
     clearActiveCanvasPointer();
     libraryController.enterFromHome({
       vinylRotationRadians: handoffRotationRadians,
       activeTrackId: audioState.activeTrack?.id || null,
       isPlaying: audioState.isPlaying,
+      skipEntryTransition: true,
     });
     router.navigateTo("library");
     return true;
@@ -369,6 +443,8 @@ function handlePersistPlaylists(updatedPlaylists) {
       },
     };
   }
+  audioEngine.syncPlaylists(nextPlaylists, latestCatalog);
+  syncPlaybackAcrossControllers();
   syncShellIfNeeded(true);
 }
 
@@ -452,6 +528,15 @@ function formatTelemetryPhaseLabel(
     if (libraryState?.playlistSheetOpen) {
       return "LIB \u00b7 PLAYLIST SHEET";
     }
+    if (libraryState?.albumQuickActionsOpen) {
+      return "LIB \u00b7 ALBUM ACTIONS";
+    }
+    if (libraryState?.artistQuickActionsOpen) {
+      return "LIB \u00b7 ARTIST ACTIONS";
+    }
+    if (libraryState?.sortWheelOpen) {
+      return "LIB \u00b7 SORT WHEEL";
+    }
     const currentView = libraryState?.currentView;
     if (currentView?.kind === "hub") {
       return "LIB \u00b7 MAIN HUB";
@@ -534,8 +619,16 @@ function buildTelemetrySignature(
     homeState?.focusedApp?.id || "",
     libraryState?.currentView?.kind || "",
     libraryState?.currentView?.title || "",
+    libraryState?.currentView?.artistViewMode || "",
+    libraryState?.currentView?.favoritesViewMode || "",
+    libraryState?.albumSortMode || "",
+    libraryState?.artistSortMode || "",
     libraryState?.vinylLaunchTarget || 0,
     libraryState?.playlistSheetOpen ? 1 : 0,
+    libraryState?.albumQuickActionsOpen ? 1 : 0,
+    libraryState?.artistQuickActionsOpen ? 1 : 0,
+    libraryState?.sortWheelOpen ? 1 : 0,
+    libraryState?.sortWheelHoveredMode || "",
     nowPlayingState?.operatingMode || "",
     nowPlayingState?.lyricsOpen ? 1 : 0,
     nowPlayingState?.lyricsMode || "",
@@ -544,7 +637,8 @@ function buildTelemetrySignature(
     nowPlayingState?.detailsSheetOpen ? 1 : 0,
     nowPlayingState?.playlistPickerOpen ? 1 : 0,
     nowPlayingState?.isSeeking ? 1 : 0,
-    nowPlayingState?.playMode || "",
+    nowPlayingState?.shuffleEnabled ? 1 : 0,
+    nowPlayingState?.repeatMode || "off",
     audioState?.activeTrack?.id || "",
     audioState?.isPlaying ? 1 : 0,
     counts.tracks || 0,
@@ -552,6 +646,8 @@ function buildTelemetrySignature(
     counts.artists || 0,
     counts.genres || 0,
     counts.favorites || 0,
+    counts.favoriteTracks || 0,
+    counts.favoriteAlbums || 0,
     counts.playlists || 0,
   ].join("|");
 }
@@ -748,12 +844,15 @@ function syncDisplayCanvasCursorClasses(
     const isScrollableView =
       libraryState?.vinylLaunchTarget !== 1 &&
       !libraryState?.playlistSheetOpen &&
+      !libraryState?.albumQuickActionsOpen &&
+      !libraryState?.sortWheelOpen &&
       currentKind !== "empty";
     const isPointerDragging = Boolean(
       libraryState?.pointerActive &&
         (libraryState?.pointerMode === "arc-scroll" ||
           libraryState?.pointerMode === "back-swipe" ||
           libraryState?.pointerMode === "crate" ||
+          libraryState?.pointerMode === "sort-wheel" ||
           (libraryState?.pointerMode === "list" && libraryState?.pressedRowIndex === null)),
     );
     const isHoveringTarget =
