@@ -254,6 +254,17 @@ static void set_ui_state(struct app_runtime *runtime, enum ui_screen_state next_
     }
 }
 
+static void render_boot_snapshot_frame(struct app_runtime *runtime) {
+    struct framebuffer_surface surface;
+    if (!runtime->platform->display_acquire_surface(runtime->platform->context, &surface)) {
+        return;
+    }
+    struct boot_render_snapshot snapshot;
+    boot_controller_get_snapshot(&runtime->boot, &snapshot);
+    render_draw_boot_frame(&surface, &snapshot, runtime->appearance_mode);
+    runtime->platform->display_present_surface(runtime->platform->context);
+}
+
 static void render_ready_screen(struct app_runtime *runtime) {
     struct framebuffer_surface surface;
     if (!runtime->platform->display_acquire_surface(runtime->platform->context, &surface)) {
@@ -266,7 +277,7 @@ static void render_ready_screen(struct app_runtime *runtime) {
         .max_volume = runtime->max_volume,
         .sd_mounted = runtime->hardware.sd_mounted,
     };
-    render_draw_ready_frame(&surface, &status);
+    render_draw_ready_frame(&surface, &status, runtime->appearance_mode);
     runtime->platform->display_present_surface(runtime->platform->context);
 }
 
@@ -320,10 +331,25 @@ static void attempt_send_disable_idle_poweroff(struct app_runtime *runtime, uint
     runtime->next_ipc_retry_ns = now_ns + (uint64_t)IPC_RETRY_INTERVAL_MS * NANOSECONDS_PER_MILLISECOND;
 }
 
-static void enter_ready_from_aa24(struct app_runtime *runtime,
-                                  const struct boot_config_snapshot *boot_config,
-                                  uint64_t now_ns) {
+static void enter_ready_from_boot_complete(struct app_runtime *runtime, uint64_t now_ns) {
     freeze_animation_metrics(runtime, now_ns);
+    runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
+    set_ui_state(runtime, UI_STATE_READY);
+    runtime->ready_entered_ns = now_ns;
+    runtime->last_battery_poll_ns = now_ns;
+
+    render_ready_screen(runtime);
+
+    if (runtime->platform->telemetry_write != NULL) {
+        struct telemetry_snapshot snapshot;
+        build_telemetry_snapshot(runtime, false, now_ns, &snapshot);
+        runtime->platform->telemetry_write(runtime->platform->context, &snapshot);
+    }
+}
+
+static void handle_aa24_during_boot(struct app_runtime *runtime,
+                                    const struct boot_config_snapshot *boot_config,
+                                    uint64_t now_ns) {
     runtime->aa24_received = true;
     runtime->aa24_ms = elapsed_ms_since(now_ns, runtime->startup_ns);
 
@@ -341,16 +367,13 @@ static void enter_ready_from_aa24(struct app_runtime *runtime,
     attempt_send_disable_idle_poweroff(runtime, now_ns);
 
     runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
-    set_ui_state(runtime, UI_STATE_READY);
-    runtime->ready_entered_ns = now_ns;
-    runtime->last_battery_poll_ns = now_ns;
+    boot_controller_mark_audio_ready(&runtime->boot, runtime->hardware.sd_mounted);
 
-    render_ready_screen(runtime);
-
-    if (runtime->platform->telemetry_write != NULL) {
-        struct telemetry_snapshot snapshot;
-        build_telemetry_snapshot(runtime, false, now_ns, &snapshot);
-        runtime->platform->telemetry_write(runtime->platform->context, &snapshot);
+    if (runtime->state == UI_STATE_WARNING) {
+        set_ui_state(runtime, UI_STATE_BOOT_ANIMATION);
+        runtime->last_boot_tick_ns = now_ns;
+        runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
+        render_boot_snapshot_frame(runtime);
     }
 }
 
@@ -361,10 +384,13 @@ void app_initialize(struct app_runtime *runtime, const struct platform_operation
 
     memset(runtime, 0, sizeof(*runtime));
     runtime->platform = platform;
+    runtime->appearance_mode = APPEARANCE_MODE_DARK;
     runtime->volume_level = VOLUME_DEFAULT;
     runtime->max_volume = MAX_VOLUME_DEFAULT;
     runtime->saved_brightness = BRIGHTNESS_BOOT_DEFAULT;
     runtime->startup_ns = platform->monotonic_ns(platform->context);
+    runtime->last_boot_tick_ns = runtime->startup_ns;
+    boot_controller_initialize(&runtime->boot);
 
     runtime->initial_crash_count =
         platform->crash_count_read != NULL ? platform->crash_count_read(platform->context) : 0u;
@@ -373,7 +399,8 @@ void app_initialize(struct app_runtime *runtime, const struct platform_operation
         set_ui_state(runtime, UI_STATE_CRASH_SCREEN);
         struct framebuffer_surface surface;
         if (platform->display_acquire_surface(platform->context, &surface)) {
-            render_draw_crash_frame(&surface, runtime->initial_crash_count);
+            render_draw_crash_frame(&surface, runtime->initial_crash_count,
+                                    runtime->appearance_mode);
             platform->display_present_surface(platform->context);
         }
         platform->display_set_brightness(platform->context, BRIGHTNESS_BOOT_DEFAULT);
@@ -388,18 +415,13 @@ void app_initialize(struct app_runtime *runtime, const struct platform_operation
 
     set_ui_state(runtime, UI_STATE_BOOT_ANIMATION);
     uint64_t frame_start_ns = platform->monotonic_ns(platform->context);
-    struct framebuffer_surface surface;
-    if (platform->display_acquire_surface(platform->context, &surface)) {
-        render_draw_boot_frame(&surface, 0u);
-        platform->display_present_surface(platform->context);
-    }
+    render_boot_snapshot_frame(runtime);
     platform->display_set_brightness(platform->context, BRIGHTNESS_BOOT_DEFAULT);
 
     uint64_t frame_end_ns = platform->monotonic_ns(platform->context);
     runtime->takeover_ms = elapsed_ms_since(frame_end_ns, runtime->startup_ns);
     runtime->max_frame_ms = (uint32_t)elapsed_ms_since(frame_end_ns, frame_start_ns);
     runtime->animation_frames = 1u;
-    runtime->animation_angle_degrees = BOOT_DIAL_STEP_DEGREES;
     runtime->next_frame_ns = runtime->startup_ns + BOOT_FRAME_PERIOD_NS;
 }
 
@@ -416,7 +438,7 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
     switch (message->kind) {
         case IPC_INBOUND_BOOT_CONFIG:
             if (runtime->state == UI_STATE_BOOT_ANIMATION || runtime->state == UI_STATE_WARNING) {
-                enter_ready_from_aa24(runtime, &message->boot_config, now_ns);
+                handle_aa24_during_boot(runtime, &message->boot_config, now_ns);
             } else if (runtime->state == UI_STATE_READY || runtime->state == UI_STATE_LOCKED) {
                 runtime->saved_brightness = message->boot_config.brightness;
                 if (runtime->state == UI_STATE_READY) {
@@ -427,8 +449,7 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
             break;
 
         case IPC_INBOUND_INPUT_MODE_READY:
-            if ((runtime->state == UI_STATE_READY || runtime->state == UI_STATE_LOCKED) &&
-                !runtime->a607_resent_disable) {
+            if (runtime->aa24_received && !runtime->a607_resent_disable) {
                 runtime->a607_resent_disable = true;
                 runtime->pending_disable_idle_poweroff = true;
                 runtime->disable_idle_poweroff_attempts = 0u;
@@ -437,7 +458,11 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
             break;
 
         case IPC_INBOUND_SDCARD_EVENT:
-            if (runtime->state == UI_STATE_READY) {
+            if (runtime->state == UI_STATE_BOOT_ANIMATION || runtime->state == UI_STATE_WARNING) {
+                runtime->platform->probe_hardware_status(runtime->platform->context,
+                                                         &runtime->hardware);
+                boot_controller_update_sd_mounted(&runtime->boot, runtime->hardware.sd_mounted);
+            } else if (runtime->state == UI_STATE_READY) {
                 bool previous_sd_mounted = runtime->hardware.sd_mounted;
                 runtime->platform->probe_hardware_status(runtime->platform->context,
                                                          &runtime->hardware);
@@ -474,7 +499,7 @@ void app_handle_button_action(struct app_runtime *runtime, enum physical_button_
         if (!screen_was_locked) {
             struct framebuffer_surface surface;
             if (runtime->platform->display_acquire_surface(runtime->platform->context, &surface)) {
-                render_draw_shutdown_frame(&surface);
+                render_draw_shutdown_frame(&surface, runtime->appearance_mode);
                 runtime->platform->display_present_surface(runtime->platform->context);
             }
         }
@@ -534,34 +559,46 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
         return;
     }
 
-    if (runtime->state == UI_STATE_BOOT_ANIMATION) {
-        if (elapsed_ms_since(now_ns, runtime->startup_ns) >= AA24_WARNING_TIMEOUT_MS) {
-            freeze_animation_metrics(runtime, now_ns);
-            set_ui_state(runtime, UI_STATE_WARNING);
-            struct framebuffer_surface surface;
-            if (runtime->platform->display_acquire_surface(runtime->platform->context, &surface)) {
-                render_draw_warning_frame(&surface);
-                runtime->platform->display_present_surface(runtime->platform->context);
-            }
-            return;
-        }
+    if (runtime->pending_disable_idle_poweroff && now_ns >= runtime->next_ipc_retry_ns) {
+        attempt_send_disable_idle_poweroff(runtime, now_ns);
+    }
 
-        if (now_ns >= runtime->next_frame_ns) {
-            uint64_t frame_start_ns = runtime->platform->monotonic_ns(runtime->platform->context);
-            struct framebuffer_surface surface;
-            if (runtime->platform->display_acquire_surface(runtime->platform->context, &surface)) {
-                render_draw_boot_frame(&surface, runtime->animation_angle_degrees);
-                runtime->platform->display_present_surface(runtime->platform->context);
+    if (runtime->state == UI_STATE_BOOT_ANIMATION || runtime->state == UI_STATE_WARNING) {
+        uint64_t warning_deadline =
+            runtime->startup_ns + (uint64_t)AA24_WARNING_TIMEOUT_MS * NANOSECONDS_PER_MILLISECOND;
+        bool warning_due = (runtime->state == UI_STATE_BOOT_ANIMATION && !runtime->aa24_received &&
+                            now_ns >= warning_deadline);
+        if (now_ns >= runtime->next_frame_ns || warning_due) {
+            float delta_seconds =
+                (now_ns > runtime->last_boot_tick_ns)
+                    ? (float)(now_ns - runtime->last_boot_tick_ns) / (float)NANOSECONDS_PER_SECOND
+                    : 0.0f;
+            runtime->last_boot_tick_ns = now_ns;
+            boot_controller_step(&runtime->boot, delta_seconds);
+
+            if (runtime->boot.phase == BOOT_PHASE_COMPLETED) {
+                enter_ready_from_boot_complete(runtime, now_ns);
+                return;
             }
+
+            enum ui_screen_state next_state =
+                (runtime->boot.phase == BOOT_PHASE_WARNING) ? UI_STATE_WARNING
+                                                            : UI_STATE_BOOT_ANIMATION;
+            if (next_state != runtime->state) {
+                set_ui_state(runtime, next_state);
+                if (next_state == UI_STATE_WARNING) {
+                    freeze_animation_metrics(runtime, now_ns);
+                }
+            }
+
+            uint64_t frame_start_ns = runtime->platform->monotonic_ns(runtime->platform->context);
+            render_boot_snapshot_frame(runtime);
             uint64_t frame_end_ns = runtime->platform->monotonic_ns(runtime->platform->context);
             uint32_t frame_ms = (uint32_t)elapsed_ms_since(frame_end_ns, frame_start_ns);
             if (frame_ms > runtime->max_frame_ms) {
                 runtime->max_frame_ms = frame_ms;
             }
             runtime->animation_frames++;
-            runtime->animation_angle_degrees =
-                (uint16_t)((runtime->animation_angle_degrees + BOOT_DIAL_STEP_DEGREES) %
-                           FULL_CIRCLE_DEGREES);
             runtime->next_frame_ns += BOOT_FRAME_PERIOD_NS;
             if (runtime->next_frame_ns <= now_ns) {
                 runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
@@ -572,10 +609,6 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
 
     if (runtime->state != UI_STATE_READY && runtime->state != UI_STATE_LOCKED) {
         return;
-    }
-
-    if (runtime->pending_disable_idle_poweroff && now_ns >= runtime->next_ipc_retry_ns) {
-        attempt_send_disable_idle_poweroff(runtime, now_ns);
     }
 
     if (!runtime->crash_count_reset_done &&
@@ -636,17 +669,22 @@ int32_t app_compute_poll_timeout_ms(const struct app_runtime *runtime, uint64_t 
         return 0;
     }
 
-    if (runtime->state == UI_STATE_WARNING || runtime->state == UI_STATE_CRASH_SCREEN ||
-        runtime->state == UI_STATE_SHUTTING_DOWN) {
+    if (runtime->state == UI_STATE_CRASH_SCREEN || runtime->state == UI_STATE_SHUTTING_DOWN) {
         return -1;
     }
 
     uint64_t next_deadline = 0ull;
 
-    if (runtime->state == UI_STATE_BOOT_ANIMATION) {
-        uint64_t warning_deadline =
-            runtime->startup_ns + (uint64_t)AA24_WARNING_TIMEOUT_MS * NANOSECONDS_PER_MILLISECOND;
-        next_deadline = min_deadline_ns(runtime->next_frame_ns, warning_deadline);
+    if (runtime->state == UI_STATE_BOOT_ANIMATION || runtime->state == UI_STATE_WARNING) {
+        next_deadline = runtime->next_frame_ns;
+        if (runtime->state == UI_STATE_BOOT_ANIMATION && !runtime->aa24_received) {
+            uint64_t warning_deadline =
+                runtime->startup_ns + (uint64_t)AA24_WARNING_TIMEOUT_MS * NANOSECONDS_PER_MILLISECOND;
+            next_deadline = min_deadline_ns(next_deadline, warning_deadline);
+        }
+        if (runtime->pending_disable_idle_poweroff) {
+            next_deadline = min_deadline_ns(next_deadline, runtime->next_ipc_retry_ns);
+        }
     } else if (runtime->state == UI_STATE_READY || runtime->state == UI_STATE_LOCKED) {
         if (runtime->pending_disable_idle_poweroff) {
             next_deadline = min_deadline_ns(next_deadline, runtime->next_ipc_retry_ns);
