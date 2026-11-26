@@ -31,16 +31,21 @@ int main(void) {
 
     int ui_queue_fd = -1;
     int input_event_fd = -1;
-    platform_linux_get_poll_descriptors(&linux_state, &ui_queue_fd, &input_event_fd);
+    int touch_event_fd = -1;
+    platform_linux_get_poll_descriptors(&linux_state, &ui_queue_fd, &input_event_fd,
+                                        &touch_event_fd);
 
     char ipc_buffer[MESSAGE_QUEUE_RECEIVE_BUFFER_BYTES];
     struct kernel_input_event input_events[16];
+    struct touch_event_decoder touch_decoder;
+    protocol_touch_decoder_initialize(&touch_decoder);
 
     while (!app_is_shutting_down(&runtime)) {
-        struct pollfd poll_descriptors[2];
+        struct pollfd poll_descriptors[3];
         nfds_t descriptor_count = 0u;
         int ui_slot = -1;
         int input_slot = -1;
+        int touch_slot = -1;
 
         if (ui_queue_fd >= 0) {
             ui_slot = (int)descriptor_count;
@@ -52,6 +57,13 @@ int main(void) {
         if (input_event_fd >= 0) {
             input_slot = (int)descriptor_count;
             poll_descriptors[descriptor_count].fd = input_event_fd;
+            poll_descriptors[descriptor_count].events = POLLIN;
+            poll_descriptors[descriptor_count].revents = 0;
+            descriptor_count++;
+        }
+        if (touch_event_fd >= 0) {
+            touch_slot = (int)descriptor_count;
+            poll_descriptors[descriptor_count].fd = touch_event_fd;
             poll_descriptors[descriptor_count].events = POLLIN;
             poll_descriptors[descriptor_count].revents = 0;
             descriptor_count++;
@@ -92,6 +104,24 @@ int main(void) {
                         protocol_decode_input_event(&input_events[index]);
                     if (action != BUTTON_ACTION_NONE) {
                         app_handle_button_action(&runtime, action);
+                    }
+                }
+            }
+        }
+
+        if (touch_slot >= 0 && (poll_descriptors[touch_slot].revents & POLLIN) != 0) {
+            while (!app_is_shutting_down(&runtime)) {
+                size_t event_count = platform_linux_read_touch_events(
+                    &linux_state, input_events, sizeof(input_events) / sizeof(input_events[0]));
+                if (event_count == 0u) {
+                    break;
+                }
+                for (size_t index = 0u; index < event_count && !app_is_shutting_down(&runtime);
+                     index++) {
+                    struct touch_event touch;
+                    if (protocol_touch_decoder_feed(&touch_decoder, &input_events[index], &touch) !=
+                        TOUCH_EVENT_NONE) {
+                        app_handle_touch_event(&runtime, &touch);
                     }
                 }
             }

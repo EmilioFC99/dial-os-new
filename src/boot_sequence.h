@@ -44,6 +44,7 @@ struct boot_render_snapshot {
 void boot_controller_initialize(struct boot_controller *controller);
 void boot_controller_step(struct boot_controller *controller, float delta_seconds);
 void boot_controller_mark_audio_ready(struct boot_controller *controller, bool sd_mounted);
+void boot_controller_retry_from_warning(struct boot_controller *controller);
 void boot_controller_update_sd_mounted(struct boot_controller *controller, bool sd_mounted);
 void boot_controller_get_snapshot(const struct boot_controller *controller,
                                   struct boot_render_snapshot *snapshot_out);
