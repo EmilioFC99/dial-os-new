@@ -55,6 +55,11 @@
 #define AA24_WARNING_TIMEOUT_MS 12000u
 #define READY_STABILITY_WINDOW_MS 10000u
 #define BATTERY_POLL_INTERVAL_MS 30000u
+#define HOME_PERF_LOG_INTERVAL_MS 5000u
+#define FRAME_SLOW_THRESHOLD_MS 17u
+#define LOGGER_BUFFER_CAPACITY_BYTES 16384u
+#define LOGGER_LINE_MAX_BYTES 256u
+#define LOGGER_ROTATE_MAX_BYTES 262144u
 #define SD_MOUNT_FOLLOWUP_FIRST_MS 500u
 #define SD_MOUNT_FOLLOWUP_SECOND_MS 1500u
 #define IPC_RETRY_INTERVAL_MS 500u
@@ -143,8 +148,12 @@
 #define PATH_CRASH_COUNT_TEMP "/tmp/.dialos_crash_count.tmp"
 #define PATH_TMP_BOOT_LOG "/tmp/dialos_boot.log"
 #define PATH_TMP_BOOT_LOG_TEMP "/tmp/.dialos_boot.log.tmp"
+#define PATH_TMP_EVENT_LOG "/tmp/dialos.log"
+#define PATH_TMP_EVENT_LOG_PREV "/tmp/dialos.log.prev"
 #define PATH_SDCARD_BOOT_LOG "/tmp/sdcard/.dial-os/boot.log"
 #define PATH_SDCARD_BOOT_LOG_TEMP "/tmp/sdcard/.dial-os/.boot.log.tmp"
+#define PATH_SDCARD_EVENT_LOG "/tmp/sdcard/.dial-os/dialos.log"
+#define PATH_SDCARD_EVENT_LOG_PREV "/tmp/sdcard/.dial-os/dialos.log.prev"
 #define PATH_SDCARD_CRASH_LOG "/tmp/sdcard/.dial-os/crash.log"
 #define PATH_SDCARD_CRASH_LOG_TEMP "/tmp/sdcard/.dial-os/.crash.log.tmp"
 #define PATH_CMD_WATCHDOG "/usr/bin/cmd_watchdog"

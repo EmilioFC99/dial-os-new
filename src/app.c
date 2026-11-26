@@ -267,6 +267,17 @@ static void render_boot_snapshot_frame(struct app_runtime *runtime) {
     runtime->platform->display_present_surface(runtime->platform->context);
 }
 
+static void flush_runtime_logs(struct app_runtime *runtime, bool sync_to_disk) {
+    if (runtime->platform->log_append != NULL) {
+        (void)logger_flush(&runtime->logger, runtime->platform->log_append,
+                           runtime->platform->context, sync_to_disk);
+    }
+}
+
+static uint64_t runtime_uptime_ms(const struct app_runtime *runtime, uint64_t now_ns) {
+    return elapsed_ms_since(now_ns, runtime->startup_ns);
+}
+
 static void sync_home_telemetry(struct app_runtime *runtime) {
     if (runtime->hardware.sd_free_valid) {
         runtime->cached_sd_free_valid = true;
@@ -306,6 +317,14 @@ static void render_home_screen(struct app_runtime *runtime) {
         runtime->home_max_frame_ms = frame_ms;
     }
     runtime->home_frames++;
+    runtime->perf_window_frames++;
+    runtime->perf_window_total_frame_ms += frame_ms;
+    if (frame_ms > runtime->perf_window_max_frame_ms) {
+        runtime->perf_window_max_frame_ms = frame_ms;
+    }
+    if (frame_ms >= FRAME_SLOW_THRESHOLD_MS) {
+        runtime->perf_window_slow_frames++;
+    }
 }
 
 static void build_telemetry_snapshot(const struct app_runtime *runtime, bool is_shutdown_update,
@@ -354,7 +373,11 @@ static void attempt_send_disable_idle_poweroff(struct app_runtime *runtime, uint
     }
 
     runtime->disable_idle_poweroff_attempts++;
-    if (runtime->platform->ipc_send_player(runtime->platform->context, command, length)) {
+    bool sent_ok = runtime->platform->ipc_send_player(runtime->platform->context, command, length);
+    logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "IPC",
+                    "tx 0664 ok=%u attempt=%u", sent_ok ? 1u : 0u,
+                    (unsigned)runtime->disable_idle_poweroff_attempts);
+    if (sent_ok) {
         runtime->idle_poweroff_disabled = true;
         runtime->pending_disable_idle_poweroff = false;
         return;
@@ -377,7 +400,16 @@ static void enter_home_from_boot_complete(struct app_runtime *runtime, uint64_t 
     runtime->ready_entered_ns = now_ns;
     runtime->last_battery_poll_ns = now_ns;
     runtime->last_home_tick_ns = now_ns;
+    runtime->perf_window_start_ns = now_ns;
     runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
+
+    logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "BOOT",
+                    "complete -> home takeover_ms=%llu aa24_ms=%llu frames=%u fps_x10=%u "
+                    "max_ms=%u sd=%u",
+                    (unsigned long long)runtime->takeover_ms,
+                    (unsigned long long)runtime->aa24_ms, (unsigned)runtime->animation_frames,
+                    (unsigned)runtime->animation_fps_x10, (unsigned)runtime->max_frame_ms,
+                    runtime->hardware.sd_mounted ? 1u : 0u);
 
     render_home_screen(runtime);
 
@@ -437,15 +469,22 @@ void app_initialize(struct app_runtime *runtime, const struct platform_operation
     runtime->saved_brightness = BRIGHTNESS_BOOT_DEFAULT;
     runtime->startup_ns = platform->monotonic_ns(platform->context);
     runtime->last_boot_tick_ns = runtime->startup_ns;
+    logger_initialize(&runtime->logger);
     boot_controller_initialize(&runtime->boot);
+    runtime->last_logged_boot_phase = runtime->boot.phase;
     home_controller_initialize(&runtime->home);
     sync_home_telemetry(runtime);
 
     runtime->initial_crash_count =
         platform->crash_count_read != NULL ? platform->crash_count_read(platform->context) : 0u;
 
+    logger_log_line(&runtime->logger, 0ull, "BOOT", "start appearance=%s crash_count=%u",
+                    runtime->appearance_mode == APPEARANCE_MODE_LIGHT ? "light" : "dark",
+                    (unsigned)runtime->initial_crash_count);
+
     if (crash_should_enter_screen(runtime->initial_crash_count)) {
         set_ui_state(runtime, UI_STATE_CRASH_SCREEN);
+        flush_runtime_logs(runtime, true);
         struct framebuffer_surface surface;
         if (platform->display_acquire_surface(platform->context, &surface)) {
             render_draw_crash_frame(&surface, runtime->initial_crash_count,
@@ -486,6 +525,11 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
 
     switch (message->kind) {
         case IPC_INBOUND_BOOT_CONFIG:
+            logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "IPC",
+                            "rx aa24 vol=%u max_vol=%u bright=%u",
+                            (unsigned)message->boot_config.volume_level,
+                            (unsigned)message->boot_config.max_volume,
+                            (unsigned)message->boot_config.brightness);
             if (runtime->state == UI_STATE_BOOT_ANIMATION || runtime->state == UI_STATE_WARNING) {
                 handle_aa24_during_boot(runtime, &message->boot_config, now_ns);
                 sync_home_telemetry(runtime);
@@ -499,6 +543,7 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
             break;
 
         case IPC_INBOUND_INPUT_MODE_READY:
+            logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "IPC", "rx a607");
             if (runtime->aa24_received && !runtime->a607_resent_disable) {
                 runtime->a607_resent_disable = true;
                 runtime->pending_disable_idle_poweroff = true;
@@ -508,6 +553,8 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
             break;
 
         case IPC_INBOUND_SDCARD_EVENT:
+            logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "IPC",
+                            "rx aa22 inserted=%u", message->sdcard_inserted ? 1u : 0u);
             if (runtime->state == UI_STATE_BOOT_ANIMATION || runtime->state == UI_STATE_WARNING) {
                 runtime->platform->probe_hardware_status(runtime->platform->context,
                                                          &runtime->hardware);
@@ -527,6 +574,10 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
             break;
 
         case IPC_INBOUND_PLAYBACK_STATUS:
+            if (message->playback_status.has_state) {
+                logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "IPC",
+                                "rx a202 state=%d", (int)message->playback_status.state);
+            }
             if (message->playback_status.has_track_metadata) {
                 snprintf(runtime->home.telemetry.track_title,
                          sizeof(runtime->home.telemetry.track_title), "%s",
@@ -555,6 +606,7 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
             break;
 
         case IPC_INBOUND_PLAYBACK_STOP:
+            logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "IPC", "rx a102");
             runtime->non_storage_playback_mode = HOME_PLAYBACK_IDLE;
             runtime->home.telemetry.elapsed_ms = 0u;
             runtime->home.telemetry.duration_ms = 0u;
@@ -617,6 +669,13 @@ void app_handle_button_action(struct app_runtime *runtime, enum physical_button_
 
         struct telemetry_snapshot final_snapshot;
         build_telemetry_snapshot(runtime, true, now_ns, &final_snapshot);
+        logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "POWER",
+                        "shutdown uptime_ms=%llu home_frames=%u home_fps_x10=%u home_max_ms=%u",
+                        (unsigned long long)final_snapshot.uptime_ms,
+                        (unsigned)final_snapshot.home_frames,
+                        (unsigned)final_snapshot.home_fps_x10,
+                        (unsigned)final_snapshot.home_max_frame_ms);
+        flush_runtime_logs(runtime, true);
         runtime->platform->execute_shutdown(runtime->platform->context, screen_was_locked,
                                             &final_snapshot);
         return;
@@ -624,6 +683,9 @@ void app_handle_button_action(struct app_runtime *runtime, enum physical_button_
 
     if (runtime->state == UI_STATE_HOME) {
         if (action == BUTTON_ACTION_POWER_SHORT) {
+            uint64_t now_ns = runtime->platform->monotonic_ns(runtime->platform->context);
+            logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "POWER", "lock");
+            flush_runtime_logs(runtime, true);
             set_ui_state(runtime, UI_STATE_LOCKED);
             runtime->platform->display_enter_sleep(runtime->platform->context);
             return;
@@ -638,8 +700,13 @@ void app_handle_button_action(struct app_runtime *runtime, enum physical_button_
             }
 
             if (next_volume != runtime->volume_level) {
+                uint64_t now_ns = runtime->platform->monotonic_ns(runtime->platform->context);
                 runtime->volume_level = next_volume;
                 sync_home_telemetry(runtime);
+                logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "INPUT",
+                                "button=%s vol=%u",
+                                action == BUTTON_ACTION_VOLUME_UP ? "vol_up" : "vol_down",
+                                (unsigned)next_volume);
                 char command[IPC_COMMAND_BUFFER_BYTES];
                 size_t length = protocol_format_set_volume(next_volume, command, sizeof(command));
                 if (length > 0u) {
@@ -651,11 +718,13 @@ void app_handle_button_action(struct app_runtime *runtime, enum physical_button_
         }
     } else if (runtime->state == UI_STATE_LOCKED && action == BUTTON_ACTION_POWER_SHORT) {
         uint64_t now_ns = runtime->platform->monotonic_ns(runtime->platform->context);
+        logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "POWER", "wake");
         runtime->platform->display_begin_wake(runtime->platform->context);
         runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
         sync_home_telemetry(runtime);
         runtime->last_battery_poll_ns = now_ns;
         runtime->last_home_tick_ns = now_ns;
+        runtime->perf_window_start_ns = now_ns;
         runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
         set_ui_state(runtime, UI_STATE_HOME);
         render_home_screen(runtime);
@@ -707,9 +776,13 @@ void app_handle_touch_event(struct app_runtime *runtime, const struct touch_even
         enum home_controller_event home_event =
             home_controller_handle_touch(&runtime->home, event);
         if (home_event == HOME_EVENT_TOGGLE_APPEARANCE) {
+            uint64_t now_ns = runtime->platform->monotonic_ns(runtime->platform->context);
             runtime->appearance_mode = (runtime->appearance_mode == APPEARANCE_MODE_DARK)
                                            ? APPEARANCE_MODE_LIGHT
                                            : APPEARANCE_MODE_DARK;
+            logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "HOME",
+                            "appearance mode=%s",
+                            runtime->appearance_mode == APPEARANCE_MODE_LIGHT ? "light" : "dark");
             if (runtime->platform->appearance_mode_write != NULL) {
                 runtime->platform->appearance_mode_write(runtime->platform->context,
                                                          runtime->appearance_mode);
@@ -743,6 +816,15 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
             runtime->last_boot_tick_ns = now_ns;
             boot_controller_step(&runtime->boot, delta_seconds);
 
+            if (runtime->boot.phase != runtime->last_logged_boot_phase) {
+                logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "BOOT",
+                                "phase %d -> %d frames=%u max_ms=%u",
+                                (int)runtime->last_logged_boot_phase, (int)runtime->boot.phase,
+                                (unsigned)runtime->animation_frames,
+                                (unsigned)runtime->max_frame_ms);
+                runtime->last_logged_boot_phase = runtime->boot.phase;
+            }
+
             if (runtime->boot.phase == BOOT_PHASE_COMPLETED) {
                 enter_home_from_boot_complete(runtime, now_ns);
                 return;
@@ -755,6 +837,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                 set_ui_state(runtime, next_state);
                 if (next_state == UI_STATE_WARNING) {
                     freeze_animation_metrics(runtime, now_ns);
+                    flush_runtime_logs(runtime, true);
                 }
             }
 
@@ -816,6 +899,55 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
             runtime->last_home_tick_ns = now_ns;
             home_controller_step(&runtime->home, delta_seconds);
             render_home_screen(runtime);
+
+            if (!runtime->home_entry_logged && runtime->home.entry_progress >= 1.0f) {
+                runtime->home_entry_logged = true;
+                logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "HOME",
+                                "entry_complete frames=%u max_ms=%u",
+                                (unsigned)runtime->home_frames,
+                                (unsigned)runtime->home_max_frame_ms);
+                flush_runtime_logs(runtime, false);
+            }
+
+            if (runtime->home.active_screen != runtime->last_logged_home_screen ||
+                runtime->home.launch_target != runtime->last_logged_launch_target) {
+                logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "HOME",
+                                "screen %d -> %d app=%d launch=%.0f",
+                                (int)runtime->last_logged_home_screen,
+                                (int)runtime->home.active_screen,
+                                (int)runtime->home.launched_app_id,
+                                (double)runtime->home.launch_target);
+                runtime->last_logged_home_screen = runtime->home.active_screen;
+                runtime->last_logged_launch_target = runtime->home.launch_target;
+            }
+
+            uint64_t perf_elapsed_ms = elapsed_ms_since(now_ns, runtime->perf_window_start_ns);
+            if (perf_elapsed_ms >= HOME_PERF_LOG_INTERVAL_MS) {
+                uint32_t fps_x10 =
+                    perf_elapsed_ms > 0ull
+                        ? (uint32_t)(((uint64_t)runtime->perf_window_frames * 10000ull) /
+                                     perf_elapsed_ms)
+                        : 0u;
+                uint32_t avg_ms = runtime->perf_window_frames > 0u
+                                      ? (runtime->perf_window_total_frame_ms /
+                                         runtime->perf_window_frames)
+                                      : 0u;
+                logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "PERF",
+                                "home frames=%u fps_x10=%u avg_ms=%u max_ms=%u slow_frames=%u "
+                                "screen=%d bat=%u vol=%u",
+                                (unsigned)runtime->perf_window_frames, (unsigned)fps_x10,
+                                (unsigned)avg_ms, (unsigned)runtime->perf_window_max_frame_ms,
+                                (unsigned)runtime->perf_window_slow_frames,
+                                (int)runtime->home.active_screen,
+                                (unsigned)runtime->hardware.battery_percent,
+                                (unsigned)runtime->home.telemetry.volume_percent);
+                runtime->perf_window_start_ns = now_ns;
+                runtime->perf_window_frames = 0u;
+                runtime->perf_window_total_frame_ms = 0u;
+                runtime->perf_window_max_frame_ms = 0u;
+                runtime->perf_window_slow_frames = 0u;
+                flush_runtime_logs(runtime, false);
+            }
 
             runtime->next_frame_ns += BOOT_FRAME_PERIOD_NS;
             if (runtime->next_frame_ns <= now_ns) {

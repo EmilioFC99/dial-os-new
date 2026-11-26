@@ -8,6 +8,7 @@ int main(void) {
     run_protocol_tests();
     run_boot_sequence_tests();
     run_home_screen_tests();
+    run_logger_tests();
     run_render_tests();
     run_app_tests();
 

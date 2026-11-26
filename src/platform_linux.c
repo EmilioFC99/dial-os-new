@@ -535,6 +535,59 @@ static bool linux_appearance_mode_read(void *context, enum appearance_mode *mode
     return false;
 }
 
+static bool append_log_file_with_rotation(const char *directory_path, const char *log_path,
+                                          const char *prev_path, const char *text, size_t length,
+                                          bool sync_to_disk) {
+    if (directory_path != NULL && mkdir(directory_path, 0755) != 0 && errno != EEXIST) {
+        return false;
+    }
+
+    struct stat file_status;
+    if (stat(log_path, &file_status) == 0 && file_status.st_size >= (off_t)LOGGER_ROTATE_MAX_BYTES) {
+        (void)rename(log_path, prev_path);
+    }
+
+    int log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (log_fd < 0) {
+        return false;
+    }
+
+    size_t total_written = 0u;
+    bool ok = true;
+    while (total_written < length) {
+        ssize_t written = write(log_fd, text + total_written, length - total_written);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ok = false;
+            break;
+        }
+        total_written += (size_t)written;
+    }
+
+    if (ok && sync_to_disk) {
+        (void)fsync(log_fd);
+    }
+    (void)close(log_fd);
+    return ok;
+}
+
+static bool linux_log_append(void *context, const char *text, size_t length, bool sync_to_disk) {
+    (void)context;
+    if (text == NULL || length == 0u) {
+        return true;
+    }
+
+    (void)append_log_file_with_rotation(NULL, PATH_TMP_EVENT_LOG, PATH_TMP_EVENT_LOG_PREV, text,
+                                        length, false);
+    if (!is_sdcard_mounted()) {
+        return false;
+    }
+    return append_log_file_with_rotation(PATH_SDCARD_DIALOS_DIRECTORY, PATH_SDCARD_EVENT_LOG,
+                                         PATH_SDCARD_EVENT_LOG_PREV, text, length, sync_to_disk);
+}
+
 static void linux_appearance_mode_write(void *context, enum appearance_mode mode) {
     (void)context;
     const char *text = (mode == APPEARANCE_MODE_LIGHT) ? "light\n" : "dark\n";
@@ -693,6 +746,7 @@ bool platform_linux_initialize(struct platform_linux_state *state,
     operations_out->update_crash_state_mirror = linux_update_crash_state_mirror;
     operations_out->appearance_mode_read = linux_appearance_mode_read;
     operations_out->appearance_mode_write = linux_appearance_mode_write;
+    operations_out->log_append = linux_log_append;
     return true;
 }
 

@@ -46,6 +46,10 @@ struct fake_platform_context {
     bool has_saved_appearance;
     enum appearance_mode saved_appearance;
     uint32_t appearance_writes;
+    char log_output[32768];
+    size_t log_output_length;
+    uint32_t log_flush_count;
+    uint32_t log_sync_count;
     enum call_event_kind trace[64];
     uint32_t trace_count;
 };
@@ -169,6 +173,20 @@ static void fake_appearance_mode_write(void *context, enum appearance_mode mode)
     fake->appearance_writes++;
 }
 
+static bool fake_log_append(void *context, const char *text, size_t length, bool sync_to_disk) {
+    struct fake_platform_context *fake = (struct fake_platform_context *)context;
+    fake->log_flush_count++;
+    if (sync_to_disk) {
+        fake->log_sync_count++;
+    }
+    if (fake->log_output_length + length < sizeof(fake->log_output)) {
+        memcpy(fake->log_output + fake->log_output_length, text, length);
+        fake->log_output_length += length;
+        fake->log_output[fake->log_output_length] = '\0';
+    }
+    return true;
+}
+
 static void init_fake_platform(struct fake_platform_context *fake,
                                struct platform_operations *operations) {
     memset(fake, 0, sizeof(*fake));
@@ -194,6 +212,7 @@ static void init_fake_platform(struct fake_platform_context *fake,
     operations->update_crash_state_mirror = fake_update_crash_state_mirror;
     operations->appearance_mode_read = fake_appearance_mode_read;
     operations->appearance_mode_write = fake_appearance_mode_write;
+    operations->log_append = fake_log_append;
 }
 
 static struct inbound_ipc_message make_aa24_message(uint8_t volume, uint8_t max_volume,
@@ -659,6 +678,40 @@ static void test_boot_large_stall_delta_does_not_skip_signal_lock_and_handoff(vo
     TEST_ASSERT_TRUE(runtime.boot.phase != BOOT_PHASE_COMPLETED);
 }
 
+static void test_persistent_event_and_performance_logging(void) {
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+
+    struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 9850u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+
+    /* Complete Home entry (0.78s) + 5.0s performance heartbeat window */
+    advance_runtime_ticks(&runtime, &fake, 5900u);
+    TEST_ASSERT_TRUE(fake.log_flush_count > 0u);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "=== SESSION START ===") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT start") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "IPC rx aa24") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT complete -> home") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "HOME entry_complete") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "PERF home") != NULL);
+
+    /* Power lock and shutdown flush with sync_to_disk = true */
+    uint32_t syncs_before_lock = fake.log_sync_count;
+    app_handle_button_action(&runtime, BUTTON_ACTION_POWER_SHORT);
+    TEST_ASSERT_TRUE(fake.log_sync_count > syncs_before_lock);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "POWER lock") != NULL);
+
+    app_handle_button_action(&runtime, BUTTON_ACTION_POWER_SHORT);
+    app_handle_button_action(&runtime, BUTTON_ACTION_POWER_LONG);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "POWER shutdown") != NULL);
+}
+
 void run_app_tests(void) {
     printf("Suite: app\n");
     RUN_TEST(test_crash_formatting_and_count_parsing);
@@ -671,4 +724,5 @@ void run_app_tests(void) {
     RUN_TEST(test_home_touch_appearance_persistence_and_live_telemetry);
     RUN_TEST(test_warning_tap_to_retry_recovery);
     RUN_TEST(test_boot_large_stall_delta_does_not_skip_signal_lock_and_handoff);
+    RUN_TEST(test_persistent_event_and_performance_logging);
 }

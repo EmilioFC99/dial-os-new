@@ -54,6 +54,7 @@ struct platform_operations {
     void (*update_crash_state_mirror)(void *context, int32_t ui_state);
     bool (*appearance_mode_read)(void *context, enum appearance_mode *mode_out);
     void (*appearance_mode_write)(void *context, enum appearance_mode mode);
+    bool (*log_append)(void *context, const char *text, size_t length, bool sync_to_disk);
 };
 
 #endif

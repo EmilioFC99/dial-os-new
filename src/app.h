@@ -7,6 +7,7 @@
 
 #include "boot_sequence.h"
 #include "home_screen.h"
+#include "logger.h"
 #include "platform.h"
 #include "protocol.h"
 #include "theme.h"
@@ -56,6 +57,16 @@ struct app_runtime {
     uint32_t home_frames;
     uint32_t home_fps_x10;
     uint32_t home_max_frame_ms;
+    struct event_logger logger;
+    bool home_entry_logged;
+    uint64_t perf_window_start_ns;
+    uint32_t perf_window_frames;
+    uint32_t perf_window_total_frame_ms;
+    uint32_t perf_window_max_frame_ms;
+    uint32_t perf_window_slow_frames;
+    enum boot_phase last_logged_boot_phase;
+    enum active_screen_id last_logged_home_screen;
+    float last_logged_launch_target;
     uint64_t cached_sd_free_megabytes;
     bool cached_sd_free_valid;
     enum home_playback_mode non_storage_playback_mode;
