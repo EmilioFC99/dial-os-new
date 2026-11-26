@@ -19,3 +19,10 @@ These rules apply to every session, subagent, and swarm worker operating in this
 - **On-Device Transparency:** Any on-device test or long-running operation must show live animated progress (spinner/progress bar + current step) so the operator always knows the device has not frozen.
 - **No Theme Leakage:** Zero theme names in file names, identifiers, or strings; use semantic **Dark Mode** and **Light Mode** tokens only.
 - **Hardware-Verified Only:** No milestone is complete until verified on the real FiiO Snowsky Disc (`V2.57`).
+
+## 3. Verified Hardware Runtime Invariants
+- **Single-Threaded Non-Blocking UI Loop:** Keep `mq_ui` strictly single-threaded POSIX C (do not spawn `pthread` workers in `-static` musl on Linux `3.10.14`) and never run blocking SD card I/O (`statvfs`, directory scans) on the main UI thread. Always clamp frame `delta_seconds` (`<= 0.05 s`) so OS hiccups cannot skip choreography acts.
+- **Full-Bleed `360×360` Canvas:** Always fill the entire `360×360` framebuffer with the active canvas color and clip only to `[0..359]` bounds; never mask an un-antialiased black circle in software (the physical ST77916 bezel clips cleanly).
+- **180° Inversion & Touch-First Input:** Both `/dev/fb0` and `/dev/input/event1` (`cst816t`, `~38–40 Hz`) apply `359 - coord`. The Disc has no rotary encoder (`event0` has discrete Vol/Power keys only); normalize velocity by touch sample timestamps (`dt_ms`).
+- **IPC & Volume Contract:** Hardware DAC volume `0..120` maps `120 -> 100%` in DialOS (`round(raw * 100 / 120)`). Parse `a202` and `a103` with their real V2.57 8-byte compact headers and double-escaped `"song"` JSON.
+- **Persistent Event & Performance Logging:** Record lifecycle events and 5-second `PERF` frame-budget metrics (`fps_x10`, `avg_ms`, `max_ms`, `slow_frames`) in RAM and flush to `.dial-os/dialos.log` without stalling active transitions.
