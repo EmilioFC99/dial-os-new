@@ -1,0 +1,143 @@
+#include "test_runner.h"
+
+#include "now_playing_controller.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+static void make_ctrl_temp_dir(char *path_out, size_t capacity) {
+    snprintf(path_out, capacity, "/tmp/dialos_npc_XXXXXX");
+    TEST_ASSERT_TRUE(mkdtemp(path_out) != NULL);
+}
+
+static void cleanup_ctrl_temp_dir(const char *directory) {
+    char file_path[256];
+    snprintf(file_path, sizeof(file_path), "%s/library.db", directory);
+    unlink(file_path);
+    snprintf(file_path, sizeof(file_path), "%s/library.db-journal", directory);
+    unlink(file_path);
+    rmdir(directory);
+}
+
+static int64_t seed_ctrl_track(struct library_db *database, const char *path, const char *title,
+                               const char *album, uint16_t num) {
+    struct library_db_track_input input = {0};
+    input.path = path;
+    input.audio_fingerprint = library_fnv1a_64(path);
+    input.file_size_bytes = 4096u;
+    input.mtime_seconds = 1700000000;
+    input.format_kind = LIBRARY_FORMAT_FLAC;
+    input.title = title;
+    input.artist = "Artist";
+    input.album_artist = "Artist";
+    input.album = album;
+    input.genre = "Synth";
+    input.year = 2025u;
+    input.disc_number = 1u;
+    input.track_number = num;
+    input.duration_seconds = 200u;
+    input.added_at_seconds = 1700000000 + (int64_t)num;
+    int64_t id = 0;
+    if (!library_db_upsert_track(database, &input, 0, &id)) {
+        return 0;
+    }
+    return id;
+}
+
+static void test_tap_seek_volume_and_6_level_back_stack(void) {
+    char dir_path[128];
+    make_ctrl_temp_dir(dir_path, sizeof(dir_path));
+    struct library_db database;
+    TEST_ASSERT_TRUE(library_db_open(&database, dir_path));
+
+    int64_t t1 = seed_ctrl_track(&database, "/m/1.flac", "Alpha", "Album A", 1u);
+    (void)seed_ctrl_track(&database, "/m/2.flac", "Beta", "Album A", 2u);
+    TEST_ASSERT_TRUE(library_db_recompute_aggregates(&database, NULL, 0u, NULL));
+
+    struct playback_engine engine;
+    playback_engine_initialize(&engine, &database);
+    struct playback_engine_effects effects;
+    struct library_db_collection all_ctx = {LIBRARY_DB_COLLECTION_TRACKS_ALL, 0};
+    TEST_ASSERT_TRUE(
+        playback_engine_launch_context(&engine, &all_ctx, "All songs", t1, false, false, &effects));
+
+    struct now_playing_controller ctrl;
+    now_playing_controller_initialize(&ctrl, &engine, &database, NULL);
+    now_playing_controller_enter(&ctrl, NP_RETURN_LIBRARY, NP_OPEN_FROM_ALBUM_CRATE, false, 0.0f,
+                                 60u);
+
+    bool vol_changed = false;
+    enum now_playing_action_kind action = NP_ACTION_NONE;
+
+    /* 1. Right-bezel tap (< 8px drift) falls through to single-tap -> opens Quick Actions */
+    struct touch_event down = {TOUCH_EVENT_DOWN, 335, 180, 100ull};
+    struct touch_event up = {TOUCH_EVENT_UP, 336, 181, 130ull};
+    now_playing_controller_handle_touch(&ctrl, &down, &effects, &vol_changed, &action);
+    now_playing_controller_handle_touch(&ctrl, &up, &effects, &vol_changed, &action);
+    TEST_ASSERT_FALSE(vol_changed);
+    TEST_ASSERT_TRUE(ctrl.pending_single_tap);
+    for (int step = 0; step < 20; step++) {
+        now_playing_controller_step(&ctrl, 0.016f, &effects, &vol_changed, &action);
+    }
+    TEST_ASSERT_TRUE(ctrl.quick_actions_open);
+
+    /* 2. Quick Actions -> tap LYRICS (180, 238) opens Lyrics & closes Quick Actions */
+    struct touch_event lyr_down = {TOUCH_EVENT_DOWN, 180, 238, 200ull};
+    struct touch_event lyr_up = {TOUCH_EVENT_UP, 180, 238, 220ull};
+    now_playing_controller_handle_touch(&ctrl, &lyr_down, &effects, &vol_changed, &action);
+    now_playing_controller_handle_touch(&ctrl, &lyr_up, &effects, &vol_changed, &action);
+    TEST_ASSERT_TRUE(ctrl.lyrics_open);
+    TEST_ASSERT_FALSE(ctrl.quick_actions_open);
+
+    /* 3. Double-tap toggles Play/Pause */
+    struct touch_event tap_d = {TOUCH_EVENT_DOWN, 180, 180, 300ull};
+    struct touch_event tap_u = {TOUCH_EVENT_UP, 180, 180, 320ull};
+    now_playing_controller_handle_touch(&ctrl, &tap_d, &effects, &vol_changed, &action);
+    now_playing_controller_handle_touch(&ctrl, &tap_u, &effects, &vol_changed, &action);
+    now_playing_controller_handle_touch(&ctrl, &tap_d, &effects, &vol_changed, &action);
+    now_playing_controller_handle_touch(&ctrl, &tap_u, &effects, &vol_changed, &action);
+    TEST_ASSERT_FALSE(engine.is_playing);
+    TEST_ASSERT_TRUE(ctrl.play_pulse_alpha > 0.5f);
+
+    /* 4. Center long-press (0.42s) enters Seek Mode over Lyrics */
+    now_playing_controller_handle_touch(&ctrl, &tap_d, &effects, &vol_changed, &action);
+    for (int step = 0; step < 30; step++) {
+        now_playing_controller_step(&ctrl, 0.016f, &effects, &vol_changed, &action);
+    }
+    TEST_ASSERT_TRUE(ctrl.is_seeking);
+    TEST_ASSERT_TRUE(ctrl.seek_over_lyrics);
+    struct touch_event seek_move = {TOUCH_EVENT_MOVE, 240, 180, 400ull};
+    struct touch_event seek_up = {TOUCH_EVENT_UP, 240, 180, 420ull};
+    now_playing_controller_handle_touch(&ctrl, &seek_move, &effects, &vol_changed, &action);
+    now_playing_controller_handle_touch(&ctrl, &seek_up, &effects, &vol_changed, &action);
+    TEST_ASSERT_FALSE(ctrl.is_seeking);
+
+    /* 5. 6-level left-edge priority stack */
+    ctrl.quick_actions_open = true;
+    ctrl.queue_sheet_open = true;
+    ctrl.details_sheet_open = true;
+    ctrl.playlist_picker_open = true;
+    TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
+    TEST_ASSERT_FALSE(ctrl.playlist_picker_open);
+    TEST_ASSERT_EQ_I32(NP_ACTION_NONE, action);
+    TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
+    TEST_ASSERT_FALSE(ctrl.details_sheet_open);
+    TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
+    TEST_ASSERT_FALSE(ctrl.queue_sheet_open);
+    TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
+    TEST_ASSERT_FALSE(ctrl.quick_actions_open);
+    TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
+    TEST_ASSERT_FALSE(ctrl.lyrics_open);
+    TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
+    TEST_ASSERT_EQ_I32(NP_ACTION_EXIT, action);
+    TEST_ASSERT_EQ_I32(NP_RETURN_LIBRARY, ctrl.return_target);
+
+    library_db_close(&database);
+    cleanup_ctrl_temp_dir(dir_path);
+}
+
+void run_now_playing_controller_tests(void) {
+    printf("Suite: now_playing_controller\n");
+    RUN_TEST(test_tap_seek_volume_and_6_level_back_stack);
+}

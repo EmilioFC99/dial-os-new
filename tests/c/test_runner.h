@@ -85,6 +85,7 @@ void run_library_cover_cache_tests(void);
 void run_library_controller_tests(void);
 void run_playback_engine_tests(void);
 void run_now_playing_media_tests(void);
+void run_now_playing_controller_tests(void);
 void run_render_tests(void);
 void run_app_tests(void);
 
