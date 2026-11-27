@@ -9,6 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct library_db;
+
 #define LIBRARY_COVER_SIZE_PX 120u
 #define LIBRARY_COVER_PIXEL_COUNT (LIBRARY_COVER_SIZE_PX * LIBRARY_COVER_SIZE_PX)
 #define LIBRARY_COVER_BYTE_SIZE (LIBRARY_COVER_PIXEL_COUNT * sizeof(uint16_t))
@@ -38,6 +40,7 @@ struct library_cover_slot {
 };
 
 struct library_cover_request {
+    int64_t album_row_id;
     uint64_t album_id;
     uint8_t cover_source_kind;
     char source_path[512];
@@ -76,7 +79,11 @@ struct library_cover_cache {
 
     pthread_t precache_thread;
     bool precache_thread_running;
+    struct library_db *precache_database;
+    struct library_db *request_database;
     struct library_cover_request *precache_jobs;
+    int64_t *precache_album_row_ids;
+    uint8_t *precache_result_statuses;
     uint32_t precache_job_count;
     _Atomic bool precache_cancel_requested;
     _Atomic bool precache_worker_finished;
@@ -101,22 +108,35 @@ void library_cover_cache_destroy(struct library_cover_cache *cache);
 void library_cover_cache_set_directory(struct library_cover_cache *cache,
                                        const char *covers_directory);
 
+bool library_cover_cache_format_shard_path(const struct library_cover_cache *cache,
+                                           uint64_t album_uid, char *path_out, size_t capacity);
+bool library_cover_cache_unlink_album(const struct library_cover_cache *cache, uint64_t album_uid);
+
 const uint16_t *library_cover_cache_lookup(struct library_cover_cache *cache, uint64_t album_id);
 const uint16_t *library_cover_cache_lookup_or_load_disk(struct library_cover_cache *cache,
                                                         uint64_t album_id);
 bool library_cover_cache_request(struct library_cover_cache *cache, uint64_t album_id,
                                  uint8_t cover_source_kind, const char *source_path,
                                  uint32_t data_offset, uint32_t data_length);
+bool library_cover_cache_request_from_db(struct library_cover_cache *cache,
+                                         struct library_db *database, int64_t album_row_id,
+                                         uint64_t album_uid);
 bool library_cover_cache_step(struct library_cover_cache *cache, bool allow_heavy_decode);
 
 void library_cover_cache_begin_boot_precache(struct library_cover_cache *cache,
                                              const struct library_catalog *catalog);
+void library_cover_cache_begin_boot_precache_db(struct library_cover_cache *cache,
+                                                struct library_db *database);
 void library_cover_cache_cancel_boot_precache(struct library_cover_cache *cache);
 bool library_cover_cache_is_boot_precaching(const struct library_cover_cache *cache);
 bool library_cover_cache_step_boot_precache(struct library_cover_cache *cache,
                                             const struct library_catalog *catalog,
                                             uint64_t (*monotonic_ns)(void *context),
                                             void *clock_context, uint64_t budget_ns);
+bool library_cover_cache_step_boot_precache_db(struct library_cover_cache *cache,
+                                               struct library_db *database,
+                                               uint64_t (*monotonic_ns)(void *context),
+                                               void *clock_context, uint64_t budget_ns);
 void library_cover_cache_take_window_metrics(struct library_cover_cache *cache,
                                            uint32_t *ram_hits_out, uint32_t *disk_hits_out,
                                            uint32_t *decodes_out, uint32_t *max_op_ms_out);

@@ -2,6 +2,9 @@
 
 #include "jpeg_fast_thumb.h"
 #include "library_cover_cache.h"
+#include "library_db.h"
+
+#include <inttypes.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -333,9 +336,122 @@ static void test_jpeg_fast_thumb_large_baseline_decode(void) {
     unlink(jpg_path);
 }
 
+static void test_sharded_db_cover_precache_and_self_heal(void) {
+    char root_dir[256];
+    snprintf(root_dir, sizeof(root_dir), "/tmp/dialos_cov_db_%d", (int)getpid());
+    char rm_cmd[320];
+    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf \"%s\"", root_dir);
+    (void)system(rm_cmd);
+    mkdir(root_dir, 0755);
+
+    char state_dir[300], covers_dir[320];
+    snprintf(state_dir, sizeof(state_dir), "%s/.dial-os", root_dir);
+    snprintf(covers_dir, sizeof(covers_dir), "%s/covers", state_dir);
+
+    uint8_t png_bytes[256];
+    size_t png_len = build_synthetic_2x2_red_png(png_bytes, sizeof(png_bytes));
+    TEST_ASSERT_TRUE(png_len > 0u);
+
+    char valid_cover[320], invalid_cover[320];
+    snprintf(valid_cover, sizeof(valid_cover), "%s/good.png", root_dir);
+    snprintf(invalid_cover, sizeof(invalid_cover), "%s/bad.png", root_dir);
+    FILE *good_file = fopen(valid_cover, "wb");
+    TEST_ASSERT_TRUE(good_file != NULL);
+    fwrite(png_bytes, 1u, png_len, good_file);
+    fclose(good_file);
+    FILE *bad_file = fopen(invalid_cover, "wb");
+    TEST_ASSERT_TRUE(bad_file != NULL);
+    fwrite("NOT_AN_IMAGE", 1u, 12u, bad_file);
+    fclose(bad_file);
+
+    struct library_db database;
+    TEST_ASSERT_TRUE(library_db_open(&database, state_dir));
+
+    struct library_db_track_input track_good = {
+        .path = "/music/a/1.mp3",
+        .audio_fingerprint = 0x101ull,
+        .file_size_bytes = 500u,
+        .mtime_seconds = 100,
+        .format_kind = LIBRARY_FORMAT_MP3,
+        .title = "Song A",
+        .artist = "Artist A",
+        .album_artist = "Artist A",
+        .album = "Album Good",
+        .genre = "Electronic",
+        .cover_source_kind = LIBRARY_COVER_SIDECAR,
+        .cover_path = valid_cover,
+    };
+    struct library_db_track_input track_bad = track_good;
+    track_bad.path = "/music/b/1.mp3";
+    track_bad.audio_fingerprint = 0x202ull;
+    track_bad.album = "Album Bad";
+    track_bad.cover_path = invalid_cover;
+
+    TEST_ASSERT_TRUE(library_db_upsert_track(&database, &track_good, 0, NULL));
+    TEST_ASSERT_TRUE(library_db_upsert_track(&database, &track_bad, 0, NULL));
+    TEST_ASSERT_TRUE(library_db_recompute_aggregates(&database, NULL, 0u, NULL));
+
+    struct library_db_collection albums = {LIBRARY_DB_COLLECTION_ALBUMS, 0};
+    struct library_db_row album_rows[4];
+    TEST_ASSERT_EQ_U32(2u, library_db_fetch_window(&database, &albums, LIBRARY_SORT_ALPHABETICAL,
+                                                   0u, 4u, album_rows));
+    int64_t good_album_row_id = album_rows[1].id;
+    uint64_t good_album_uid = album_rows[1].uid;
+
+    struct library_cover_cache cache;
+    library_cover_cache_initialize(&cache, covers_dir);
+
+    /* Sharded path format: <covers_dir>/<xx>/<016llx>.rgb565 */
+    char shard_path[384], expected_suffix[64];
+    TEST_ASSERT_TRUE(library_cover_cache_format_shard_path(&cache, good_album_uid, shard_path,
+                                                           sizeof(shard_path)));
+    snprintf(expected_suffix, sizeof(expected_suffix), "/%02x/%016" PRIx64 ".rgb565",
+             (unsigned)((good_album_uid >> 56u) & 0xFFu), good_album_uid);
+    TEST_ASSERT_TRUE(strstr(shard_path, expected_suffix) != NULL);
+
+    /* Cold precache from DB: decodes 1 good, fails 1 bad, batch-updates DB statuses */
+    uint64_t clock_ns = 0ull;
+    library_cover_cache_begin_boot_precache_db(&cache, &database);
+    TEST_ASSERT_TRUE(library_cover_cache_is_boot_precaching(&cache));
+    TEST_ASSERT_EQ_U32(2u, cache.precache_total);
+    for (uint32_t spin = 0u; spin < 500u && library_cover_cache_is_boot_precaching(&cache);
+         spin++) {
+        (void)library_cover_cache_step_boot_precache_db(&cache, &database, fake_precache_clock_ns,
+                                                      &clock_ns,
+                                                      LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
+        usleep(1000u);
+    }
+    TEST_ASSERT_FALSE(library_cover_cache_is_boot_precaching(&cache));
+    TEST_ASSERT_EQ_U32(1u, cache.precache_decoded);
+    TEST_ASSERT_EQ_U32(1u, cache.precache_failed);
+    TEST_ASSERT_EQ_U32(0u, library_db_count_pending_covers(&database));
+
+    /* Warm precache with 0 pending covers returns immediately (no worker spawned) */
+    library_cover_cache_clear(&cache);
+    library_cover_cache_begin_boot_precache_db(&cache, &database);
+    TEST_ASSERT_FALSE(library_cover_cache_is_boot_precaching(&cache));
+    TEST_ASSERT_EQ_U32(0u, cache.precache_total);
+
+    /* Self-heal: delete sharded file externally -> lookup misses -> request_from_db recreates it */
+    TEST_ASSERT_TRUE(library_cover_cache_unlink_album(&cache, good_album_uid));
+    library_cover_cache_clear(&cache);
+    TEST_ASSERT_TRUE(library_cover_cache_lookup_or_load_disk(&cache, good_album_uid) == NULL);
+    TEST_ASSERT_TRUE(library_cover_cache_request_from_db(&cache, &database, good_album_row_id,
+                                                         good_album_uid));
+    TEST_ASSERT_TRUE(library_cover_cache_step(&cache, true));
+    struct stat healed_stat;
+    TEST_ASSERT_EQ_I32(0, stat(shard_path, &healed_stat));
+    TEST_ASSERT_EQ_U32(LIBRARY_COVER_BYTE_SIZE, (uint32_t)healed_stat.st_size);
+
+    library_cover_cache_destroy(&cache);
+    library_db_close(&database);
+    (void)system(rm_cmd);
+}
+
 void run_library_cover_cache_tests(void) {
     printf("Suite: library_cover_cache\n");
     RUN_TEST(test_cover_decode_disk_cache_and_lru);
     RUN_TEST(test_boot_cover_precache_warm_and_cold);
     RUN_TEST(test_jpeg_fast_thumb_large_baseline_decode);
+    RUN_TEST(test_sharded_db_cover_precache_and_self_heal);
 }
