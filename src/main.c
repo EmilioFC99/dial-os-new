@@ -132,6 +132,7 @@ int main(void) {
         }
     }
 
+    app_destroy(&runtime);
     platform_linux_shutdown_cleanup(&linux_state);
     return 0;
 }

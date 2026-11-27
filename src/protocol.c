@@ -379,6 +379,16 @@ static void parse_a202_song_json(const char *song_json, size_t song_length,
                 index = next_offset;
                 continue;
             }
+            if (key_length == 14u && memcmp(song_json + key_start, "song_file_path", 14u) == 0 &&
+                song_json[value_start] == '"') {
+                size_t next_offset = value_start;
+                extract_unescaped_json_string(song_json, song_length, value_start,
+                                              status->track_path, TRACK_PATH_CAPACITY,
+                                              &next_offset);
+                status->has_track_path = (status->track_path[0] != '\0');
+                index = next_offset;
+                continue;
+            }
             if (key_length == 18u &&
                 memcmp(song_json + key_start, "song_duration_time", 18u) == 0) {
                 uint32_t duration_ms = 0u;
@@ -642,6 +652,32 @@ size_t protocol_format_set_volume(uint8_t volume_level, char *output_buffer, siz
     if (written != (int)IPC_ENVELOPE_HEADER_BYTES) {
         return 0u;
     }
+    return IPC_ENVELOPE_HEADER_BYTES;
+}
+
+size_t protocol_format_play_m3u(const char *disk_m3u_path, char *output_buffer,
+                                size_t buffer_capacity) {
+    if (disk_m3u_path == NULL || disk_m3u_path[0] == '\0' || output_buffer == NULL) {
+        return 0u;
+    }
+    size_t path_length = strlen(disk_m3u_path);
+    size_t total_length = 16u + 1u + path_length; /* "0100LLLL00000004/" + path */
+    if (total_length + 1u > buffer_capacity || total_length > (size_t)MESSAGE_QUEUE_MAX_MESSAGE_BYTES) {
+        return 0u;
+    }
+    int written = snprintf(output_buffer, buffer_capacity, "0100%04X00000004/%s",
+                           (unsigned)total_length, disk_m3u_path);
+    if (written < 0 || (size_t)written != total_length) {
+        return 0u;
+    }
+    return total_length;
+}
+
+size_t protocol_format_play_pause_toggle(char *output_buffer, size_t buffer_capacity) {
+    if (output_buffer == NULL || buffer_capacity < IPC_COMMAND_BUFFER_BYTES) {
+        return 0u;
+    }
+    memcpy(output_buffer, "0201000C0000", IPC_COMMAND_BUFFER_BYTES);
     return IPC_ENVELOPE_HEADER_BYTES;
 }
 

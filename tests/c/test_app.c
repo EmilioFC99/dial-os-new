@@ -32,7 +32,7 @@ struct fake_platform_context {
     bool is_sleeping;
     bool ipc_fail_next;
     uint32_t ipc_fail_remaining;
-    char ipc_messages[16][32];
+    char ipc_messages[16][256];
     uint32_t ipc_count;
     struct hardware_status hardware;
     uint32_t crash_count_stored;
@@ -110,7 +110,7 @@ static bool fake_ipc_send_player(void *context, const char *message, size_t leng
         fake->ipc_fail_remaining--;
         return false;
     }
-    if (fake->ipc_count < 16u && length < 32u) {
+    if (fake->ipc_count < 16u && length < 256u) {
         memcpy(fake->ipc_messages[fake->ipc_count], message, length);
         fake->ipc_messages[fake->ipc_count][length] = '\0';
         fake->ipc_count++;
@@ -373,6 +373,7 @@ static void test_nominal_boot_aa24_retry_and_a607(void) {
     /* Second a607 does not spam 0664 */
     app_handle_ipc_message(&runtime, &a607);
     TEST_ASSERT_EQ_U32(2u, fake.ipc_count);
+    app_destroy(&runtime);
 }
 
 static void test_warning_timeout_and_late_recovery(void) {
@@ -403,6 +404,7 @@ static void test_warning_timeout_and_late_recovery(void) {
 
     advance_runtime_ticks(&runtime, &fake, 2200u);
     TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
+    app_destroy(&runtime);
 }
 
 static void test_aa22_delayed_sd_probes_and_stability_reset(void) {
@@ -451,6 +453,7 @@ static void test_aa22_delayed_sd_probes_and_stability_reset(void) {
     app_handle_tick(&runtime, fake.now_ns);
     TEST_ASSERT_EQ_U32(1u, fake.crash_count_writes);
     TEST_ASSERT_EQ_U32(0u, fake.crash_count_stored);
+    app_destroy(&runtime);
 }
 
 static void test_volume_lock_wake_ordering_and_shutdown(void) {
@@ -504,6 +507,7 @@ static void test_volume_lock_wake_ordering_and_shutdown(void) {
     TEST_ASSERT_TRUE(fake.shutdown_screen_was_locked);
     TEST_ASSERT_EQ_U32(presents_before_shutdown, fake.present_count);
     TEST_ASSERT_EQ_STR("0715000C0000", fake.ipc_messages[fake.ipc_count - 1u]);
+    app_destroy(&runtime);
 }
 
 static void test_crash_screen_gate_and_ipc_ignoring(void) {
@@ -531,6 +535,7 @@ static void test_crash_screen_gate_and_ipc_ignoring(void) {
     TEST_ASSERT_TRUE(fake.shutdown_called);
     TEST_ASSERT_FALSE(fake.shutdown_screen_was_locked);
     TEST_ASSERT_EQ_U32(presents_before + 1u, fake.present_count);
+    app_destroy(&runtime);
 }
 
 static void test_home_touch_appearance_persistence_and_live_telemetry(void) {
@@ -613,6 +618,7 @@ static void test_home_touch_appearance_persistence_and_live_telemetry(void) {
     TEST_ASSERT_TRUE(fake.shutdown_called);
     TEST_ASSERT_TRUE(fake.shutdown_telemetry.home_frames > 0u);
     TEST_ASSERT_TRUE(fake.shutdown_telemetry.home_fps_x10 > 0u);
+    app_destroy(&runtime);
 }
 
 static void test_warning_tap_to_retry_recovery(void) {
@@ -632,6 +638,7 @@ static void test_warning_tap_to_retry_recovery(void) {
     app_handle_touch_event(&runtime, &retry_up);
     TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, runtime.boot.phase);
+    app_destroy(&runtime);
 }
 
 static void test_boot_large_stall_delta_does_not_skip_signal_lock_and_handoff(void) {
@@ -676,6 +683,7 @@ static void test_boot_large_stall_delta_does_not_skip_signal_lock_and_handoff(vo
     app_handle_tick(&runtime, fake.now_ns);
     TEST_ASSERT_EQ_I32(UI_STATE_BOOT_ANIMATION, runtime.state);
     TEST_ASSERT_TRUE(runtime.boot.phase != BOOT_PHASE_COMPLETED);
+    app_destroy(&runtime);
 }
 
 static void test_persistent_event_and_performance_logging(void) {
@@ -700,6 +708,8 @@ static void test_persistent_event_and_performance_logging(void) {
     TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT complete -> home") != NULL);
     TEST_ASSERT_TRUE(strstr(fake.log_output, "HOME entry_complete") != NULL);
     TEST_ASSERT_TRUE(strstr(fake.log_output, "PERF home") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "tick_max_ms=") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "cov_ram=") != NULL);
 
     /* Power lock and shutdown flush with sync_to_disk = true */
     uint32_t syncs_before_lock = fake.log_sync_count;
@@ -710,6 +720,312 @@ static void test_persistent_event_and_performance_logging(void) {
     app_handle_button_action(&runtime, BUTTON_ACTION_POWER_SHORT);
     app_handle_button_action(&runtime, BUTTON_ACTION_POWER_LONG);
     TEST_ASSERT_TRUE(strstr(fake.log_output, "POWER shutdown") != NULL);
+    app_destroy(&runtime);
+}
+
+static void test_library_boot_scan_playback_and_sd_hotswap(void) {
+    char base_directory[256];
+    char music_directory[300];
+    char dialos_directory[300];
+    char temp_directory[300];
+    snprintf(base_directory, sizeof(base_directory), "/tmp/dialos_app_lib_%d", (int)getpid());
+    char remove_command[320];
+    snprintf(remove_command, sizeof(remove_command), "rm -rf \"%s\"", base_directory);
+    (void)system(remove_command);
+    mkdir(base_directory, 0755);
+    snprintf(music_directory, sizeof(music_directory), "%s/sdcard", base_directory);
+    snprintf(dialos_directory, sizeof(dialos_directory), "%s/sdcard/.dial-os", base_directory);
+    snprintf(temp_directory, sizeof(temp_directory), "%s/tmp", base_directory);
+    mkdir(music_directory, 0755);
+    mkdir(dialos_directory, 0755);
+    mkdir(temp_directory, 0755);
+
+    /* Create a minimal WAV file inside music_directory/Artist/Album/ */
+    char artist_directory[340], album_directory[380], wav_path[420];
+    snprintf(artist_directory, sizeof(artist_directory), "%s/Test Artist", music_directory);
+    snprintf(album_directory, sizeof(album_directory), "%s/Test Album", artist_directory);
+    snprintf(wav_path, sizeof(wav_path), "%s/01 - Test Song.wav", album_directory);
+    mkdir(artist_directory, 0755);
+    mkdir(album_directory, 0755);
+    FILE *wav_file = fopen(wav_path, "wb");
+    TEST_ASSERT_TRUE(wav_file != NULL);
+    uint8_t wav_header[44] = {'R','I','F','F',36,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,
+                              0x44,0xAC,0,0,0x88,0x58,1,0,2,0,16,0,'d','a','t','a',0,0,0,0};
+    fwrite(wav_header, 1u, 44u, wav_file);
+    fclose(wav_file);
+
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+    struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10000u);
+
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.track_count);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
+
+    /* Enter Library via Home carousel (drag to Library slot 1, tap center) */
+    struct touch_event drag_down = {TOUCH_EVENT_DOWN, 240, 150, 11000ull};
+    struct touch_event drag_move = {TOUCH_EVENT_MOVE, 128, 150, 11030ull};
+    struct touch_event drag_up = {TOUCH_EVENT_UP, 128, 150, 11060ull};
+    app_handle_touch_event(&runtime, &drag_down);
+    app_handle_touch_event(&runtime, &drag_move);
+    app_handle_touch_event(&runtime, &drag_up);
+    advance_runtime_ticks(&runtime, &fake, 600u);
+
+    struct touch_event tap_down = {TOUCH_EVENT_DOWN, 180, 148, 12000ull};
+    struct touch_event tap_up = {TOUCH_EVENT_UP, 180, 148, 12030ull};
+    app_handle_touch_event(&runtime, &tap_down);
+    app_handle_touch_event(&runtime, &tap_up);
+    advance_runtime_ticks(&runtime, &fake, 700u);
+    TEST_ASSERT_EQ_I32(ACTIVE_SCREEN_LIBRARY_SHELL, runtime.home.active_screen);
+
+    /* Tap All Songs tile (index 5 -> scroll down 2 or tap after scrolling) */
+    runtime.library.view_stack[0].scroll_position = 2.0f;
+    runtime.library.view_stack[0].target_index = 2;
+    struct touch_event all_songs_down = {TOUCH_EVENT_DOWN, 244, 152, 13000ull};
+    struct touch_event all_songs_up = {TOUCH_EVENT_UP, 244, 152, 13030ull};
+    app_handle_touch_event(&runtime, &all_songs_down);
+    app_handle_touch_event(&runtime, &all_songs_up);
+    advance_runtime_ticks(&runtime, &fake, 350u);
+    TEST_ASSERT_EQ_I32(LIB_VIEW_TRACKS, library_controller_current_view(&runtime.library)->kind);
+
+    /* Tap track 0 -> sends 0100 M3U IPC and stays inside Library */
+    uint32_t ipc_before = fake.ipc_count;
+    struct touch_event track_down = {TOUCH_EVENT_DOWN, 180, 126, 14000ull};
+    struct touch_event track_up = {TOUCH_EVENT_UP, 180, 126, 14030ull};
+    app_handle_touch_event(&runtime, &track_down);
+    app_handle_touch_event(&runtime, &track_up);
+    TEST_ASSERT_EQ_I32(ACTIVE_SCREEN_LIBRARY_SHELL, runtime.home.active_screen);
+    TEST_ASSERT_TRUE(fake.ipc_count > ipc_before);
+    TEST_ASSERT_TRUE(strncmp(fake.ipc_messages[fake.ipc_count - 1u], "0100", 4u) == 0);
+
+    /* Tap same active track -> sends 0201 toggle */
+    ipc_before = fake.ipc_count;
+    app_handle_touch_event(&runtime, &track_down);
+    app_handle_touch_event(&runtime, &track_up);
+    TEST_ASSERT_EQ_U32(ipc_before + 1u, fake.ipc_count);
+    TEST_ASSERT_EQ_STR("0201000C0000", fake.ipc_messages[fake.ipc_count - 1u]);
+
+    /* SD hot-unplug (aa22 inserted=0) clears catalog & zeros counts */
+    fake.hardware.sd_mounted = false;
+    struct inbound_ipc_message sdcard_removed = {0};
+    sdcard_removed.kind = IPC_INBOUND_SDCARD_EVENT;
+    sdcard_removed.sdcard_inserted = false;
+    app_handle_ipc_message(&runtime, &sdcard_removed);
+    TEST_ASSERT_EQ_U32(0u, runtime.home.telemetry.track_count);
+    TEST_ASSERT_EQ_U32(0u, runtime.library_catalog.track_count);
+
+    app_destroy(&runtime);
+    (void)system(remove_command);
+}
+
+static void write_minimal_2x2_png(const char *path) {
+    /* Valid 2x2 RGBA/RGB stored-deflate PNG (67 bytes) */
+    static const uint8_t PNG_2X2[79] = {
+        0x89u, 0x50u, 0x4Eu, 0x47u, 0x0Du, 0x0Au, 0x1Au, 0x0Au,
+        0x00u, 0x00u, 0x00u, 0x0Du, 0x49u, 0x48u, 0x44u, 0x52u,
+        0x00u, 0x00u, 0x00u, 0x02u, 0x00u, 0x00u, 0x00u, 0x02u,
+        0x08u, 0x02u, 0x00u, 0x00u, 0x00u, 0xFDu, 0xD4u, 0x9Au, 0x73u,
+        0x00u, 0x00u, 0x00u, 0x19u, 0x49u, 0x44u, 0x41u, 0x54u,
+        0x78u, 0x01u, 0x01u, 0x0Eu, 0x00u, 0xF1u, 0xFFu,
+        0x00u, 0xFFu, 0x00u, 0x00u, 0xFFu, 0x00u, 0x00u,
+        0x00u, 0xFFu, 0x00u, 0x00u, 0xFFu, 0x00u, 0x00u,
+        0x23u, 0xC8u, 0x05u, 0xF9u, 0x6Du, 0x62u, 0x7Du, 0xD4u,
+        0x00u, 0x00u, 0x00u, 0x00u, 0x49u, 0x45u, 0x4Eu, 0x44u,
+    };
+    /* Note: append IEND CRC32 (0xAE 0x42 0x60 0x82) */
+    static const uint8_t IEND_CRC[4] = {0xAEu, 0x42u, 0x60u, 0x82u};
+    FILE *file = fopen(path, "wb");
+    if (file != NULL) {
+        fwrite(PNG_2X2, 1u, sizeof(PNG_2X2), file);
+        fwrite(IEND_CRC, 1u, sizeof(IEND_CRC), file);
+        fclose(file);
+    }
+}
+
+static void test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker(void) {
+    char base_directory[256];
+    char music_directory[300];
+    char dialos_directory[300];
+    char temp_directory[300];
+    snprintf(base_directory, sizeof(base_directory), "/tmp/dialos_app_pre_%d", (int)getpid());
+    char remove_command[320];
+    snprintf(remove_command, sizeof(remove_command), "rm -rf \"%s\"", base_directory);
+    (void)system(remove_command);
+    mkdir(base_directory, 0755);
+    snprintf(music_directory, sizeof(music_directory), "%s/sdcard", base_directory);
+    snprintf(dialos_directory, sizeof(dialos_directory), "%s/sdcard/.dial-os", base_directory);
+    snprintf(temp_directory, sizeof(temp_directory), "%s/tmp", base_directory);
+    mkdir(music_directory, 0755);
+    mkdir(dialos_directory, 0755);
+    mkdir(temp_directory, 0755);
+
+    char artist_directory[340], album_directory[380], wav_path[420], cover_path[420];
+    snprintf(artist_directory, sizeof(artist_directory), "%s/Test Artist", music_directory);
+    snprintf(album_directory, sizeof(album_directory), "%s/Test Album", artist_directory);
+    snprintf(wav_path, sizeof(wav_path), "%s/01 - Test Song.wav", album_directory);
+    snprintf(cover_path, sizeof(cover_path), "%s/cover.png", album_directory);
+    mkdir(artist_directory, 0755);
+    mkdir(album_directory, 0755);
+    FILE *wav_file = fopen(wav_path, "wb");
+    TEST_ASSERT_TRUE(wav_file != NULL);
+    uint8_t wav_header[44] = {'R','I','F','F',36,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,
+                              0x44,0xAC,0,0,0x88,0x58,1,0,2,0,16,0,'d','a','t','a',0,0,0,0};
+    fwrite(wav_header, 1u, 44u, wav_file);
+    fclose(wav_file);
+    write_minimal_2x2_png(cover_path);
+
+    /* Case 1: Act 01 must NOT precache; transient SD false at aa24 recovers within 500 ms */
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+
+    /* Advance 900 ms (still in Act 01 WAKE): precache must NOT have started */
+    advance_runtime_ticks(&runtime, &fake, 900u);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_WAKE, runtime.boot.phase);
+    TEST_ASSERT_FALSE(runtime.boot_cover_precache_started);
+    TEST_ASSERT_EQ_U32(0u, runtime.library_covers.precache_decoded);
+
+    /* Enter Act 02 and deliver aa24 while SD momentarily reports unmounted (remount race) */
+    advance_runtime_ticks(&runtime, &fake, 200u);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, runtime.boot.phase);
+    fake.hardware.sd_mounted = false;
+    struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
+    app_handle_ipc_message(&runtime, &aa24);
+    TEST_ASSERT_TRUE(runtime.library_catalog.album_count == 1u);
+
+    /* Step 600 ms while unmounted, then restore SD mount -> 500 ms probe recovers */
+    advance_runtime_ticks(&runtime, &fake, 600u);
+    fake.hardware.sd_mounted = true;
+    advance_runtime_ticks(&runtime, &fake, 1000u);
+    for (uint32_t spin = 0u;
+         spin < 500u && library_cover_cache_is_boot_precaching(&runtime.library_covers); spin++) {
+        usleep(1000u);
+        advance_runtime_ticks(&runtime, &fake, 20u);
+    }
+    advance_runtime_ticks(&runtime, &fake, 8000u);
+
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(1u, runtime.library_covers.precache_decoded);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT precache_start") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT precache_done") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT sd_recovered") != NULL);
+    TEST_ASSERT_TRUE(library_cover_cache_lookup_or_load_disk(
+                         &runtime.library_covers, runtime.library_catalog.albums[0].album_id) !=
+                     NULL);
+    app_destroy(&runtime);
+
+    /* Case 2: If SD stays unmounted > 2.5 s after aa24, boot finishes without deadlocking */
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+    fake.hardware.sd_mounted = false;
+    app_initialize(&runtime, &operations);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10000u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    app_destroy(&runtime);
+
+    (void)system(remove_command);
+}
+
+static void test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts(void) {
+    char base_directory[256];
+    char music_directory[300];
+    char dialos_directory[300];
+    char temp_directory[300];
+    snprintf(base_directory, sizeof(base_directory), "/tmp/dialos_app_delta_%d", (int)getpid());
+    char remove_command[320];
+    snprintf(remove_command, sizeof(remove_command), "rm -rf \"%s\"", base_directory);
+    (void)system(remove_command);
+    mkdir(base_directory, 0755);
+    snprintf(music_directory, sizeof(music_directory), "%s/sdcard", base_directory);
+    snprintf(dialos_directory, sizeof(dialos_directory), "%s/sdcard/.dial-os", base_directory);
+    snprintf(temp_directory, sizeof(temp_directory), "%s/tmp", base_directory);
+    mkdir(music_directory, 0755);
+    mkdir(dialos_directory, 0755);
+    mkdir(temp_directory, 0755);
+
+    char artist_directory[340], album_directory[380], wav_one[420], wav_two[420];
+    snprintf(artist_directory, sizeof(artist_directory), "%s/Test Artist", music_directory);
+    snprintf(album_directory, sizeof(album_directory), "%s/Test Album", artist_directory);
+    snprintf(wav_one, sizeof(wav_one), "%s/01 - First.wav", album_directory);
+    snprintf(wav_two, sizeof(wav_two), "%s/02 - Second.wav", album_directory);
+    mkdir(artist_directory, 0755);
+    mkdir(album_directory, 0755);
+    uint8_t wav_header[44] = {'R','I','F','F',36,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,
+                              0x44,0xAC,0,0,0x88,0x58,1,0,2,0,16,0,'d','a','t','a',0,0,0,0};
+    FILE *file_one = fopen(wav_one, "wb");
+    TEST_ASSERT_TRUE(file_one != NULL);
+    fwrite(wav_header, 1u, 44u, file_one);
+    fclose(file_one);
+
+    /* Boot 1 (cold): builds library.idx */
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+    struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10000u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.track_count);
+    app_destroy(&runtime);
+
+    /* Boot 2 (warm, unchanged SD): delta check runs during boot, Home stays idle & populated */
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+    app_initialize(&runtime, &operations);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10900u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.track_count);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
+    TEST_ASSERT_FALSE(library_scanner_is_busy(&runtime.library_scanner));
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT delta_ok") != NULL);
+    app_destroy(&runtime);
+
+    /* Boot 3 (warm, 2nd track added): delta_changed re-scans during boot, Home opens with 2 */
+    FILE *file_two = fopen(wav_two, "wb");
+    TEST_ASSERT_TRUE(file_two != NULL);
+    fwrite(wav_header, 1u, 44u, file_two);
+    fclose(file_two);
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+    app_initialize(&runtime, &operations);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10900u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(2u, runtime.home.telemetry.track_count);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT delta_changed") != NULL);
+    app_destroy(&runtime);
+
+    (void)system(remove_command);
 }
 
 void run_app_tests(void) {
@@ -725,4 +1041,7 @@ void run_app_tests(void) {
     RUN_TEST(test_warning_tap_to_retry_recovery);
     RUN_TEST(test_boot_large_stall_delta_does_not_skip_signal_lock_and_handoff);
     RUN_TEST(test_persistent_event_and_performance_logging);
+    RUN_TEST(test_library_boot_scan_playback_and_sd_hotswap);
+    RUN_TEST(test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker);
+    RUN_TEST(test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts);
 }

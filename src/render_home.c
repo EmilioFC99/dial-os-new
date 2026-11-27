@@ -1,6 +1,7 @@
 #include "render_home.h"
 
 #include "constants.h"
+#include "render_library.h"
 #include "render_primitives.h"
 
 #include <math.h>
@@ -1166,6 +1167,12 @@ static void draw_back_swipe_bezel_arc(const struct framebuffer_surface *surface,
 
 void render_draw_home_frame(const struct framebuffer_surface *surface,
                             const struct home_render_snapshot *snapshot) {
+    render_draw_home_with_library_frame(surface, snapshot, NULL);
+}
+
+void render_draw_home_with_library_frame(const struct framebuffer_surface *surface,
+                                         const struct home_render_snapshot *snapshot,
+                                         const struct library_controller *library) {
     if (surface == NULL || surface->pixels == NULL || snapshot == NULL) {
         return;
     }
@@ -1181,8 +1188,13 @@ void render_draw_home_frame(const struct framebuffer_surface *surface,
     }
 
     if (snapshot->active_screen == ACTIVE_SCREEN_LIBRARY_SHELL) {
-        draw_library_shell_layer(surface, snapshot, palette, is_dark, 1.0f, 1.0f, 0.0f);
-        draw_back_swipe_bezel_arc(surface, snapshot->back_swipe_progress, palette);
+        if (library != NULL) {
+            render_draw_library_frame(surface, library, snapshot->appearance_mode,
+                                      snapshot->back_swipe_progress);
+        } else {
+            draw_library_shell_layer(surface, snapshot, palette, is_dark, 1.0f, 1.0f, 0.0f);
+            draw_back_swipe_bezel_arc(surface, snapshot->back_swipe_progress, palette);
+        }
         return;
     }
 
@@ -1202,16 +1214,21 @@ void render_draw_home_frame(const struct framebuffer_surface *surface,
 
     /* Acrylic Cube Dive background emergence for Library */
     if (snapshot->launch_progress > 0.24f && snapshot->launched_app_id == HOME_APP_LIBRARY) {
-        float hub_alpha =
-            render_ease_out_cubic(render_normalize_range(snapshot->launch_progress, 0.24f, 0.88f));
-        float hub_scale = render_lerp_f32(
-            0.80f, 1.0f,
-            render_ease_out_expo(render_normalize_range(snapshot->launch_progress, 0.30f, 0.88f)));
-        float header_drift = render_lerp_f32(
-            -18.0f, 0.0f,
-            render_ease_out_expo(render_normalize_range(snapshot->launch_progress, 0.42f, 0.96f)));
-        draw_library_shell_layer(surface, snapshot, palette, is_dark, hub_alpha, hub_scale,
-                                 header_drift);
+        if (library != NULL) {
+            render_library_hub_transition_layer(surface, library, snapshot->appearance_mode,
+                                                snapshot->launch_progress);
+        } else {
+            float hub_alpha =
+                render_ease_out_cubic(render_normalize_range(snapshot->launch_progress, 0.24f, 0.88f));
+            float hub_scale = render_lerp_f32(
+                0.80f, 1.0f,
+                render_ease_out_expo(render_normalize_range(snapshot->launch_progress, 0.30f, 0.88f)));
+            float header_drift = render_lerp_f32(
+                -18.0f, 0.0f,
+                render_ease_out_expo(render_normalize_range(snapshot->launch_progress, 0.42f, 0.96f)));
+            draw_library_shell_layer(surface, snapshot, palette, is_dark, hub_alpha, hub_scale,
+                                     header_drift);
+        }
     }
 
     /* 5-slot back-to-front cube wheel */

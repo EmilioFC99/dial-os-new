@@ -166,6 +166,14 @@ static void return_to_home_from_shell(struct home_controller *controller, enum h
     controller->launch_progress = 1.0f;
     controller->launch_target = 0.0f;
     controller->back_swipe_progress = 0.0f;
+    controller->pointer_mode = HOME_POINTER_NONE;
+}
+
+void home_controller_return_from_shell(struct home_controller *controller, enum home_app_id app_id) {
+    if (controller == NULL) {
+        return;
+    }
+    return_to_home_from_shell(controller, app_id);
 }
 
 static void normalize_wheel_revolutions(struct home_controller *controller) {

@@ -154,10 +154,71 @@ static void test_boot_edge_and_null_inputs(void) {
     boot_controller_get_snapshot(&controller, NULL);
 }
 
+static void test_boot_library_scan_hold_and_summary_lines(void) {
+    struct boot_controller controller;
+    struct boot_render_snapshot snapshot;
+    boot_controller_initialize(&controller);
+    boot_controller_mark_audio_ready(&controller, true);
+    boot_controller_update_sd_mounted(&controller, true);
+
+    /* Advance into Act 02 (BUFFER) and hold at 92% while scanning */
+    boot_controller_update_library_scan(&controller, 2u, 0u, 0u, 0u, 0u, true, false);
+    step_in_increments(&controller, 6.8f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
+    TEST_ASSERT_TRUE(snapshot.act_progress <= 0.9201f);
+    TEST_ASSERT_EQ_STR("SCAN // DISCOVERING", snapshot.status_label);
+
+    /* Progress scan count updates status label without tripping stall warning */
+    boot_controller_update_library_scan(&controller, 3u, 5u, 2u, 1u, 2u, true, false);
+    step_in_increments(&controller, 1.5f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
+    TEST_ASSERT_EQ_STR("SCAN // 2 / 5", snapshot.status_label);
+
+    /* Early Act 02 (< 0.60 sweep) preserves INIT status and does not jump sweep_progress */
+    struct boot_controller ramp_ctrl;
+    boot_controller_initialize(&ramp_ctrl);
+    boot_controller_mark_audio_ready(&ramp_ctrl, true);
+    boot_controller_update_sd_mounted(&ramp_ctrl, true);
+    boot_controller_update_library_scan(&ramp_ctrl, 6u, 5u, 5u, 2u, 5u, true, true);
+    boot_controller_update_cover_precache(&ramp_ctrl, true, 1u, 4u);
+    step_in_increments(&ramp_ctrl, 1.2f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&ramp_ctrl, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
+    TEST_ASSERT_TRUE(snapshot.sweep_progress < 0.25f);
+    TEST_ASSERT_TRUE(strcmp(snapshot.status_label, "COVERS // 1 / 4") != 0);
+
+    /* Complete scan -> holds on cover precache if active, then advances */
+    boot_controller_update_library_scan(&controller, 6u, 5u, 5u, 2u, 5u, true, true);
+    boot_controller_update_cover_precache(&controller, true, 1u, 4u);
+    step_in_increments(&controller, 0.5f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
+    TEST_ASSERT_TRUE(snapshot.sweep_progress <= 0.9201f);
+    TEST_ASSERT_EQ_STR("COVERS // 1 / 4", snapshot.status_label);
+
+    boot_controller_update_cover_precache(&controller, false, 4u, 4u);
+    step_in_increments(&controller, 0.5f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_SIGNAL_LOCK, snapshot.phase);
+    TEST_ASSERT_EQ_STR("V1.0 \xC2\xB7 LIB OK \xC2\xB7 5 TRACKS", snapshot.summary_line);
+
+    /* Empty library and missing folder summary lines */
+    boot_controller_update_library_scan(&controller, 4u, 0u, 0u, 0u, 0u, true, true);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_STR("V1.0 \xC2\xB7 EMPTY LIB \xC2\xB7 0 TRACKS", snapshot.summary_line);
+
+    boot_controller_update_library_scan(&controller, 4u, 0u, 0u, 0u, 0u, false, true);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_STR("V1.0 \xC2\xB7 NO FOLDER \xC2\xB7 0 TRACKS", snapshot.summary_line);
+}
+
 void run_boot_sequence_tests(void) {
     printf("Suite: boot_sequence\n");
     RUN_TEST(test_boot_nominal_early_audio_ready);
     RUN_TEST(test_boot_realistic_7_8s_aa24_hold_and_catchup);
     RUN_TEST(test_boot_warning_boundary_and_late_recovery);
     RUN_TEST(test_boot_edge_and_null_inputs);
+    RUN_TEST(test_boot_library_scan_hold_and_summary_lines);
 }

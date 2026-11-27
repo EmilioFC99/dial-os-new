@@ -7,6 +7,11 @@
 
 #include "boot_sequence.h"
 #include "home_screen.h"
+#include "library_catalog.h"
+#include "library_controller.h"
+#include "library_cover_cache.h"
+#include "library_scanner.h"
+#include "library_state.h"
 #include "logger.h"
 #include "platform.h"
 #include "protocol.h"
@@ -48,6 +53,22 @@ struct app_runtime {
     bool sd_followup_second_pending;
     struct boot_controller boot;
     struct home_controller home;
+    struct library_catalog library_catalog;
+    struct library_scanner library_scanner;
+    struct library_state_store library_state;
+    struct library_cover_cache library_covers;
+    struct library_controller library;
+    bool library_scan_started;
+    bool library_delta_pending;
+    bool library_prev_sd_mounted;
+    bool library_hub_reset_on_dive;
+    bool boot_cover_precache_started;
+    uint64_t library_scan_start_ns;
+    uint64_t cover_precache_start_ns;
+    uint64_t boot_last_sd_probe_ns;
+    uint64_t boot_sd_missing_since_ns;
+    uint64_t boot_last_precache_log_ns;
+    uint32_t m3u_sequence;
     uint64_t last_boot_tick_ns;
     uint64_t last_home_tick_ns;
     enum appearance_mode appearance_mode;
@@ -63,7 +84,10 @@ struct app_runtime {
     uint32_t perf_window_frames;
     uint32_t perf_window_total_frame_ms;
     uint32_t perf_window_max_frame_ms;
+    uint32_t perf_window_max_tick_ms;
+    uint32_t perf_window_max_cover_ms;
     uint32_t perf_window_slow_frames;
+    uint64_t last_slow_frame_log_ns;
     enum boot_phase last_logged_boot_phase;
     enum active_screen_id last_logged_home_screen;
     float last_logged_launch_target;
@@ -101,6 +125,7 @@ bool crash_write_log_atomic(const struct crash_record *record, bool sd_mounted,
 
 /* Phase 1 runtime state machine */
 void app_initialize(struct app_runtime *runtime, const struct platform_operations *platform);
+void app_destroy(struct app_runtime *runtime);
 void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ipc_message *message);
 void app_handle_button_action(struct app_runtime *runtime, enum physical_button_action action);
 void app_handle_touch_event(struct app_runtime *runtime, const struct touch_event *event);

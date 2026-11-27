@@ -36,19 +36,32 @@ let fontPath = "/Users/emilio.flores/Library/Fonts/Inter-VariableFont_opsz,wght.
 let outputHeaderPath = "src/font_atlas.h"
 let outputSourcePath = "src/font_atlas.c"
 
-let asciiAndMiddleDot: [UInt32] = Array(0x20...0x7E).map { UInt32($0) } + [0x00B7]
+let latin1AndPunctuation: [UInt32] =
+    Array(0x20...0x7E).map { UInt32($0) } +
+    Array(0xA0...0xFF).map { UInt32($0) } +
+    [0x2013, 0x2014, 0x2018, 0x2019, 0x2026]
 let timerCodepoints: [UInt32] = [0x20, 0x2D, 0x2E] + Array(0x30...0x39).map { UInt32($0) } + [0x73]
+let quickSeekCodepoints: [UInt32] =
+    [0x20, 0x23, 0x2D, 0x3F, 0x2013, 0x2014, 0x2019] +
+    Array(0x30...0x39).map { UInt32($0) } +
+    Array(0x41...0x5A).map { UInt32($0) }
 
 let fontSpecs: [FontSpec] = [
-    FontSpec(enumName: "FONT_STYLE_MONO_10", symbolPrefix: "mono_10", sizePt: 10.0, weight: 600.0, monospace: true, codepoints: asciiAndMiddleDot),
-    FontSpec(enumName: "FONT_STYLE_MONO_11", symbolPrefix: "mono_11", sizePt: 11.0, weight: 700.0, monospace: true, codepoints: asciiAndMiddleDot),
-    FontSpec(enumName: "FONT_STYLE_MONO_13", symbolPrefix: "mono_13", sizePt: 13.0, weight: 800.0, monospace: true, codepoints: asciiAndMiddleDot),
-    FontSpec(enumName: "FONT_STYLE_MONO_18", symbolPrefix: "mono_18", sizePt: 18.0, weight: 800.0, monospace: true, codepoints: asciiAndMiddleDot),
-    FontSpec(enumName: "FONT_STYLE_DISPLAY_18", symbolPrefix: "display_18", sizePt: 18.0, weight: 800.0, monospace: false, codepoints: asciiAndMiddleDot),
-    FontSpec(enumName: "FONT_STYLE_DISPLAY_20", symbolPrefix: "display_20", sizePt: 20.0, weight: 700.0, monospace: false, codepoints: asciiAndMiddleDot),
-    FontSpec(enumName: "FONT_STYLE_DISPLAY_22", symbolPrefix: "display_22", sizePt: 22.0, weight: 700.0, monospace: false, codepoints: asciiAndMiddleDot),
-    FontSpec(enumName: "FONT_STYLE_DISPLAY_32", symbolPrefix: "display_32", sizePt: 32.0, weight: 800.0, monospace: false, codepoints: asciiAndMiddleDot),
+    FontSpec(enumName: "FONT_STYLE_MONO_8", symbolPrefix: "mono_8", sizePt: 8.5, weight: 700.0, monospace: true, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_MONO_9", symbolPrefix: "mono_9", sizePt: 9.5, weight: 700.0, monospace: true, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_MONO_10", symbolPrefix: "mono_10", sizePt: 10.0, weight: 600.0, monospace: true, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_MONO_11", symbolPrefix: "mono_11", sizePt: 11.0, weight: 700.0, monospace: true, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_MONO_13", symbolPrefix: "mono_13", sizePt: 13.0, weight: 800.0, monospace: true, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_MONO_18", symbolPrefix: "mono_18", sizePt: 18.0, weight: 800.0, monospace: true, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_11", symbolPrefix: "display_11", sizePt: 11.5, weight: 600.0, monospace: false, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_13", symbolPrefix: "display_13", sizePt: 13.5, weight: 700.0, monospace: false, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_15", symbolPrefix: "display_15", sizePt: 15.5, weight: 700.0, monospace: false, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_18", symbolPrefix: "display_18", sizePt: 18.0, weight: 800.0, monospace: false, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_20", symbolPrefix: "display_20", sizePt: 20.0, weight: 700.0, monospace: false, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_22", symbolPrefix: "display_22", sizePt: 22.0, weight: 700.0, monospace: false, codepoints: latin1AndPunctuation),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_32", symbolPrefix: "display_32", sizePt: 32.0, weight: 800.0, monospace: false, codepoints: latin1AndPunctuation),
     FontSpec(enumName: "FONT_STYLE_DISPLAY_40", symbolPrefix: "display_40", sizePt: 40.0, weight: 800.0, monospace: false, codepoints: timerCodepoints),
+    FontSpec(enumName: "FONT_STYLE_DISPLAY_46", symbolPrefix: "display_46", sizePt: 46.0, weight: 800.0, monospace: false, codepoints: quickSeekCodepoints),
 ]
 
 guard let fontDataProvider = CGDataProvider(filename: fontPath),
@@ -215,15 +228,21 @@ struct bitmap_font {
 };
 
 enum font_style_id {
-    FONT_STYLE_MONO_10 = 0,
-    FONT_STYLE_MONO_11 = 1,
-    FONT_STYLE_MONO_13 = 2,
-    FONT_STYLE_MONO_18 = 3,
-    FONT_STYLE_DISPLAY_18 = 4,
-    FONT_STYLE_DISPLAY_20 = 5,
-    FONT_STYLE_DISPLAY_22 = 6,
-    FONT_STYLE_DISPLAY_32 = 7,
-    FONT_STYLE_DISPLAY_40 = 8
+    FONT_STYLE_MONO_8 = 0,
+    FONT_STYLE_MONO_9 = 1,
+    FONT_STYLE_MONO_10 = 2,
+    FONT_STYLE_MONO_11 = 3,
+    FONT_STYLE_MONO_13 = 4,
+    FONT_STYLE_MONO_18 = 5,
+    FONT_STYLE_DISPLAY_11 = 6,
+    FONT_STYLE_DISPLAY_13 = 7,
+    FONT_STYLE_DISPLAY_15 = 8,
+    FONT_STYLE_DISPLAY_18 = 9,
+    FONT_STYLE_DISPLAY_20 = 10,
+    FONT_STYLE_DISPLAY_22 = 11,
+    FONT_STYLE_DISPLAY_32 = 12,
+    FONT_STYLE_DISPLAY_40 = 13,
+    FONT_STYLE_DISPLAY_46 = 14
 };
 
 const struct bitmap_font *font_atlas_get(enum font_style_id style_id);
@@ -245,10 +264,16 @@ sourceLines.append("#define ASCII_CODEPOINT_LIMIT 0x80u /* 128: 1-byte ASCII (0.
 sourceLines.append("#define UTF8_2BYTE_LEAD_MASK 0xE0u  /* binary 1110 0000: tests 2-byte UTF-8 lead (110x xxxx) */")
 sourceLines.append("#define UTF8_2BYTE_LEAD_TAG 0xC0u   /* binary 1100 0000: 2-byte UTF-8 lead tag */")
 sourceLines.append("#define UTF8_2BYTE_PAYLOAD_MASK 0x1Fu /* binary 0001 1111: extracts 5 payload bits */")
+sourceLines.append("#define UTF8_3BYTE_LEAD_MASK 0xF0u  /* binary 1111 0000: tests 3-byte UTF-8 lead (1110 xxxx) */")
+sourceLines.append("#define UTF8_3BYTE_LEAD_TAG 0xE0u   /* binary 1110 0000: 3-byte UTF-8 lead tag */")
+sourceLines.append("#define UTF8_3BYTE_PAYLOAD_MASK 0x0Fu /* binary 0000 1111: extracts 4 payload bits */")
+sourceLines.append("#define UTF8_4BYTE_LEAD_MASK 0xF8u  /* binary 1111 1000: tests 4-byte UTF-8 lead (1111 0xxx) */")
+sourceLines.append("#define UTF8_4BYTE_LEAD_TAG 0xF0u   /* binary 1111 0000: 4-byte UTF-8 lead tag */")
 sourceLines.append("#define UTF8_CONTINUATION_MASK 0xC0u /* binary 1100 0000: tests continuation top 2 bits */")
 sourceLines.append("#define UTF8_CONTINUATION_TAG 0x80u  /* binary 1000 0000: continuation byte (10xx xxxx) */")
 sourceLines.append("#define UTF8_CONTINUATION_PAYLOAD 0x3Fu /* binary 0011 1111: extracts 6 payload bits */")
 sourceLines.append("#define CODEPOINT_SPACE 0x20u        /* U+0020 ' ': SPACE */")
+sourceLines.append("#define CODEPOINT_QUESTION 0x3Fu     /* U+003F '?': QUESTION MARK */")
 sourceLines.append("")
 
 for baked in bakedFonts {
@@ -288,6 +313,10 @@ for baked in bakedFonts {
 sourceLines.append("""
 const struct bitmap_font *font_atlas_get(enum font_style_id style_id) {
     switch (style_id) {
+        case FONT_STYLE_MONO_8:
+            return &mono_8_font;
+        case FONT_STYLE_MONO_9:
+            return &mono_9_font;
         case FONT_STYLE_MONO_10:
             return &mono_10_font;
         case FONT_STYLE_MONO_11:
@@ -296,6 +325,12 @@ const struct bitmap_font *font_atlas_get(enum font_style_id style_id) {
             return &mono_13_font;
         case FONT_STYLE_MONO_18:
             return &mono_18_font;
+        case FONT_STYLE_DISPLAY_11:
+            return &display_11_font;
+        case FONT_STYLE_DISPLAY_13:
+            return &display_13_font;
+        case FONT_STYLE_DISPLAY_15:
+            return &display_15_font;
         case FONT_STYLE_DISPLAY_18:
             return &display_18_font;
         case FONT_STYLE_DISPLAY_20:
@@ -306,6 +341,8 @@ const struct bitmap_font *font_atlas_get(enum font_style_id style_id) {
             return &display_32_font;
         case FONT_STYLE_DISPLAY_40:
             return &display_40_font;
+        case FONT_STYLE_DISPLAY_46:
+            return &display_46_font;
         default:
             return &mono_10_font;
     }
@@ -316,12 +353,16 @@ const struct bitmap_glyph *font_atlas_lookup_glyph(const struct bitmap_font *fon
     if (font == NULL || font->glyphs == NULL || font->glyph_count == 0u) {
         return NULL;
     }
+    const struct bitmap_glyph *fallback = &font->glyphs[0];
     for (uint16_t index = 0u; index < font->glyph_count; index++) {
         if (font->glyphs[index].codepoint == codepoint) {
             return &font->glyphs[index];
         }
+        if (font->glyphs[index].codepoint == CODEPOINT_QUESTION) {
+            fallback = &font->glyphs[index];
+        }
     }
-    return &font->glyphs[0];
+    return fallback;
 }
 
 uint32_t font_atlas_decode_utf8_next(const char *text, size_t *byte_offset) {
@@ -346,8 +387,25 @@ uint32_t font_atlas_decode_utf8_next(const char *text, size_t *byte_offset) {
             return high_bits | low_bits;
         }
     }
+    if ((first_byte & UTF8_3BYTE_LEAD_MASK) == UTF8_3BYTE_LEAD_TAG) {
+        uint8_t second_byte = (uint8_t)text[cursor + 1u];
+        uint8_t third_byte = (uint8_t)text[cursor + 2u];
+        if ((second_byte & UTF8_CONTINUATION_MASK) == UTF8_CONTINUATION_TAG &&
+            (third_byte & UTF8_CONTINUATION_MASK) == UTF8_CONTINUATION_TAG) {
+            *byte_offset = cursor + 3u;
+            uint32_t high_bits = (uint32_t)(first_byte & UTF8_3BYTE_PAYLOAD_MASK) << 12u;
+            uint32_t mid_bits = (uint32_t)(second_byte & UTF8_CONTINUATION_PAYLOAD) << 6u;
+            uint32_t low_bits = (uint32_t)(third_byte & UTF8_CONTINUATION_PAYLOAD);
+            return high_bits | mid_bits | low_bits;
+        }
+    }
+    if ((first_byte & UTF8_4BYTE_LEAD_MASK) == UTF8_4BYTE_LEAD_TAG &&
+        text[cursor + 1u] != '\\0' && text[cursor + 2u] != '\\0' && text[cursor + 3u] != '\\0') {
+        *byte_offset = cursor + 4u;
+        return CODEPOINT_QUESTION;
+    }
     *byte_offset = cursor + 1u;
-    return CODEPOINT_SPACE;
+    return CODEPOINT_QUESTION;
 }
 
 int32_t font_atlas_measure_width(const struct bitmap_font *font, const char *text) {

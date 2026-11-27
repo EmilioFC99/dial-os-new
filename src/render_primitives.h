@@ -31,6 +31,13 @@ struct point_2d {
     float y;
 };
 
+struct clip_rect {
+    int32_t left_x;
+    int32_t top_y;
+    int32_t right_x;
+    int32_t bottom_y;
+};
+
 struct point_3d {
     float x;
     float y;
@@ -173,5 +180,49 @@ void render_draw_dialos_emblem(const struct framebuffer_surface *surface, float 
 void render_draw_hazard_stripe_band(const struct framebuffer_surface *surface, float origin_x,
                                     float origin_y, float band_width, float band_height,
                                     float phase_offset, uint32_t fill_color);
+
+void render_draw_filled_rect_clipped_alpha(const struct framebuffer_surface *surface, float left_x,
+                                           float top_y, float width, float height,
+                                           const struct clip_rect *clip, uint32_t color,
+                                           float alpha);
+void render_draw_chamfer_plate_filled_clipped_aa(const struct framebuffer_surface *surface,
+                                                 float left_x, float top_y, float width,
+                                                 float height, float chamfer,
+                                                 const struct clip_rect *clip, uint32_t color,
+                                                 float alpha);
+void render_draw_rect_corner_brackets_clipped(const struct framebuffer_surface *surface, float left_x,
+                                              float top_y, float width, float height,
+                                              float arm_length, float line_width,
+                                              const struct clip_rect *clip, uint32_t color,
+                                              float alpha);
+void render_draw_text_rect_clipped_alpha(const struct framebuffer_surface *surface,
+                                         enum font_style_id style_id, const char *text,
+                                         float anchor_x, float anchor_y,
+                                         enum text_align_mode align,
+                                         enum text_baseline_mode baseline,
+                                         const struct clip_rect *clip, uint32_t color, float alpha);
+void render_draw_marquee_text_rect_clipped(const struct framebuffer_surface *surface,
+                                           enum font_style_id style_id, const char *text,
+                                           float center_x, float center_y, float max_width,
+                                           float elapsed_seconds, const struct clip_rect *clip,
+                                           uint32_t color, float alpha);
+void render_draw_annular_wedge_fast(const struct framebuffer_surface *surface, float center_x,
+                                    float center_y, float inner_radius, float outer_radius,
+                                    float start_angle, float end_angle, uint32_t color,
+                                    float alpha);
+void render_draw_heart_filled_aa(const struct framebuffer_surface *surface, float center_x,
+                                 float center_y, float radius, uint32_t color, float alpha);
+void render_draw_heart_stroked_aa(const struct framebuffer_surface *surface, float center_x,
+                                  float center_y, float radius, float line_width, uint32_t color,
+                                  float alpha);
+void render_blit_rgb565_scaled_clipped(const struct framebuffer_surface *surface,
+                                       const uint16_t *source_pixels, uint32_t source_width,
+                                       uint32_t source_height, float dest_x, float dest_y,
+                                       float dest_width, float dest_height,
+                                       const struct clip_rect *clip, float alpha);
+void render_blit_rgb565_circle_rotated(const struct framebuffer_surface *surface,
+                                       const uint16_t *source_pixels, uint32_t source_width,
+                                       uint32_t source_height, float center_x, float center_y,
+                                       float radius, float angle_radians, float alpha);
 
 #endif

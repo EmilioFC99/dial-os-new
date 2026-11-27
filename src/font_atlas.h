@@ -24,15 +24,21 @@ struct bitmap_font {
 };
 
 enum font_style_id {
-    FONT_STYLE_MONO_10 = 0,
-    FONT_STYLE_MONO_11 = 1,
-    FONT_STYLE_MONO_13 = 2,
-    FONT_STYLE_MONO_18 = 3,
-    FONT_STYLE_DISPLAY_18 = 4,
-    FONT_STYLE_DISPLAY_20 = 5,
-    FONT_STYLE_DISPLAY_22 = 6,
-    FONT_STYLE_DISPLAY_32 = 7,
-    FONT_STYLE_DISPLAY_40 = 8
+    FONT_STYLE_MONO_8 = 0,
+    FONT_STYLE_MONO_9 = 1,
+    FONT_STYLE_MONO_10 = 2,
+    FONT_STYLE_MONO_11 = 3,
+    FONT_STYLE_MONO_13 = 4,
+    FONT_STYLE_MONO_18 = 5,
+    FONT_STYLE_DISPLAY_11 = 6,
+    FONT_STYLE_DISPLAY_13 = 7,
+    FONT_STYLE_DISPLAY_15 = 8,
+    FONT_STYLE_DISPLAY_18 = 9,
+    FONT_STYLE_DISPLAY_20 = 10,
+    FONT_STYLE_DISPLAY_22 = 11,
+    FONT_STYLE_DISPLAY_32 = 12,
+    FONT_STYLE_DISPLAY_40 = 13,
+    FONT_STYLE_DISPLAY_46 = 14
 };
 
 const struct bitmap_font *font_atlas_get(enum font_style_id style_id);

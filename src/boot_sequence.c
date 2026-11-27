@@ -4,6 +4,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #define BOOT_BUFFER_AUDIO_INIT_BAND_START 0.25f
@@ -31,6 +32,17 @@ static void update_buffer_sweep_progress(struct boot_controller *controller, flo
         }
         controller->sweep_progress =
             clamp_f32(controller->sweep_progress, 0.0f, BOOT_SWEEP_HOLD_CAP_BEFORE_READY);
+        return;
+    }
+
+    if ((controller->has_library_scan_state && !controller->library_scan_ready) ||
+        controller->cover_precache_active) {
+        float scan_cap = 0.92f;
+        float paced_target = buffer_time_ratio * scan_cap;
+        if (paced_target > controller->sweep_progress) {
+            controller->sweep_progress = paced_target;
+        }
+        controller->sweep_progress = clamp_f32(controller->sweep_progress, 0.0f, scan_cap);
         return;
     }
 
@@ -104,7 +116,9 @@ static bool advance_buffer_phase(struct boot_controller *controller, float remai
     controller->buffer_elapsed_seconds += remaining_delta;
     update_buffer_sweep_progress(controller, remaining_delta);
 
-    if (controller->audio_ready &&
+    bool scan_ready = (!controller->has_library_scan_state || controller->library_scan_ready) &&
+                      !controller->cover_precache_active;
+    if (controller->audio_ready && scan_ready &&
         controller->buffer_elapsed_seconds >= BOOT_BUFFER_MIN_DURATION_SECONDS &&
         controller->sweep_progress >= 1.0f) {
         float exit_delta = remaining_delta;
@@ -153,7 +167,56 @@ static void advance_handoff_phase(struct boot_controller *controller, float rema
     controller->phase_elapsed_seconds = next_handoff_elapsed;
 }
 
-static const char *resolve_buffer_status_label(const struct boot_controller *controller) {
+static const char *resolve_buffer_status_label(struct boot_controller *controller) {
+    if (controller->cover_precache_active &&
+        controller->sweep_progress >= BOOT_BUFFER_WAIT_BAND_START) {
+        snprintf(controller->dynamic_status_label, sizeof(controller->dynamic_status_label),
+                 "COVERS // %u / %u", (unsigned)controller->cover_precache_done,
+                 (unsigned)controller->cover_precache_total);
+        return controller->dynamic_status_label;
+    }
+    if (controller->has_library_scan_state) {
+        if (!controller->library_scan_ready) {
+            if (controller->library_scan_phase == 2u) {
+                return "SCAN // DISCOVERING";
+            }
+            if (controller->library_scan_phase == 3u) {
+                snprintf(controller->dynamic_status_label,
+                         sizeof(controller->dynamic_status_label), "SCAN // %u / %u",
+                         (unsigned)controller->library_scanned_files,
+                         (unsigned)controller->library_discovered_files);
+                return controller->dynamic_status_label;
+            }
+            if (controller->library_scan_phase == 7u || controller->library_scan_phase == 8u) {
+                if (controller->sweep_progress >= BOOT_BUFFER_WAIT_BAND_START) {
+                    return "SYNC // VERIFYING LIB";
+                }
+            } else {
+                snprintf(controller->dynamic_status_label,
+                         sizeof(controller->dynamic_status_label), "INDEX // %u ALBUMS",
+                         (unsigned)controller->library_album_count);
+                return controller->dynamic_status_label;
+            }
+        }
+        if (controller->audio_ready) {
+            if (controller->sweep_progress >= BOOT_SWEEP_READY_BAND_START ||
+                controller->buffer_exit_elapsed_seconds > 0.0f) {
+                return "LOCK // SYSTEM READY";
+            }
+            if (controller->sweep_progress >= 0.85f) {
+                snprintf(controller->dynamic_status_label,
+                         sizeof(controller->dynamic_status_label), "INDEX // %u ALBUMS",
+                         (unsigned)controller->library_album_count);
+                return controller->dynamic_status_label;
+            }
+            if (controller->sweep_progress >= BOOT_BUFFER_WAIT_BAND_START) {
+                snprintf(controller->dynamic_status_label,
+                         sizeof(controller->dynamic_status_label), "SCAN // %u TRACKS",
+                         (unsigned)controller->library_track_count);
+                return controller->dynamic_status_label;
+            }
+        }
+    }
     if (controller->audio_ready) {
         if (controller->sweep_progress >= BOOT_SWEEP_READY_BAND_START ||
             controller->buffer_exit_elapsed_seconds > 0.0f) {
@@ -258,6 +321,33 @@ void boot_controller_update_sd_mounted(struct boot_controller *controller, bool 
     controller->sd_mounted = sd_mounted;
 }
 
+void boot_controller_update_library_scan(struct boot_controller *controller, uint32_t scan_phase,
+                                         uint32_t discovered_files, uint32_t scanned_files,
+                                         uint32_t album_count, uint32_t track_count,
+                                         bool music_root_exists, bool scan_ready) {
+    if (controller == NULL) {
+        return;
+    }
+    controller->has_library_scan_state = true;
+    controller->library_scan_phase = scan_phase;
+    controller->library_discovered_files = discovered_files;
+    controller->library_scanned_files = scanned_files;
+    controller->library_album_count = album_count;
+    controller->library_track_count = track_count;
+    controller->library_music_root_exists = music_root_exists;
+    controller->library_scan_ready = scan_ready;
+}
+
+void boot_controller_update_cover_precache(struct boot_controller *controller, bool active,
+                                           uint32_t done_count, uint32_t total_count) {
+    if (controller == NULL) {
+        return;
+    }
+    controller->cover_precache_active = active;
+    controller->cover_precache_done = done_count;
+    controller->cover_precache_total = total_count;
+}
+
 void boot_controller_get_snapshot(const struct boot_controller *controller,
                                   struct boot_render_snapshot *snapshot_out) {
     if (controller == NULL || snapshot_out == NULL) {
@@ -281,7 +371,7 @@ void boot_controller_get_snapshot(const struct boot_controller *controller,
             buffer_exit_progress = clamp_f32(
                 controller->buffer_exit_elapsed_seconds / BOOT_BUFFER_EXIT_DURATION_SECONDS, 0.0f,
                 1.0f);
-            status_label = resolve_buffer_status_label(controller);
+            status_label = resolve_buffer_status_label((struct boot_controller *)controller);
             break;
         case BOOT_PHASE_SIGNAL_LOCK:
             act_progress = clamp_f32(
@@ -317,9 +407,28 @@ void boot_controller_get_snapshot(const struct boot_controller *controller,
     snapshot_out->warning_elapsed_seconds = controller->warning_elapsed_seconds;
     snapshot_out->sweep_progress = controller->sweep_progress;
     snapshot_out->status_label = status_label;
-    snapshot_out->summary_line = controller->sd_mounted
-                                     ? "V1.0 \xC2\xB7 AUDIO OK \xC2\xB7 SD MOUNTED"
-                                     : "V1.0 \xC2\xB7 AUDIO OK \xC2\xB7 NO SD";
+    if (controller->has_library_scan_state) {
+        struct boot_controller *mutable_controller = (struct boot_controller *)controller;
+        if (!controller->sd_mounted || !controller->library_music_root_exists) {
+            snprintf(mutable_controller->dynamic_summary_line,
+                     sizeof(mutable_controller->dynamic_summary_line),
+                     "V1.0 \xC2\xB7 NO FOLDER \xC2\xB7 0 TRACKS");
+        } else if (controller->library_track_count == 0u) {
+            snprintf(mutable_controller->dynamic_summary_line,
+                     sizeof(mutable_controller->dynamic_summary_line),
+                     "V1.0 \xC2\xB7 EMPTY LIB \xC2\xB7 0 TRACKS");
+        } else {
+            snprintf(mutable_controller->dynamic_summary_line,
+                     sizeof(mutable_controller->dynamic_summary_line),
+                     "V1.0 \xC2\xB7 LIB OK \xC2\xB7 %u TRACKS",
+                     (unsigned)controller->library_track_count);
+        }
+        snapshot_out->summary_line = mutable_controller->dynamic_summary_line;
+    } else {
+        snapshot_out->summary_line = controller->sd_mounted
+                                         ? "V1.0 \xC2\xB7 AUDIO OK \xC2\xB7 SD MOUNTED"
+                                         : "V1.0 \xC2\xB7 AUDIO OK \xC2\xB7 NO SD";
+    }
     snapshot_out->completed = (controller->phase == BOOT_PHASE_COMPLETED);
     snapshot_out->sd_mounted = controller->sd_mounted;
 }
