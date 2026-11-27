@@ -75,6 +75,30 @@ static void test_theme_palettes_and_font_atlas(void) {
     TEST_ASSERT_EQ_U32((uint32_t)'A', font_atlas_decode_utf8_next("A\xC2\xB7", &offset));
     TEST_ASSERT_EQ_U32(CODEPOINT_MIDDLE_DOT, font_atlas_decode_utf8_next("A\xC2\xB7", &offset));
     TEST_ASSERT_EQ_U32(0u, font_atlas_decode_utf8_next("A\xC2\xB7", &offset));
+
+    /* Latin-1 Supplement + typographic punctuation + new Library font styles */
+    const char *latin1_text = "\xC3\x89\xE2\x80\x93\xE2\x80\x94\xE2\x80\x99";
+    size_t latin1_offset = 0u;
+    TEST_ASSERT_EQ_U32(0x00C9u, font_atlas_decode_utf8_next(latin1_text, &latin1_offset));
+    TEST_ASSERT_EQ_U32(0x2013u, font_atlas_decode_utf8_next(latin1_text, &latin1_offset));
+    TEST_ASSERT_EQ_U32(0x2014u, font_atlas_decode_utf8_next(latin1_text, &latin1_offset));
+    TEST_ASSERT_EQ_U32(0x2019u, font_atlas_decode_utf8_next(latin1_text, &latin1_offset));
+    TEST_ASSERT_EQ_U32(0u, font_atlas_decode_utf8_next(latin1_text, &latin1_offset));
+
+    const struct bitmap_font *mono_8 = font_atlas_get(FONT_STYLE_MONO_8);
+    const struct bitmap_font *mono_9 = font_atlas_get(FONT_STYLE_MONO_9);
+    const struct bitmap_font *display_11 = font_atlas_get(FONT_STYLE_DISPLAY_11);
+    const struct bitmap_font *display_13 = font_atlas_get(FONT_STYLE_DISPLAY_13);
+    const struct bitmap_font *display_15 = font_atlas_get(FONT_STYLE_DISPLAY_15);
+    const struct bitmap_font *display_46 = font_atlas_get(FONT_STYLE_DISPLAY_46);
+    TEST_ASSERT_TRUE(mono_8 != NULL && mono_9 != NULL);
+    TEST_ASSERT_TRUE(display_11 != NULL && display_13 != NULL && display_15 != NULL &&
+                     display_46 != NULL);
+    TEST_ASSERT_EQ_U32(0x00C9u, font_atlas_lookup_glyph(display_15, 0x00C9u)->codepoint);
+    TEST_ASSERT_EQ_U32(0x2013u, font_atlas_lookup_glyph(mono_9, 0x2013u)->codepoint);
+    TEST_ASSERT_EQ_U32((uint32_t)'A', font_atlas_lookup_glyph(display_46, (uint32_t)'A')->codepoint);
+    /* Unsupported codepoint falls back to '?' */
+    TEST_ASSERT_EQ_U32((uint32_t)'?', font_atlas_lookup_glyph(display_15, 0x4E2Du)->codepoint);
 }
 
 static void test_all_screens_dark_and_light_with_custom_stride(void) {
@@ -370,6 +394,88 @@ static void test_home_screens_dark_and_light_with_custom_stride(void) {
     free(pixels);
 }
 
+static void test_library_2d_primitives_and_blits(void) {
+    const uint32_t stride_pixels = 384u;
+    const uint32_t canary_value = 0xDEADBEEFu;
+    size_t buffer_pixels = (size_t)stride_pixels * SCREEN_HEIGHT;
+    uint32_t *pixels = malloc(buffer_pixels * sizeof(uint32_t));
+    TEST_ASSERT_TRUE(pixels != NULL);
+
+    for (size_t index = 0u; index < buffer_pixels; index++) {
+        pixels[index] = canary_value;
+    }
+
+    struct framebuffer_surface surface = {pixels, stride_pixels};
+    const struct appearance_palette *dark = theme_get_palette(APPEARANCE_MODE_DARK);
+
+    /* 1. Clipped text and marquee must stay strictly within clip_rect */
+    render_fill_canvas(&surface, dark->canvas);
+    struct clip_rect text_clip = {140, 170, 220, 190};
+    render_draw_text_rect_clipped_alpha(&surface, FONT_STYLE_DISPLAY_15, "CLIPPED Y-BAND",
+                                        180.0f, 180.0f, TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE,
+                                        &text_clip, dark->ink_primary, 1.0f);
+    render_draw_marquee_text_rect_clipped(&surface, FONT_STYLE_MONO_9,
+                                          "LONG MARQUEE INSIDE CLIP RECT TEST", 180.0f, 180.0f,
+                                          70.0f, 1.4f, &text_clip, dark->signal_highlight, 1.0f);
+    for (uint32_t logical_y = 150u; logical_y < 170u; logical_y++) {
+        uint32_t physical_y = render_map_coordinate_180(logical_y);
+        for (uint32_t logical_x = 120u; logical_x < 240u; logical_x++) {
+            uint32_t physical_x = render_map_coordinate_180(logical_x);
+            TEST_ASSERT_EQ_U32(dark->canvas, pixels[physical_y * stride_pixels + physical_x]);
+        }
+    }
+
+    /* 2. Clipped rect, chamfer plate, corner brackets */
+    struct clip_rect shape_clip = {100, 100, 200, 150};
+    render_draw_filled_rect_clipped_alpha(&surface, 80.0f, 80.0f, 160.0f, 120.0f, &shape_clip,
+                                          dark->surface, 0.9f);
+    render_draw_chamfer_plate_filled_clipped_aa(&surface, 90.0f, 90.0f, 140.0f, 100.0f, 8.0f,
+                                                &shape_clip, dark->signal_highlight, 0.3f);
+    render_draw_rect_corner_brackets_clipped(&surface, 90.0f, 90.0f, 140.0f, 100.0f, 10.0f, 2.0f,
+                                             &shape_clip, dark->signal_highlight, 1.0f);
+    TEST_ASSERT_EQ_U32(dark->canvas,
+                       pixels[render_map_coordinate_180(155u) * stride_pixels +
+                              render_map_coordinate_180(150u)]);
+
+    /* 3. Annular wedge and hearts */
+    render_fill_canvas(&surface, dark->canvas);
+    render_draw_annular_wedge_fast(&surface, 180.0f, 180.0f, 120.0f, 140.0f, -0.5f, 0.5f,
+                                   dark->signal_highlight, 0.8f);
+    render_draw_heart_filled_aa(&surface, 180.0f, 180.0f, 16.0f, dark->signal_highlight, 1.0f);
+    render_draw_heart_stroked_aa(&surface, 220.0f, 180.0f, 14.0f, 1.8f, dark->ink_primary, 1.0f);
+    assert_bezel_clip_and_content_present(pixels, stride_pixels, dark->canvas);
+
+    /* 4. RGB565 scaled clipped blit (180-deg inverted + clip respected) */
+    uint16_t cover_pixels[4 * 4];
+    for (uint32_t idx = 0u; idx < 16u; idx++) {
+        cover_pixels[idx] = 0xF800u; /* pure red in RGB565 */
+    }
+    render_fill_canvas(&surface, dark->canvas);
+    struct clip_rect blit_clip = {160, 160, 190, 190};
+    render_blit_rgb565_scaled_clipped(&surface, cover_pixels, 4u, 4u, 150.0f, 150.0f, 60.0f, 60.0f,
+                                      &blit_clip, 1.0f);
+    uint32_t inside_px = pixels[render_map_coordinate_180(175u) * stride_pixels +
+                                render_map_coordinate_180(175u)];
+    uint32_t outside_px = pixels[render_map_coordinate_180(155u) * stride_pixels +
+                                 render_map_coordinate_180(155u)];
+    TEST_ASSERT_EQ_U32(0xFFFF0000u, inside_px);
+    TEST_ASSERT_EQ_U32(dark->canvas, outside_px);
+
+    /* 5. RGB565 rotated circular blit */
+    render_fill_canvas(&surface, dark->canvas);
+    render_blit_rgb565_circle_rotated(&surface, cover_pixels, 4u, 4u, 180.0f, 180.0f, 32.0f,
+                                      0.75f, 1.0f);
+    uint32_t center_px = pixels[render_map_coordinate_180(180u) * stride_pixels +
+                                render_map_coordinate_180(180u)];
+    uint32_t far_px = pixels[render_map_coordinate_180(120u) * stride_pixels +
+                             render_map_coordinate_180(120u)];
+    TEST_ASSERT_EQ_U32(0xFFFF0000u, center_px);
+    TEST_ASSERT_EQ_U32(dark->canvas, far_px);
+    TEST_ASSERT_EQ_U32(canary_value, pixels[SCREEN_WIDTH]);
+
+    free(pixels);
+}
+
 void run_render_tests(void) {
     printf("Suite: render\n");
     RUN_TEST(test_coordinate_mapping_and_circles);
@@ -377,4 +483,5 @@ void run_render_tests(void) {
     RUN_TEST(test_all_screens_dark_and_light_with_custom_stride);
     RUN_TEST(test_new_primitives_and_clipping);
     RUN_TEST(test_home_screens_dark_and_light_with_custom_stride);
+    RUN_TEST(test_library_2d_primitives_and_blits);
 }
