@@ -4,8 +4,10 @@
 #include "constants.h"
 #include "font_atlas.h"
 #include "home_screen.h"
+#include "library_controller.h"
 #include "render.h"
 #include "render_home.h"
+#include "render_library.h"
 #include "render_primitives.h"
 #include "theme.h"
 
@@ -476,6 +478,117 @@ static void test_library_2d_primitives_and_blits(void) {
     free(pixels);
 }
 
+static void test_library_screens_dark_and_light_with_custom_stride(void) {
+    const uint32_t stride_pixels = 384u;
+    const uint32_t canary_value = 0xDEADBEEFu;
+    size_t buffer_pixels = (size_t)stride_pixels * SCREEN_HEIGHT;
+    uint32_t *pixels = malloc(buffer_pixels * sizeof(uint32_t));
+    TEST_ASSERT_TRUE(pixels != NULL);
+    for (size_t index = 0u; index < buffer_pixels; index++) {
+        pixels[index] = canary_value;
+    }
+    struct framebuffer_surface surface = {pixels, stride_pixels};
+
+    struct library_catalog catalog;
+    struct library_state_store store;
+    library_catalog_initialize(&catalog);
+    library_state_initialize(&store);
+    struct library_track_input tracks[3] = {
+        {.file_path = "/sd/1.flac", .relative_path = "1.flac", .title = "First Song",
+         .artist = "Artist A", .album = "Prism LP", .genre = "House",
+         .track_number = 1u, .duration_seconds = 120u, .added_at_seconds = 1700000000ll},
+        {.file_path = "/sd/2.flac", .relative_path = "2.flac", .title = "Second Song",
+         .artist = "Artist B", .album = "Grid LP", .genre = "Dub",
+         .track_number = 1u, .duration_seconds = 150u, .added_at_seconds = 1710000000ll},
+        {.file_path = "/sd/3.flac", .relative_path = "3.flac", .title = "Third Song",
+         .artist = "Artist C", .album = "Tape LP", .genre = "Ambient",
+         .track_number = 1u, .duration_seconds = 180u, .added_at_seconds = 1720000000ll},
+    };
+    for (uint32_t idx = 0u; idx < 3u; idx++) {
+        TEST_ASSERT_TRUE(library_catalog_add_track(&catalog, &tracks[idx]));
+    }
+    TEST_ASSERT_TRUE(library_catalog_finalize(&catalog));
+    uint32_t pl_tracks[1] = {0u};
+    TEST_ASSERT_TRUE(library_catalog_add_playlist(&catalog, library_fnv1a_64("pl:test"), "Mix 1",
+                                                  NULL, pl_tracks, 1u));
+
+    struct library_controller ctrl;
+    library_controller_initialize(&ctrl, &catalog, &store, NULL);
+    library_controller_set_active_playback(&ctrl, "/sd/1.flac", true);
+
+    static const enum appearance_mode MODES[2] = {APPEARANCE_MODE_DARK, APPEARANCE_MODE_LIGHT};
+    for (uint32_t m_idx = 0u; m_idx < 2u; m_idx++) {
+        enum appearance_mode mode = MODES[m_idx];
+        uint32_t canvas = theme_get_palette(mode)->canvas;
+
+        /* Hub + Dive transition */
+        library_controller_reset_to_hub(&ctrl, true);
+        render_library_hub_transition_layer(&surface, &ctrl, mode, 0.7f);
+        render_draw_library_frame(&surface, &ctrl, mode, 0.35f);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        /* Albums Vinyl Crate + Sort Wheel + Sort Toast + Quick Actions */
+        struct library_controller_action action;
+        ctrl.view_stack[0].scroll_position = 1.0f;
+        ctrl.view_stack[0].target_index = 1;
+        struct touch_event d = {TOUCH_EVENT_DOWN, 244, 152, 100ull};
+        struct touch_event u = {TOUCH_EVENT_UP, 244, 152, 140ull};
+        library_controller_handle_touch(&ctrl, &d, &action);
+        library_controller_handle_touch(&ctrl, &u, &action);
+        ctrl.bloom_progress = 1.0f;
+        ctrl.sort_wheel_open = true;
+        ctrl.sort_wheel_progress = 1.0f;
+        ctrl.sort_wheel_anchor_x = LIBRARY_CRATE_SORT_BTN_X;
+        ctrl.sort_wheel_anchor_y = LIBRARY_CRATE_SORT_BTN_Y;
+        ctrl.sort_wheel_hovered_slot = 2;
+        ctrl.sort_toast_active = true;
+        ctrl.sort_toast_remaining_seconds = 1.0f;
+        snprintf(ctrl.sort_toast_text, sizeof(ctrl.sort_toast_text), "SORT \xC2\xB7 LIKED FIRST");
+        render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        ctrl.sort_wheel_open = false;
+        ctrl.sort_wheel_progress = 0.0f;
+        ctrl.quick_actions_open = true;
+        ctrl.quick_actions_progress = 1.0f;
+        ctrl.quick_action_kind = LIB_QA_ALBUM;
+        ctrl.quick_action_target_index = 0u;
+        render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        ctrl.quick_actions_open = false;
+        ctrl.quick_actions_progress = 0.0f;
+
+        /* Album Tracklist Crystal Overlay */
+        struct touch_event nd = {TOUCH_EVENT_DOWN, 208, 325, 200ull};
+        struct touch_event nu = {TOUCH_EVENT_UP, 208, 325, 240ull};
+        library_controller_handle_touch(&ctrl, &nd, &action);
+        library_controller_handle_touch(&ctrl, &nu, &action);
+        ctrl.transition_progress = 1.0f;
+        render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        /* Playlists + Action Sheet + Hold-to-Delete arc */
+        library_controller_reset_to_hub(&ctrl, true);
+        struct touch_event pd = {TOUCH_EVENT_DOWN, 244, 152, 300ull};
+        struct touch_event pu = {TOUCH_EVENT_UP, 244, 152, 340ull};
+        library_controller_handle_touch(&ctrl, &pd, &action);
+        library_controller_handle_touch(&ctrl, &pu, &action);
+        ctrl.playlist_sheet_open = true;
+        ctrl.playlist_sheet_progress = 1.0f;
+        ctrl.delete_hold_progress = 0.55f;
+        ctrl.seek_hud_alpha = 1.0f;
+        ctrl.rim_slice_pulls[3] = 1.0f;
+        render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        TEST_ASSERT_EQ_U32(canary_value, pixels[SCREEN_WIDTH]);
+    }
+
+    library_controller_destroy(&ctrl);
+    library_state_destroy(&store);
+    library_catalog_destroy(&catalog);
+    free(pixels);
+}
+
 void run_render_tests(void) {
     printf("Suite: render\n");
     RUN_TEST(test_coordinate_mapping_and_circles);
@@ -484,4 +597,5 @@ void run_render_tests(void) {
     RUN_TEST(test_new_primitives_and_clipping);
     RUN_TEST(test_home_screens_dark_and_light_with_custom_stride);
     RUN_TEST(test_library_2d_primitives_and_blits);
+    RUN_TEST(test_library_screens_dark_and_light_with_custom_stride);
 }
