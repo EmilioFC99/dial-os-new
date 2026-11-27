@@ -708,6 +708,8 @@ static void test_persistent_event_and_performance_logging(void) {
     TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT complete -> home") != NULL);
     TEST_ASSERT_TRUE(strstr(fake.log_output, "HOME entry_complete") != NULL);
     TEST_ASSERT_TRUE(strstr(fake.log_output, "PERF home") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "tick_max_ms=") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "cov_ram=") != NULL);
 
     /* Power lock and shutdown flush with sync_to_disk = true */
     uint32_t syncs_before_lock = fake.log_sync_count;

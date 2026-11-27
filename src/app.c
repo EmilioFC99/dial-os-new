@@ -494,6 +494,10 @@ static void begin_library_mount_sync(struct app_runtime *runtime, bool try_cache
     library_cover_cache_set_directory(&runtime->library_covers, covers_directory);
     (void)library_state_load_json(&runtime->library_state, state_path);
     runtime->library_delta_pending = false;
+    runtime->boot_cover_precache_started = false;
+    runtime->library_scan_start_ns =
+        runtime->platform != NULL ? runtime->platform->monotonic_ns(runtime->platform->context)
+                                  : 0ull;
     runtime->library_scan_started = library_scanner_start(
         &runtime->library_scanner, resolve_music_root(runtime), dialos_directory, try_cache_first);
 }
@@ -997,11 +1001,37 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
             }
             runtime->last_boot_tick_ns = now_ns;
             if (runtime->hardware.sd_mounted && library_scanner_is_busy(&runtime->library_scanner)) {
-                bool was_busy = true;
                 (void)library_scanner_step(&runtime->library_scanner, now_ns,
                                            LIBRARY_SCAN_DEFAULT_BUDGET_NS);
-                if (was_busy && library_scanner_is_ready(&runtime->library_scanner)) {
+                if (library_scanner_is_ready(&runtime->library_scanner)) {
                     finish_library_scan_step(runtime);
+                    uint64_t scan_end_ns =
+                        runtime->platform->monotonic_ns(runtime->platform->context);
+                    logger_log_line(
+                        &runtime->logger, runtime_uptime_ms(runtime, scan_end_ns), "BOOT",
+                        "scan_done ms=%llu cached=%u tracks=%u albums=%u artists=%u genres=%u "
+                        "playlists=%u",
+                        (unsigned long long)elapsed_ms_since(scan_end_ns,
+                                                            runtime->library_scan_start_ns),
+                        runtime->library_scanner.loaded_from_cache ? 1u : 0u,
+                        (unsigned)runtime->library_catalog.track_count,
+                        (unsigned)runtime->library_catalog.album_count,
+                        (unsigned)runtime->library_catalog.artist_count,
+                        (unsigned)runtime->library_catalog.genre_count,
+                        (unsigned)runtime->library_catalog.playlist_count);
+                    if (!runtime->boot_cover_precache_started) {
+                        runtime->boot_cover_precache_started = true;
+                        runtime->cover_precache_start_ns = scan_end_ns;
+                        library_cover_cache_begin_boot_precache(&runtime->library_covers,
+                                                                &runtime->library_catalog);
+                        if (library_cover_cache_is_boot_precaching(&runtime->library_covers)) {
+                            logger_log_line(&runtime->logger,
+                                            runtime_uptime_ms(runtime, scan_end_ns), "BOOT",
+                                            "precache_start albums_with_cover=%u",
+                                            (unsigned)runtime->library_covers.precache_total);
+                            flush_runtime_logs(runtime, false);
+                        }
+                    }
                 }
                 boot_controller_update_library_scan(
                     &runtime->boot, (uint32_t)runtime->library_scanner.phase,
@@ -1010,6 +1040,34 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                     runtime->library_catalog.track_count,
                     runtime->library_scanner.music_root_exists,
                     library_scanner_is_ready(&runtime->library_scanner));
+            }
+            if (runtime->hardware.sd_mounted &&
+                library_cover_cache_is_boot_precaching(&runtime->library_covers)) {
+                (void)library_cover_cache_step_boot_precache(
+                    &runtime->library_covers, &runtime->library_catalog,
+                    runtime->platform->monotonic_ns, runtime->platform->context,
+                    LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
+                bool still_precaching =
+                    library_cover_cache_is_boot_precaching(&runtime->library_covers);
+                boot_controller_update_cover_precache(
+                    &runtime->boot, still_precaching, runtime->library_covers.precache_done,
+                    runtime->library_covers.precache_total);
+                if (!still_precaching) {
+                    uint64_t precache_end_ns =
+                        runtime->platform->monotonic_ns(runtime->platform->context);
+                    logger_log_line(
+                        &runtime->logger, runtime_uptime_ms(runtime, precache_end_ns), "BOOT",
+                        "precache_done ms=%llu decoded=%u disk_hits=%u ram_preloaded=%u "
+                        "failed=%u max_decode_ms=%u",
+                        (unsigned long long)elapsed_ms_since(precache_end_ns,
+                                                            runtime->cover_precache_start_ns),
+                        (unsigned)runtime->library_covers.precache_decoded,
+                        (unsigned)runtime->library_covers.precache_disk_hits,
+                        (unsigned)runtime->library_covers.precache_ram_preloaded,
+                        (unsigned)runtime->library_covers.precache_failed,
+                        (unsigned)runtime->library_covers.precache_max_decode_ms);
+                    flush_runtime_logs(runtime, false);
+                }
             }
             boot_controller_step(&runtime->boot, delta_seconds);
 
@@ -1088,6 +1146,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
         }
 
         if (now_ns >= runtime->next_frame_ns) {
+            uint64_t tick_start_ns = runtime->platform->monotonic_ns(runtime->platform->context);
             float delta_seconds =
                 (now_ns > runtime->last_home_tick_ns)
                     ? (float)(now_ns - runtime->last_home_tick_ns) / (float)NANOSECONDS_PER_SECOND
@@ -1096,6 +1155,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                 delta_seconds = 0.05f;
             }
             runtime->last_home_tick_ns = now_ns;
+            uint32_t scan_ms = 0u;
             if (runtime->hardware.sd_mounted) {
                 if (runtime->library_scanner.loaded_from_cache && !runtime->library_delta_pending &&
                     library_scanner_is_ready(&runtime->library_scanner)) {
@@ -1103,6 +1163,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                     (void)library_scanner_start_delta_check(&runtime->library_scanner);
                 }
                 if (library_scanner_is_busy(&runtime->library_scanner)) {
+                    uint64_t scan_t0 = runtime->platform->monotonic_ns(runtime->platform->context);
                     enum library_scan_phase prev_phase = runtime->library_scanner.phase;
                     (void)library_scanner_step(&runtime->library_scanner, now_ns,
                                                LIBRARY_SCAN_DELTA_BUDGET_NS);
@@ -1115,6 +1176,8 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                             finish_library_scan_step(runtime);
                         }
                     }
+                    scan_ms = (uint32_t)elapsed_ms_since(
+                        runtime->platform->monotonic_ns(runtime->platform->context), scan_t0);
                 }
             }
             if (runtime->home.launch_target >= 1.0f &&
@@ -1128,12 +1191,45 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                 runtime->library_hub_reset_on_dive = false;
             }
             home_controller_step(&runtime->home, delta_seconds);
+            uint32_t cover_ms = 0u;
             if (runtime->home.active_screen == ACTIVE_SCREEN_LIBRARY_SHELL) {
                 library_controller_step(&runtime->library, delta_seconds);
+                uint64_t cov_t0 = runtime->platform->monotonic_ns(runtime->platform->context);
                 (void)library_cover_cache_step(&runtime->library_covers,
                                                !library_controller_is_settling(&runtime->library));
+                cover_ms = (uint32_t)elapsed_ms_since(
+                    runtime->platform->monotonic_ns(runtime->platform->context), cov_t0);
+                if (cover_ms > runtime->perf_window_max_cover_ms) {
+                    runtime->perf_window_max_cover_ms = cover_ms;
+                }
             }
+            uint64_t render_t0 = runtime->platform->monotonic_ns(runtime->platform->context);
             render_home_screen(runtime);
+            uint64_t tick_end_ns = runtime->platform->monotonic_ns(runtime->platform->context);
+            uint32_t render_ms = (uint32_t)elapsed_ms_since(tick_end_ns, render_t0);
+            uint32_t tick_ms = (uint32_t)elapsed_ms_since(tick_end_ns, tick_start_ns);
+            if (tick_ms > runtime->perf_window_max_tick_ms) {
+                runtime->perf_window_max_tick_ms = tick_ms;
+            }
+
+            int current_view_kind = -1;
+            if (runtime->home.active_screen == ACTIVE_SCREEN_LIBRARY_SHELL) {
+                const struct library_view_frame *current_view =
+                    library_controller_current_view(&runtime->library);
+                if (current_view != NULL) {
+                    current_view_kind = (int)current_view->kind;
+                }
+            }
+            if (tick_ms > 25u &&
+                elapsed_ms_since(tick_end_ns, runtime->last_slow_frame_log_ns) >= 1000ull) {
+                runtime->last_slow_frame_log_ns = tick_end_ns;
+                logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, tick_end_ns), "PERF",
+                                "slow tick_ms=%u render_ms=%u cover_ms=%u scan_ms=%u screen=%d "
+                                "view=%d",
+                                (unsigned)tick_ms, (unsigned)render_ms, (unsigned)cover_ms,
+                                (unsigned)scan_ms, (int)runtime->home.active_screen,
+                                current_view_kind);
+            }
 
             if (!runtime->home_entry_logged && runtime->home.entry_progress >= 1.0f) {
                 runtime->home_entry_logged = true;
@@ -1167,19 +1263,36 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                                       ? (runtime->perf_window_total_frame_ms /
                                          runtime->perf_window_frames)
                                       : 0u;
+                uint32_t cov_ram_hits = 0u;
+                uint32_t cov_disk_hits = 0u;
+                uint32_t cov_decodes = 0u;
+                uint32_t cov_max_op_ms = 0u;
+                library_cover_cache_take_window_metrics(&runtime->library_covers, &cov_ram_hits,
+                                                        &cov_disk_hits, &cov_decodes,
+                                                        &cov_max_op_ms);
+                uint32_t cov_max_ms =
+                    runtime->perf_window_max_cover_ms > cov_max_op_ms
+                        ? runtime->perf_window_max_cover_ms
+                        : cov_max_op_ms;
                 logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "PERF",
-                                "home frames=%u fps_x10=%u avg_ms=%u max_ms=%u slow_frames=%u "
-                                "screen=%d bat=%u vol=%u",
+                                "home frames=%u fps_x10=%u avg_ms=%u max_ms=%u tick_max_ms=%u "
+                                "slow_frames=%u screen=%d view=%d cov_ram=%u cov_disk=%u "
+                                "cov_dec=%u cov_max_ms=%u bat=%u vol=%u",
                                 (unsigned)runtime->perf_window_frames, (unsigned)fps_x10,
                                 (unsigned)avg_ms, (unsigned)runtime->perf_window_max_frame_ms,
+                                (unsigned)runtime->perf_window_max_tick_ms,
                                 (unsigned)runtime->perf_window_slow_frames,
-                                (int)runtime->home.active_screen,
+                                (int)runtime->home.active_screen, current_view_kind,
+                                (unsigned)cov_ram_hits, (unsigned)cov_disk_hits,
+                                (unsigned)cov_decodes, (unsigned)cov_max_ms,
                                 (unsigned)runtime->hardware.battery_percent,
                                 (unsigned)runtime->home.telemetry.volume_percent);
                 runtime->perf_window_start_ns = now_ns;
                 runtime->perf_window_frames = 0u;
                 runtime->perf_window_total_frame_ms = 0u;
                 runtime->perf_window_max_frame_ms = 0u;
+                runtime->perf_window_max_tick_ms = 0u;
+                runtime->perf_window_max_cover_ms = 0u;
                 runtime->perf_window_slow_frames = 0u;
                 flush_runtime_logs(runtime, false);
             }

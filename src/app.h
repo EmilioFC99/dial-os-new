@@ -62,6 +62,9 @@ struct app_runtime {
     bool library_delta_pending;
     bool library_prev_sd_mounted;
     bool library_hub_reset_on_dive;
+    bool boot_cover_precache_started;
+    uint64_t library_scan_start_ns;
+    uint64_t cover_precache_start_ns;
     uint32_t m3u_sequence;
     uint64_t last_boot_tick_ns;
     uint64_t last_home_tick_ns;
@@ -78,7 +81,10 @@ struct app_runtime {
     uint32_t perf_window_frames;
     uint32_t perf_window_total_frame_ms;
     uint32_t perf_window_max_frame_ms;
+    uint32_t perf_window_max_tick_ms;
+    uint32_t perf_window_max_cover_ms;
     uint32_t perf_window_slow_frames;
+    uint64_t last_slow_frame_log_ns;
     enum boot_phase last_logged_boot_phase;
     enum active_screen_id last_logged_home_screen;
     float last_logged_launch_target;

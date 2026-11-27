@@ -176,8 +176,16 @@ static void test_boot_library_scan_hold_and_summary_lines(void) {
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
     TEST_ASSERT_EQ_STR("SCAN // 2 / 5", snapshot.status_label);
 
-    /* Complete scan -> advances into Signal Lock with LIB OK summary */
+    /* Complete scan -> holds on cover precache if active, then advances */
     boot_controller_update_library_scan(&controller, 6u, 5u, 5u, 2u, 5u, true, true);
+    boot_controller_update_cover_precache(&controller, true, 1u, 4u);
+    step_in_increments(&controller, 0.5f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&controller, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
+    TEST_ASSERT_TRUE(snapshot.sweep_progress <= 0.9201f);
+    TEST_ASSERT_EQ_STR("COVERS // 1 / 4", snapshot.status_label);
+
+    boot_controller_update_cover_precache(&controller, false, 4u, 4u);
     step_in_increments(&controller, 0.5f, 1.0f / 60.0f);
     boot_controller_get_snapshot(&controller, &snapshot);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_SIGNAL_LOCK, snapshot.phase);

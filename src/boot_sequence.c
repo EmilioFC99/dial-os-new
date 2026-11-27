@@ -35,9 +35,18 @@ static void update_buffer_sweep_progress(struct boot_controller *controller, flo
         return;
     }
 
-    if (controller->has_library_scan_state && !controller->library_scan_ready) {
+    if ((controller->has_library_scan_state && !controller->library_scan_ready) ||
+        controller->cover_precache_active) {
         float scan_cap = 0.92f;
         float paced_target = buffer_time_ratio * scan_cap;
+        if (controller->cover_precache_active && controller->cover_precache_total > 0u) {
+            float cover_ratio =
+                (float)controller->cover_precache_done / (float)controller->cover_precache_total;
+            float cover_target = 0.78f + clamp_f32(cover_ratio, 0.0f, 1.0f) * (scan_cap - 0.78f);
+            if (cover_target > paced_target) {
+                paced_target = cover_target;
+            }
+        }
         if (paced_target > controller->sweep_progress) {
             controller->sweep_progress = paced_target;
         }
@@ -115,7 +124,8 @@ static bool advance_buffer_phase(struct boot_controller *controller, float remai
     controller->buffer_elapsed_seconds += remaining_delta;
     update_buffer_sweep_progress(controller, remaining_delta);
 
-    bool scan_ready = !controller->has_library_scan_state || controller->library_scan_ready;
+    bool scan_ready = (!controller->has_library_scan_state || controller->library_scan_ready) &&
+                      !controller->cover_precache_active;
     if (controller->audio_ready && scan_ready &&
         controller->buffer_elapsed_seconds >= BOOT_BUFFER_MIN_DURATION_SECONDS &&
         controller->sweep_progress >= 1.0f) {
@@ -166,6 +176,12 @@ static void advance_handoff_phase(struct boot_controller *controller, float rema
 }
 
 static const char *resolve_buffer_status_label(struct boot_controller *controller) {
+    if (controller->cover_precache_active) {
+        snprintf(controller->dynamic_status_label, sizeof(controller->dynamic_status_label),
+                 "COVERS // %u / %u", (unsigned)controller->cover_precache_done,
+                 (unsigned)controller->cover_precache_total);
+        return controller->dynamic_status_label;
+    }
     if (controller->has_library_scan_state) {
         if (!controller->library_scan_ready) {
             if (controller->library_scan_phase == 2u) {
@@ -320,6 +336,16 @@ void boot_controller_update_library_scan(struct boot_controller *controller, uin
     controller->library_track_count = track_count;
     controller->library_music_root_exists = music_root_exists;
     controller->library_scan_ready = scan_ready;
+}
+
+void boot_controller_update_cover_precache(struct boot_controller *controller, bool active,
+                                           uint32_t done_count, uint32_t total_count) {
+    if (controller == NULL) {
+        return;
+    }
+    controller->cover_precache_active = active;
+    controller->cover_precache_done = done_count;
+    controller->cover_precache_total = total_count;
 }
 
 void boot_controller_get_snapshot(const struct boot_controller *controller,
