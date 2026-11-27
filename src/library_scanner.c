@@ -349,11 +349,12 @@ static void parse_flac_file(FILE *file, struct parsed_tag_fields *fields) {
                 uint32_t pic_type = read_be32(pic_hdr);
                 uint32_t mime_len = read_be32(pic_hdr + 4u);
                 if (mime_len <= 128u && 8u + mime_len + 20u <= block_size) {
-                    if (fseek(file, block_start + 8L + (long)mime_len + 4L, SEEK_SET) == 0) {
+                    if (fseek(file, block_start + 8L + (long)mime_len, SEEK_SET) == 0) {
                         uint8_t desc_len_buf[4];
                         if (fread(desc_len_buf, 1u, 4u, file) == 4u) {
                             uint32_t desc_len = read_be32(desc_len_buf);
-                            long image_meta_pos = block_start + 8L + (long)mime_len + 8L + (long)desc_len + 16L;
+                            long image_meta_pos =
+                                block_start + 8L + (long)mime_len + 4L + (long)desc_len + 16L;
                             if (image_meta_pos + 4L <= block_start + (long)block_size &&
                                 fseek(file, image_meta_pos, SEEK_SET) == 0) {
                                 uint8_t img_len_buf[4];
@@ -1096,6 +1097,10 @@ static uint64_t fold_entry_fingerprint(const char *path, int64_t mtime_sec, uint
     return hash;
 }
 
+static uint64_t finalize_discovery_fingerprint(uint64_t hash, uint32_t discovered_files) {
+    return hash ^ ((uint64_t)discovered_files * 0x517CC1B727220A95ull);
+}
+
 static void step_discovery_batch(struct library_scanner *scanner, bool collect_files,
                                  uint64_t start_ns, uint64_t budget_ns) {
     while (scanner->dir_depth > 0u) {
@@ -1223,7 +1228,8 @@ bool library_scanner_step(struct library_scanner *scanner, uint64_t now_ns, uint
         case LIB_SCAN_DISCOVERING:
             step_discovery_batch(scanner, true, start_ns, budget_ns);
             if (scanner->dir_depth == 0u) {
-                scanner->catalog->fingerprint = scanner->delta_fingerprint;
+                scanner->catalog->fingerprint = finalize_discovery_fingerprint(
+                    scanner->delta_fingerprint, scanner->discovered_files);
                 scanner->phase = LIB_SCAN_SCANNING;
             }
             return true;
@@ -1282,8 +1288,9 @@ bool library_scanner_step(struct library_scanner *scanner, uint64_t now_ns, uint
 
         case LIB_SCAN_DELTA_CHECKING:
             scanner->delta_changed =
-                (scanner->discovered_files != scanner->catalog->track_count ||
-                 scanner->delta_fingerprint != scanner->catalog->fingerprint);
+                (finalize_discovery_fingerprint(scanner->delta_fingerprint,
+                                                scanner->discovered_files) !=
+                 scanner->catalog->fingerprint);
             scanner->phase = LIB_SCAN_READY;
             return true;
 

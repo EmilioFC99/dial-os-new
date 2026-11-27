@@ -357,8 +357,93 @@ static void test_sort_modes_seek_anchors_and_state_persistence(void) {
     remove_tree_recursive(root_dir);
 }
 
+static void write_be32_local(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)((value >> 24u) & 0xFFu);
+    out[1] = (uint8_t)((value >> 16u) & 0xFFu);
+    out[2] = (uint8_t)((value >> 8u) & 0xFFu);
+    out[3] = (uint8_t)(value & 0xFFu);
+}
+
+static void test_flac_embedded_picture_offset_parsing(void) {
+    char root_dir[256];
+    snprintf(root_dir, sizeof(root_dir), "/tmp/dialos_flac_pic_%d", (int)getpid());
+    remove_tree_recursive(root_dir);
+    mkdir(root_dir, 0755);
+
+    char artist_dir[300], album_dir[340], flac_path[380];
+    snprintf(artist_dir, sizeof(artist_dir), "%s/Koven", root_dir);
+    snprintf(album_dir, sizeof(album_dir), "%s/Butterfly Effect", artist_dir);
+    snprintf(flac_path, sizeof(flac_path), "%s/01 - Worlds Collide.flac", album_dir);
+    mkdir(artist_dir, 0755);
+    mkdir(album_dir, 0755);
+
+    static const char *MIME = "image/jpeg";
+    static const char *DESC = "Front";
+    static const uint8_t FAKE_JPEG[6] = {0xFFu, 0xD8u, 0xFFu, 0xE0u, 0xFFu, 0xD9u};
+    uint32_t mime_len = (uint32_t)strlen(MIME);
+    uint32_t desc_len = (uint32_t)strlen(DESC);
+    uint32_t pic_block_len = 8u + mime_len + 4u + desc_len + 16u + 4u + sizeof(FAKE_JPEG);
+
+    FILE *file = fopen(flac_path, "wb");
+    TEST_ASSERT_TRUE(file != NULL);
+    fwrite("fLaC", 1u, 4u, file);
+
+    /* STREAMINFO (type=0, 34 bytes) */
+    uint8_t streaminfo_hdr[4] = {0u, 0u, 0u, 34u};
+    uint8_t streaminfo[34] = {0};
+    /* sample_rate = 44100 (0xAC44), total_samples = 44100 * 10 = 441000 */
+    streaminfo[10] = 0x0Au;
+    streaminfo[11] = 0xC4u;
+    streaminfo[12] = 0x40u;
+    streaminfo[15] = 0x06u;
+    streaminfo[16] = 0xBAu;
+    streaminfo[17] = 0xA8u;
+    fwrite(streaminfo_hdr, 1u, 4u, file);
+    fwrite(streaminfo, 1u, 34u, file);
+
+    /* PICTURE (type=6, last=1) */
+    uint8_t pic_hdr[4] = {
+        0x86u,
+        (uint8_t)((pic_block_len >> 16u) & 0xFFu),
+        (uint8_t)((pic_block_len >> 8u) & 0xFFu),
+        (uint8_t)(pic_block_len & 0xFFu),
+    };
+    fwrite(pic_hdr, 1u, 4u, file);
+
+    uint8_t field_u32[4];
+    write_be32_local(field_u32, 3u); /* Front Cover */
+    fwrite(field_u32, 1u, 4u, file);
+    write_be32_local(field_u32, mime_len);
+    fwrite(field_u32, 1u, 4u, file);
+    fwrite(MIME, 1u, mime_len, file);
+    write_be32_local(field_u32, desc_len);
+    fwrite(field_u32, 1u, 4u, file);
+    fwrite(DESC, 1u, desc_len, file);
+    uint8_t dims[16] = {0};
+    write_be32_local(dims, 1000u);
+    write_be32_local(dims + 4u, 1000u);
+    write_be32_local(dims + 8u, 24u);
+    fwrite(dims, 1u, 16u, file);
+    write_be32_local(field_u32, sizeof(FAKE_JPEG));
+    fwrite(field_u32, 1u, 4u, file);
+    long expected_offset = ftell(file);
+    fwrite(FAKE_JPEG, 1u, sizeof(FAKE_JPEG), file);
+    fclose(file);
+
+    struct library_track_input parsed;
+    char scratch[2048];
+    TEST_ASSERT_TRUE(
+        library_parse_audio_file_metadata(flac_path, root_dir, &parsed, scratch, sizeof(scratch)));
+    TEST_ASSERT_EQ_U32(LIBRARY_COVER_EMBEDDED_FLAC, parsed.cover_source_kind);
+    TEST_ASSERT_EQ_U32((uint32_t)expected_offset, parsed.cover_data_offset);
+    TEST_ASSERT_EQ_U32((uint32_t)sizeof(FAKE_JPEG), parsed.cover_data_length);
+
+    remove_tree_recursive(root_dir);
+}
+
 void run_library_catalog_tests(void) {
     printf("Suite: library_catalog\n");
     RUN_TEST(test_scanner_parsers_and_cache_roundtrip);
     RUN_TEST(test_sort_modes_seek_anchors_and_state_persistence);
+    RUN_TEST(test_flac_embedded_picture_offset_parsing);
 }
