@@ -25,6 +25,8 @@ struct playback_status_update {
     enum ipc_playback_state state;
     bool has_track_metadata;
     char track_title[TRACK_TITLE_CAPACITY];
+    bool has_track_path;
+    char track_path[TRACK_PATH_CAPACITY];
     uint32_t duration_ms;
 };
 
@@ -96,6 +98,9 @@ bool protocol_parse_inbound_ipc(const char *frame_text, size_t frame_length,
                                 struct inbound_ipc_message *message_out);
 size_t protocol_format_disable_idle_poweroff(char *output_buffer, size_t buffer_capacity);
 size_t protocol_format_set_volume(uint8_t volume_level, char *output_buffer, size_t buffer_capacity);
+size_t protocol_format_play_m3u(const char *disk_m3u_path, char *output_buffer,
+                                size_t buffer_capacity);
+size_t protocol_format_play_pause_toggle(char *output_buffer, size_t buffer_capacity);
 enum physical_button_action protocol_decode_input_event(const struct kernel_input_event *event);
 void protocol_touch_decoder_initialize(struct touch_event_decoder *decoder);
 enum touch_event_kind protocol_touch_decoder_feed(struct touch_event_decoder *decoder,

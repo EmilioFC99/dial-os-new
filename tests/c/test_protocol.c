@@ -130,6 +130,21 @@ static void test_format_outbound_commands(void) {
     TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_disable_idle_poweroff(tiny_buffer, sizeof(tiny_buffer)));
     TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_set_volume(10u, tiny_buffer, sizeof(tiny_buffer)));
     TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_set_volume(10u, NULL, 16u));
+
+    /* 0201 Play/Pause toggle + 0100 M3U playback launch */
+    written = protocol_format_play_pause_toggle(command_buffer, sizeof(command_buffer));
+    TEST_ASSERT_EQ_U32(12u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0201000C0000", command_buffer);
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_pause_toggle(tiny_buffer, sizeof(tiny_buffer)));
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_pause_toggle(NULL, 16u));
+
+    char m3u_command[128];
+    written = protocol_format_play_m3u("/tmp/dialos_play_1.m3u", m3u_command, sizeof(m3u_command));
+    TEST_ASSERT_EQ_U32(39u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0100002700000004//tmp/dialos_play_1.m3u", m3u_command);
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_m3u(NULL, m3u_command, sizeof(m3u_command)));
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_m3u("", m3u_command, sizeof(m3u_command)));
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_m3u("/tmp/dialos_play_1.m3u", m3u_command, 39u));
 }
 
 static void test_decode_input_events(void) {
@@ -231,6 +246,28 @@ static void test_parse_playback_volume_and_usb_events(void) {
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a2020010not_json", 16u, &message));
     TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
     TEST_ASSERT_FALSE(message.playback_status.has_state);
+
+    /* Golden V2.57 a202 track frame from M0 trace (line 37) with double-escaped song_file_path */
+    const char *golden_a202 =
+        "a20202A7{\"song\":\"{\\\"id\\\":700000001,\\\"pos_id\\\":1,"
+        "\\\"song_name\\\":\\\"Shakti Sound\\\",\\\"song_duration_time\\\":154000,"
+        "\\\"song_file_path\\\":\\\"\\\\\\/tmp\\\\\\/sdcard\\\\\\/A Hundred Drums\\\\\\/"
+        "A Hundred Drums\\\\\\/01 - Shakti Sound.flac\\\",\\\"song_sample_rate\\\":44100,"
+        "\\\"song_encoding_rate\\\":16,\\\"song_bit_rate\\\":1411,"
+        "\\\"song_artist_name\\\":\\\"A Hundred Drums\\\",\\\"song_album_name\\\":\\\"A Hundred Drums\\\","
+        "\\\"song_style_name\\\":\\\"\\xC3\\x89lectronique, Danc\\\",\\\"song_track\\\":1,"
+        "\\\"song_channel\\\":2,\\\"is_sacd\\\":false,\\\"is_cue\\\":false,"
+        "\\\"is_dsd\\\":false,\\\"is_m3u\\\":true,"
+        "\\\"m3u_file_path\\\":\\\"\\\\\\/\\\\\\/tmp\\\\\\/dialos_play_1.m3u\\\\\\/01 - Shakti Sound.flac\\\"}\","
+        "\"love\":true,\"playerflag\":4,\"state\":2,\"playing_num\":\"1/1\",\"work_mode\":\"LOCAL\"}";
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc(golden_a202, strlen(golden_a202), &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_TRUE(message.playback_status.has_track_metadata);
+    TEST_ASSERT_EQ_STR("Shakti Sound", message.playback_status.track_title);
+    TEST_ASSERT_EQ_U32(154000u, message.playback_status.duration_ms);
+    TEST_ASSERT_TRUE(message.playback_status.has_track_path);
+    TEST_ASSERT_EQ_STR("/tmp/sdcard/A Hundred Drums/A Hundred Drums/01 - Shakti Sound.flac",
+                       message.playback_status.track_path);
 
     /* a103 elapsed ms (compact 8-byte header + 8 hex digits = 16 bytes) */
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a103001000004A38", 16u, &message));
