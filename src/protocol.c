@@ -616,9 +616,9 @@ static void parse_a202_json_payload(const char *payload, size_t payload_length,
         } else if (raw_state == 1u) {
             status->state = IPC_PLAYBACK_PAUSED;
         } else if (raw_state == 2u) {
-            status->state = (status->has_track_path || status->has_track_metadata)
-                                ? IPC_PLAYBACK_PLAYING
-                                : IPC_PLAYBACK_STOPPED;
+            bool has_track = (status->has_track_path || status->has_track_metadata);
+            status->state = has_track ? IPC_PLAYBACK_PLAYING : IPC_PLAYBACK_STOPPED;
+            status->is_loading_state = has_track;
         } else {
             status->state = IPC_PLAYBACK_IDLE;
         }
@@ -836,29 +836,32 @@ size_t protocol_format_set_gapless(bool enabled, char *output_buffer, size_t buf
 }
 
 enum physical_button_action protocol_decode_input_event(const struct kernel_input_event *event) {
-    if (event == NULL || event->type != INPUT_EVENT_TYPE_KEY ||
-        event->value != INPUT_EVENT_VALUE_PRESS) {
+    if (event == NULL || event->type != INPUT_EVENT_TYPE_KEY) {
+        return BUTTON_ACTION_NONE;
+    }
+
+    bool is_press = (event->value == INPUT_EVENT_VALUE_PRESS);
+    bool is_repeat = (event->value == INPUT_EVENT_VALUE_REPEAT);
+    if (!is_press && !is_repeat) {
         return BUTTON_ACTION_NONE;
     }
 
     switch (event->code) {
-        case KEYCODE_PLAY_PAUSE:
-            return BUTTON_ACTION_PLAY_PAUSE;
         case KEYCODE_VOLUME_UP_PRIMARY:
+        case KEYCODE_VOLUME_UP_ALT_A:
         case KEYCODE_VOLUME_UP_ALT_B:
             return BUTTON_ACTION_VOLUME_UP;
         case KEYCODE_VOLUME_DOWN_PRIMARY:
+        case KEYCODE_VOLUME_DOWN_ALT_A:
         case KEYCODE_VOLUME_DOWN_ALT_B:
             return BUTTON_ACTION_VOLUME_DOWN;
-        case KEYCODE_NEXT_TRACK:
-            return BUTTON_ACTION_NEXT_TRACK;
-        case KEYCODE_PREV_TRACK:
-            return BUTTON_ACTION_PREV_TRACK;
+        case KEYCODE_PLAY_PAUSE:
+            return is_press ? BUTTON_ACTION_PLAY_PAUSE : BUTTON_ACTION_NONE;
         case KEYCODE_POWER_SHORT_PRIMARY:
         case KEYCODE_POWER_SHORT_ALT:
-            return BUTTON_ACTION_POWER_SHORT;
+            return is_press ? BUTTON_ACTION_POWER_SHORT : BUTTON_ACTION_NONE;
         case KEYCODE_POWER_LONG:
-            return BUTTON_ACTION_POWER_LONG;
+            return is_press ? BUTTON_ACTION_POWER_LONG : BUTTON_ACTION_NONE;
         default:
             return BUTTON_ACTION_NONE;
     }

@@ -24,6 +24,7 @@ enum ipc_playback_state {
 struct playback_status_update {
     bool has_state;
     enum ipc_playback_state state;
+    bool is_loading_state;
     bool has_track_metadata;
     char track_title[TRACK_TITLE_CAPACITY];
     char artist_name[TRACK_METADATA_TEXT_CAPACITY];

@@ -177,19 +177,24 @@ static void test_decode_input_events(void) {
 
     event.code = KEYCODE_VOLUME_UP_PRIMARY;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
+    event.code = KEYCODE_VOLUME_UP_ALT_A;
+    TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
     event.code = KEYCODE_VOLUME_UP_ALT_B;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
+    event.value = INPUT_EVENT_VALUE_REPEAT;
+    TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
 
+    event.value = INPUT_EVENT_VALUE_PRESS;
     event.code = KEYCODE_VOLUME_DOWN_PRIMARY;
+    TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_DOWN, protocol_decode_input_event(&event));
+    event.code = KEYCODE_VOLUME_DOWN_ALT_A;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_DOWN, protocol_decode_input_event(&event));
     event.code = KEYCODE_VOLUME_DOWN_ALT_B;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_DOWN, protocol_decode_input_event(&event));
+    event.value = INPUT_EVENT_VALUE_REPEAT;
+    TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_DOWN, protocol_decode_input_event(&event));
 
-    event.code = KEYCODE_NEXT_TRACK;
-    TEST_ASSERT_EQ_I32(BUTTON_ACTION_NEXT_TRACK, protocol_decode_input_event(&event));
-    event.code = KEYCODE_PREV_TRACK;
-    TEST_ASSERT_EQ_I32(BUTTON_ACTION_PREV_TRACK, protocol_decode_input_event(&event));
-
+    event.value = INPUT_EVENT_VALUE_PRESS;
     event.code = KEYCODE_POWER_SHORT_PRIMARY;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_POWER_SHORT, protocol_decode_input_event(&event));
     event.code = KEYCODE_POWER_SHORT_ALT;
@@ -197,10 +202,10 @@ static void test_decode_input_events(void) {
     event.code = KEYCODE_POWER_LONG;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_POWER_LONG, protocol_decode_input_event(&event));
 
-    /* Release (0), repeat (2), non-key EV_SYN (0), unknown code, NULL */
+    /* Release (0), repeat (2) on non-volume key, non-key EV_SYN (0), unknown code, NULL */
     event.value = 0;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_NONE, protocol_decode_input_event(&event));
-    event.value = 2;
+    event.value = INPUT_EVENT_VALUE_REPEAT;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_NONE, protocol_decode_input_event(&event));
     event.value = 1;
     event.type = 0u;
@@ -243,6 +248,7 @@ static void test_parse_playback_volume_and_usb_events(void) {
     TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
     TEST_ASSERT_TRUE(message.playback_status.has_state);
     TEST_ASSERT_EQ_I32(IPC_PLAYBACK_PLAYING, message.playback_status.state);
+    TEST_ASSERT_FALSE(message.playback_status.is_loading_state);
     TEST_ASSERT_FALSE(message.playback_status.has_track_metadata);
 
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a2020013{\"state\":1}", 19u, &message));
@@ -294,6 +300,7 @@ static void test_parse_playback_volume_and_usb_events(void) {
         "\"love\":true,\"playerflag\":4,\"state\":2,\"playing_num\":\"1/1\",\"work_mode\":\"LOCAL\"}";
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc(golden_a202, strlen(golden_a202), &message));
     TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_TRUE(message.playback_status.is_loading_state);
     TEST_ASSERT_TRUE(message.playback_status.has_track_metadata);
     TEST_ASSERT_EQ_STR("Shakti Sound", message.playback_status.track_title);
     TEST_ASSERT_EQ_U32(154000u, message.playback_status.duration_ms);
