@@ -143,12 +143,14 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
     }, &effects);
     TEST_ASSERT_FALSE(engine.is_playing);
 
-    /* Stale a103 elapsed (>5s) is ignored while !audio_started */
+    /* Stale a103 elapsed (>1.5s) is ignored while !audio_started, <=1.5s accepted */
     engine.audio_started = false;
     engine.has_pending_resume_seek = false;
     engine.elapsed_ms = 0u;
-    TEST_ASSERT_FALSE(playback_engine_handle_ipc_elapsed(&engine, 120000u));
+    TEST_ASSERT_FALSE(playback_engine_handle_ipc_elapsed(&engine, 3000u));
     TEST_ASSERT_EQ_U32(0u, engine.elapsed_ms);
+    TEST_ASSERT_TRUE(playback_engine_handle_ipc_elapsed(&engine, 1000u));
+    TEST_ASSERT_EQ_U32(1000u, engine.elapsed_ms);
 
     /* Gapless auto-advance with is_loading_state=true resets audio_started=false */
     TEST_ASSERT_TRUE(playback_engine_toggle_play_pause(&engine, &effects));

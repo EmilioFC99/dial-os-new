@@ -784,7 +784,7 @@ bool playback_engine_handle_ipc_elapsed(struct playback_engine *engine, uint32_t
     if (engine == NULL || !engine->has_active_track || engine->awaiting_slice_load) {
         return false;
     }
-    if (!engine->audio_started && !engine->has_pending_resume_seek && elapsed_ms > 5000u) {
+    if (!engine->audio_started && !engine->has_pending_resume_seek && elapsed_ms > 1500u) {
         return false;
     }
     if (engine->duration_ms > 0u && elapsed_ms > engine->duration_ms) {
