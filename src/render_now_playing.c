@@ -1,5 +1,6 @@
 #include "render_now_playing.h"
 
+#include "font_atlas.h"
 #include "home_screen.h"
 #include "render_primitives.h"
 
@@ -13,28 +14,37 @@ static void format_mm_ss_u32(uint32_t total_seconds, char *out, size_t cap) {
     snprintf(out, cap, "%02u:%02u", (unsigned)mins, (unsigned)secs);
 }
 
-static void draw_vinyl_or_fallback(const struct framebuffer_surface *surface,
-                                   const uint16_t *cover_pixels, uint32_t cover_size,
-                                   float center_x, float center_y, float radius,
-                                   float angle_radians, float alpha,
-                                   const struct appearance_palette *palette, bool is_dark) {
+static void draw_vinyl_or_fallback_shaded(const struct framebuffer_surface *surface,
+                                          const uint16_t *cover_pixels, uint32_t cover_size,
+                                          float center_x, float center_y, float radius,
+                                          float angle_radians, float alpha, uint32_t shade_256,
+                                          uint32_t tint_xrgb,
+                                          const struct appearance_palette *palette, bool is_dark) {
     if (alpha <= ALPHA_VISIBILITY_THRESHOLD || radius <= 1.0f) {
         return;
     }
     if (cover_pixels != NULL && cover_size > 0u) {
-        render_blit_rgb565_circle_rotated(surface, cover_pixels, cover_size, cover_size, center_x,
-                                          center_y, radius, angle_radians, alpha);
+        render_blit_rgb565_circle_rotated_shaded(surface, cover_pixels, cover_size, cover_size,
+                                                 center_x, center_y, radius, angle_radians, alpha,
+                                                 shade_256, tint_xrgb);
         return;
     }
+    float dim_alpha = alpha * ((float)shade_256 / 256.0f);
     uint32_t disc_base = is_dark ? 0xFF141820u : 0xFF2B3038u;
-    render_draw_filled_circle_aa(surface, center_x, center_y, radius, disc_base, alpha);
+    if (shade_256 < 256u) {
+        render_draw_filled_circle_aa(surface, center_x, center_y, radius, tint_xrgb, alpha);
+    }
+    if (dim_alpha <= ALPHA_VISIBILITY_THRESHOLD) {
+        return;
+    }
+    render_draw_filled_circle_aa(surface, center_x, center_y, radius, disc_base, dim_alpha);
     render_draw_arc_aa(surface, center_x, center_y, radius * 0.72f, 1.4f, angle_radians,
-                       angle_radians + 1.8f, palette->signal_highlight, alpha * 0.8f);
+                       angle_radians + 1.8f, palette->signal_highlight, dim_alpha * 0.8f);
     render_draw_arc_aa(surface, center_x, center_y, radius * 0.52f, 1.2f,
                        angle_radians + 3.14f, angle_radians + 4.8f, palette->ink_primary,
-                       alpha * 0.45f);
+                       dim_alpha * 0.45f);
     render_draw_filled_circle_aa(surface, center_x, center_y, radius * 0.16f,
-                                 palette->surface, alpha);
+                                 palette->surface, dim_alpha);
 }
 
 static void draw_idle_screen(const struct framebuffer_surface *surface,
@@ -94,6 +104,83 @@ static void draw_idle_screen(const struct framebuffer_surface *surface,
                            TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, cta_ink, 1.0f);
 }
 
+static uint32_t wrap_lyrics_lines(enum font_style_id style, const char *text, float max_width_px,
+                                  char lines[][128], uint32_t max_lines, bool *had_overflow_word) {
+    if (had_overflow_word != NULL) {
+        *had_overflow_word = false;
+    }
+    if (text == NULL || text[0] == '\0' || max_lines == 0u) {
+        return 0u;
+    }
+    const struct bitmap_font *font = font_atlas_get(style);
+    if (font == NULL) {
+        snprintf(lines[0], 128, "%s", text);
+        return 1u;
+    }
+
+    uint32_t line_count = 0u;
+    const char *cursor = text;
+    while (*cursor != '\0' && line_count < max_lines) {
+        while (*cursor == ' ' || *cursor == '\t') {
+            cursor++;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        char current_line[128];
+        current_line[0] = '\0';
+        size_t current_len = 0u;
+
+        while (*cursor != '\0') {
+            while (*cursor == ' ' || *cursor == '\t') {
+                cursor++;
+            }
+            if (*cursor == '\0') {
+                break;
+            }
+            const char *word_start = cursor;
+            while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t') {
+                cursor++;
+            }
+            size_t word_len = (size_t)(cursor - word_start);
+            char candidate[128];
+            if (current_len == 0u) {
+                if (word_len >= sizeof(candidate)) {
+                    word_len = sizeof(candidate) - 1u;
+                }
+                memcpy(candidate, word_start, word_len);
+                candidate[word_len] = '\0';
+                if (font_atlas_measure_width(font, candidate) > max_width_px &&
+                    had_overflow_word != NULL) {
+                    *had_overflow_word = true;
+                }
+                memcpy(current_line, candidate, word_len + 1u);
+                current_len = word_len;
+            } else {
+                if (current_len + 1u + word_len < sizeof(candidate)) {
+                    memcpy(candidate, current_line, current_len);
+                    candidate[current_len] = ' ';
+                    memcpy(candidate + current_len + 1u, word_start, word_len);
+                    candidate[current_len + 1u + word_len] = '\0';
+                    if (font_atlas_measure_width(font, candidate) <= max_width_px) {
+                        memcpy(current_line, candidate, current_len + 1u + word_len + 1u);
+                        current_len += 1u + word_len;
+                        continue;
+                    }
+                }
+                cursor = word_start;
+                break;
+            }
+        }
+
+        if (current_len > 0u) {
+            snprintf(lines[line_count], 128, "%s", current_line);
+            line_count++;
+        }
+    }
+    return line_count;
+}
+
 static void draw_lyrics_overlay(const struct framebuffer_surface *surface,
                                 struct now_playing_controller *controller,
                                 const struct appearance_palette *palette) {
@@ -109,18 +196,7 @@ static void draw_lyrics_overlay(const struct framebuffer_surface *surface,
         dim = 0.28f;
     }
 
-    /* Fast frosted backdrop + lightweight orbiting motif glows */
-    render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, 360.0f, 360.0f, 0xFF07090Du,
-                                  0.86f * alpha);
-    float orb_a = controller->vinyl_rotation_radians * 0.7f;
-    render_draw_filled_circle_aa(surface, 180.0f + cosf(orb_a) * 68.0f,
-                                 180.0f + sinf(orb_a) * 54.0f, 96.0f, palette->signal_highlight,
-                                 0.07f * alpha);
-    render_draw_filled_circle_aa(surface, 180.0f - cosf(orb_a) * 62.0f,
-                                 180.0f - sinf(orb_a) * 48.0f, 84.0f, palette->ink_primary,
-                                 0.05f * alpha);
-
-    /* Isometric wireframe ceiling + floor */
+    /* Isometric wireframe ceiling + floor over shaded album cover */
     for (int32_t row = 0; row < 3; row++) {
         float y_floor = 278.0f + (float)row * 22.0f;
         float y_ceil = 82.0f - (float)row * 22.0f;
@@ -138,12 +214,20 @@ static void draw_lyrics_overlay(const struct framebuffer_surface *surface,
         186.0f, controller->elapsed_seconds, &hdr_clip, 0xFFF5F6F8u, alpha * dim);
 
     struct lyrics_resolved_state resolved;
+    bool lyrics_ready = true;
     if (controller->media != NULL) {
         pthread_mutex_lock(&controller->media->mutex);
-        now_playing_media_resolve_cue(&controller->media->active_lyrics,
-                                      controller->lyrics_mode_pref,
-                                      (uint32_t)controller->interpolated_elapsed_ms,
-                                      controller->engine->duration_ms, &resolved);
+        lyrics_ready = controller->media->active_lyrics_ready &&
+                       strcmp(controller->media->active_lyrics_path,
+                              controller->engine->active_track.path) == 0;
+        if (lyrics_ready) {
+            now_playing_media_resolve_cue(&controller->media->active_lyrics,
+                                          controller->lyrics_mode_pref,
+                                          (uint32_t)controller->interpolated_elapsed_ms,
+                                          controller->engine->duration_ms, &resolved);
+        } else {
+            now_playing_media_resolve_cue(NULL, LYRICS_MODE_NONE, 0u, 0u, &resolved);
+        }
         pthread_mutex_unlock(&controller->media->mutex);
     } else {
         now_playing_media_resolve_cue(NULL, LYRICS_MODE_NONE, 0u, 0u, &resolved);
@@ -153,7 +237,9 @@ static void draw_lyrics_overlay(const struct framebuffer_surface *surface,
     format_mm_ss_u32((uint32_t)(controller->interpolated_elapsed_ms / 1000.0f), time_str,
                      sizeof(time_str));
     char status_line[48];
-    if (!controller->engine->is_playing) {
+    if (!lyrics_ready) {
+        snprintf(status_line, sizeof(status_line), "LOADING · %s", time_str);
+    } else if (!controller->engine->is_playing) {
         snprintf(status_line, sizeof(status_line), "PAUSED · %s", time_str);
     } else if (resolved.effective_mode == LYRICS_MODE_TIMED) {
         snprintf(status_line, sizeof(status_line), "TIMED SYNC · %s", time_str);
@@ -184,6 +270,12 @@ static void draw_lyrics_overlay(const struct framebuffer_surface *surface,
                                active_mod == 3 ? palette->signal_highlight : 0xFF485060u,
                                alpha * dim);
 
+    if (!lyrics_ready) {
+        render_draw_text_alpha(surface, FONT_STYLE_MONO_9, "LOADING LYRICS...", 180.0f, 180.0f,
+                               TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, 0xFF8D96A6u, alpha * dim);
+        return;
+    }
+
     if (resolved.effective_mode == LYRICS_MODE_NONE) {
         render_draw_filled_circle_aa(surface, 180.0f, 146.0f, 28.0f, palette->surface,
                                      0.9f * alpha * dim);
@@ -208,11 +300,26 @@ static void draw_lyrics_overlay(const struct framebuffer_surface *surface,
         }
     } else {
         float y_shift = render_lerp_f32(10.0f, 0.0f, cue_ease);
-        struct clip_rect active_clip = {48, 108, 312, 212};
-        render_draw_text_rect_clipped_alpha(
-            surface, FONT_STYLE_DISPLAY_20, resolved.active_text, 180.0f, 158.0f + y_shift,
-            TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, &active_clip, 0xFFF5F6F8u,
-            alpha * dim * (0.35f + 0.65f * cue_ease));
+        char wrapped_active[3][128];
+        bool overflow_word = false;
+        enum font_style_id active_style = FONT_STYLE_DISPLAY_20;
+        uint32_t line_count = wrap_lyrics_lines(active_style, resolved.active_text, 244.0f,
+                                                wrapped_active, 3u, &overflow_word);
+        if (line_count > 2u || overflow_word) {
+            active_style = FONT_STYLE_DISPLAY_15;
+            line_count = wrap_lyrics_lines(active_style, resolved.active_text, 244.0f,
+                                           wrapped_active, 3u, NULL);
+        }
+        float line_height = (active_style == FONT_STYLE_DISPLAY_20) ? 24.0f : 19.0f;
+        float block_start_y = 154.0f + y_shift - ((float)(line_count > 0u ? line_count - 1u : 0u) * line_height) * 0.5f;
+        struct clip_rect active_clip = {48, 102, 312, 204};
+        float active_alpha = alpha * dim * (0.35f + 0.65f * cue_ease);
+        for (uint32_t line_index = 0u; line_index < line_count; line_index++) {
+            render_draw_text_rect_clipped_alpha(
+                surface, active_style, wrapped_active[line_index], 180.0f,
+                block_start_y + (float)line_index * line_height, TEXT_ALIGN_CENTER,
+                TEXT_BASELINE_MIDDLE, &active_clip, 0xFFF5F6F8u, active_alpha);
+        }
     }
 
     if (resolved.upcoming_index >= 0) {
@@ -221,11 +328,17 @@ static void draw_lyrics_overlay(const struct framebuffer_surface *surface,
         render_draw_diagonal_mark(surface, 95.0f, 206.0f, 2.5f, 1.2f, 0xFF8D96A6u, alpha * dim);
         render_draw_diagonal_mark(surface, 265.0f, 206.0f, 2.5f, 1.2f, 0xFF8D96A6u, alpha * dim);
 
-        struct clip_rect next_clip = {68, 216, 292, 262};
-        render_draw_text_rect_clipped_alpha(surface, FONT_STYLE_DISPLAY_15, resolved.upcoming_text,
-                                            180.0f, 236.0f, TEXT_ALIGN_CENTER,
-                                            TEXT_BASELINE_MIDDLE, &next_clip, 0xFF8D96A6u,
-                                            0.72f * alpha * dim);
+        char wrapped_next[2][128];
+        uint32_t next_lines = wrap_lyrics_lines(FONT_STYLE_DISPLAY_13, resolved.upcoming_text,
+                                                206.0f, wrapped_next, 2u, NULL);
+        float next_start_y = 234.0f - ((float)(next_lines > 0u ? next_lines - 1u : 0u) * 17.0f) * 0.5f;
+        struct clip_rect next_clip = {68, 212, 292, 266};
+        for (uint32_t line_index = 0u; line_index < next_lines; line_index++) {
+            render_draw_text_rect_clipped_alpha(
+                surface, FONT_STYLE_DISPLAY_13, wrapped_next[line_index], 180.0f,
+                next_start_y + (float)line_index * 17.0f, TEXT_ALIGN_CENTER,
+                TEXT_BASELINE_MIDDLE, &next_clip, 0xFF8D96A6u, 0.72f * alpha * dim);
+        }
     }
 }
 
@@ -319,8 +432,6 @@ static void draw_quick_actions(const struct framebuffer_surface *surface,
         return;
     }
 
-    render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, 360.0f, 360.0f, 0xFF060709u, 0.74f * alpha);
-
     char cur_str[16];
     char dur_str[16];
     format_mm_ss_u32((uint32_t)(controller->interpolated_elapsed_ms / 1000.0f), cur_str,
@@ -386,15 +497,55 @@ static void draw_quick_actions(const struct framebuffer_surface *surface,
                                              alpha);
             }
         } else if (idx == 1) {
-            render_draw_line_aa(surface, bx[idx] - 7.0f, by[idx] + 4.0f, bx[idx] + 7.0f,
-                                by[idx] - 4.0f, 1.8f, icon_col, alpha);
-            render_draw_line_aa(surface, bx[idx] - 7.0f, by[idx] - 4.0f, bx[idx] + 7.0f,
-                                by[idx] + 4.0f, 1.8f, icon_col, alpha);
+            /* Universal crossing shuffle arrows */
+            render_draw_line_aa(surface, bx[idx] - 8.0f, by[idx] - 4.0f, bx[idx] - 3.0f,
+                                by[idx] - 4.0f, 1.7f, icon_col, alpha);
+            render_draw_line_aa(surface, bx[idx] - 3.0f, by[idx] - 4.0f, bx[idx] + 3.0f,
+                                by[idx] + 4.0f, 1.7f, icon_col, alpha);
+            render_draw_line_aa(surface, bx[idx] + 3.0f, by[idx] + 4.0f, bx[idx] + 8.0f,
+                                by[idx] + 4.0f, 1.7f, icon_col, alpha);
+            render_draw_line_aa(surface, bx[idx] + 5.0f, by[idx] + 1.5f, bx[idx] + 8.0f,
+                                by[idx] + 4.0f, 1.7f, icon_col, alpha);
+            render_draw_line_aa(surface, bx[idx] + 5.0f, by[idx] + 6.5f, bx[idx] + 8.0f,
+                                by[idx] + 4.0f, 1.7f, icon_col, alpha);
+
+            render_draw_line_aa(surface, bx[idx] - 8.0f, by[idx] + 4.0f, bx[idx] - 3.0f,
+                                by[idx] + 4.0f, 1.7f, icon_col, alpha);
+            render_draw_line_aa(surface, bx[idx] - 3.0f, by[idx] + 4.0f, bx[idx] + 3.0f,
+                                by[idx] - 4.0f, 1.7f, icon_col, alpha);
+            render_draw_line_aa(surface, bx[idx] + 3.0f, by[idx] - 4.0f, bx[idx] + 8.0f,
+                                by[idx] - 4.0f, 1.7f, icon_col, alpha);
+            render_draw_line_aa(surface, bx[idx] + 5.0f, by[idx] - 6.5f, bx[idx] + 8.0f,
+                                by[idx] - 4.0f, 1.7f, icon_col, alpha);
+            render_draw_line_aa(surface, bx[idx] + 5.0f, by[idx] - 1.5f, bx[idx] + 8.0f,
+                                by[idx] - 4.0f, 1.7f, icon_col, alpha);
         } else if (idx == 2) {
-            render_draw_arc_aa(surface, bx[idx], by[idx], 7.5f, 1.8f, 0.2f, 5.7f, icon_col, alpha);
-            if (controller->engine->repeat_mode == PLAYBACK_REPEAT_ONE) {
-                render_draw_text_alpha(surface, FONT_STYLE_MONO_8, "1", bx[idx], by[idx],
-                                       TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, icon_col, alpha);
+            if (controller->engine->repeat_mode == PLAYBACK_REPEAT_OFF) {
+                /* Sequential: parallel forward arrows */
+                render_draw_line_aa(surface, bx[idx] - 7.0f, by[idx] - 3.5f, bx[idx] + 7.0f,
+                                    by[idx] - 3.5f, 1.8f, icon_col, alpha);
+                render_draw_line_aa(surface, bx[idx] + 4.0f, by[idx] - 6.5f, bx[idx] + 7.0f,
+                                    by[idx] - 3.5f, 1.8f, icon_col, alpha);
+                render_draw_line_aa(surface, bx[idx] + 4.0f, by[idx] - 0.5f, bx[idx] + 7.0f,
+                                    by[idx] - 3.5f, 1.8f, icon_col, alpha);
+                render_draw_line_aa(surface, bx[idx] - 7.0f, by[idx] + 3.5f, bx[idx] + 7.0f,
+                                    by[idx] + 3.5f, 1.8f, icon_col, alpha);
+                render_draw_line_aa(surface, bx[idx] + 4.0f, by[idx] + 0.5f, bx[idx] + 7.0f,
+                                    by[idx] + 3.5f, 1.8f, icon_col, alpha);
+                render_draw_line_aa(surface, bx[idx] + 4.0f, by[idx] + 6.5f, bx[idx] + 7.0f,
+                                    by[idx] + 3.5f, 1.8f, icon_col, alpha);
+            } else {
+                render_draw_arc_aa(surface, bx[idx], by[idx], 7.5f, 1.8f, 0.25f, 5.55f, icon_col,
+                                   alpha);
+                render_draw_line_aa(surface, bx[idx] + 4.0f, by[idx] - 8.0f, bx[idx] + 6.5f,
+                                    by[idx] - 4.5f, 1.8f, icon_col, alpha);
+                render_draw_line_aa(surface, bx[idx] + 2.5f, by[idx] - 3.5f, bx[idx] + 6.5f,
+                                    by[idx] - 4.5f, 1.8f, icon_col, alpha);
+                if (controller->engine->repeat_mode == PLAYBACK_REPEAT_ONE) {
+                    render_draw_text_alpha(surface, FONT_STYLE_MONO_8, "1", bx[idx], by[idx],
+                                           TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, icon_col,
+                                           alpha);
+                }
             }
         } else if (idx == 3) {
             render_draw_line_aa(surface, bx[idx] - 7.0f, by[idx] - 4.0f, bx[idx] + 3.0f,
@@ -438,7 +589,6 @@ static void draw_playlist_picker(const struct framebuffer_surface *surface,
         return;
     }
 
-    render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, 360.0f, 360.0f, 0xFF060709u, 0.72f * alpha);
     render_draw_chamfer_plate_filled_aa(surface, 66.0f, 78.0f, 228.0f, 202.0f, 10.0f,
                                         palette->surface, 0.96f * alpha);
     render_draw_chamfer_plate_stroked_aa(surface, 66.0f, 78.0f, 228.0f, 202.0f, 10.0f, 1.5f,
@@ -512,7 +662,6 @@ static void draw_details_sheet(const struct framebuffer_surface *surface,
     }
     float ease = render_ease_out_cubic(p);
     float y_off = render_lerp_f32(84.0f, 0.0f, ease);
-    render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, 360.0f, 360.0f, palette->canvas, 0.92f * ease);
     render_draw_text_alpha(surface, FONT_STYLE_MONO_9, "TRACK DETAILS", 180.0f, 54.0f + y_off,
                            TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, palette->signal_highlight, ease);
 
@@ -610,14 +759,10 @@ static void draw_queue_sheet(const struct framebuffer_surface *surface,
     }
     float ease = render_ease_out_cubic(p);
     float y_off = render_lerp_f32(88.0f, 0.0f, ease);
-    render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, 360.0f, 360.0f, palette->canvas, 0.94f * ease);
 
     render_draw_filled_rect_alpha(surface, 162.0f, 24.0f + y_off, 36.0f, 3.0f,
                                   palette->hairline_strong, ease);
-    char badge_hdr[32];
-    snprintf(badge_hdr, sizeof(badge_hdr), "%s QUEUE",
-             playback_engine_context_badge(controller->engine->context.kind));
-    render_draw_text_alpha(surface, FONT_STYLE_MONO_8, badge_hdr, 180.0f, 44.0f + y_off,
+    render_draw_text_alpha(surface, FONT_STYLE_MONO_8, "QUEUE", 180.0f, 44.0f + y_off,
                            TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, palette->signal_highlight, ease);
 
     struct clip_rect ctx_clip = {71, (int32_t)(52.0f + y_off), 289, (int32_t)(82.0f + y_off)};
@@ -778,86 +923,133 @@ void render_draw_now_playing_frame(const struct framebuffer_surface *surface,
             controller->media, trk->album_uid, cover_cache, &active_size);
         float base_angle = controller->vinyl_rotation_radians + controller->vinyl_nudge_radians;
 
-        if (controller->lyrics_progress < 0.99f) {
-            if (controller->open_transition_progress < 1.0f &&
-                controller->open_origin == NP_OPEN_FROM_ALBUM_CRATE) {
-                float p = controller->open_transition_progress;
-                float slip = render_ease_out_cubic(render_normalize_range(p, 0.0f, 0.45f));
-                float expand = render_ease_in_out_cubic(render_normalize_range(p, 0.25f, 1.0f));
-                float vx = render_lerp_f32(218.0f, 246.0f, slip);
-                vx = render_lerp_f32(vx, 180.0f, expand);
-                float vy = render_lerp_f32(152.0f, 180.0f, expand);
-                float vr = render_lerp_f32(52.8f, 180.0f, expand);
-                draw_vinyl_or_fallback(surface, active_cover, active_size, vx, vy, vr, base_angle,
-                                       1.0f, palette, is_dark);
+        float backdrop_dim = 0.0f;
+        uint32_t backdrop_tint = 0xFF07090Du;
+        if (controller->lyrics_progress > ALPHA_VISIBILITY_THRESHOLD) {
+            float lyrics_dim = controller->lyrics_progress * 0.72f;
+            if (lyrics_dim > backdrop_dim) {
+                backdrop_dim = lyrics_dim;
+                backdrop_tint = 0xFF07090Du;
+            }
+        }
+        if (controller->quick_actions_progress > ALPHA_VISIBILITY_THRESHOLD) {
+            float qa_dim = controller->quick_actions_progress * 0.72f;
+            if (qa_dim > backdrop_dim) {
+                backdrop_dim = qa_dim;
+                backdrop_tint = 0xFF060709u;
+            }
+        }
+        if (controller->playlist_picker_progress > ALPHA_VISIBILITY_THRESHOLD) {
+            float picker_dim = controller->playlist_picker_progress * 0.76f;
+            if (picker_dim > backdrop_dim) {
+                backdrop_dim = picker_dim;
+                backdrop_tint = 0xFF060709u;
+            }
+        }
+        if (controller->details_sheet_progress > ALPHA_VISIBILITY_THRESHOLD) {
+            float details_dim = controller->details_sheet_progress * 0.88f;
+            if (details_dim > backdrop_dim) {
+                backdrop_dim = details_dim;
+                backdrop_tint = palette->canvas;
+            }
+        }
+        if (controller->queue_sheet_progress > ALPHA_VISIBILITY_THRESHOLD) {
+            float queue_dim = controller->queue_sheet_progress * 0.90f;
+            if (queue_dim > backdrop_dim) {
+                backdrop_dim = queue_dim;
+                backdrop_tint = palette->canvas;
+            }
+        }
+        uint32_t cover_shade_256 =
+            (uint32_t)render_clamp_f32((1.0f - backdrop_dim) * 256.0f + 0.5f, 0.0f, 256.0f);
 
-                float sleeve_alpha =
-                    1.0f - render_normalize_range(p, 0.38f, 0.72f);
-                if (sleeve_alpha > ALPHA_VISIBILITY_THRESHOLD) {
-                    float sx = render_lerp_f32(112.0f, -170.0f,
-                                               render_ease_out_cubic(p));
-                    struct clip_rect s_clip = {0, 92, 360, 212};
-                    if (active_cover != NULL) {
-                        render_blit_rgb565_scaled_clipped(surface, active_cover, active_size,
-                                                          active_size, sx, 92.0f, 120.0f, 120.0f,
-                                                          &s_clip, sleeve_alpha);
-                    } else {
-                        render_draw_filled_rect_alpha(surface, sx, 92.0f, 120.0f, 120.0f,
-                                                      palette->surface, sleeve_alpha);
-                    }
-                }
-            } else if (controller->open_transition_progress < 1.0f &&
-                       controller->open_origin == NP_OPEN_FROM_LIBRARY) {
-                float expand = render_ease_in_out_cubic(controller->open_transition_progress);
-                float vr = render_lerp_f32(54.0f, 180.0f, expand);
-                draw_vinyl_or_fallback(surface, active_cover, active_size, 180.0f, 180.0f, vr,
-                                       base_angle, 1.0f, palette, is_dark);
-            } else if (controller->skip_slide_active) {
-                float slide = render_ease_out_expo(controller->skip_slide_progress);
-                float dir = (float)controller->skip_slide_direction;
-                float out_x = 180.0f - dir * 370.0f * slide;
-                float in_x = 180.0f + dir * 370.0f * (1.0f - slide);
-                uint32_t out_size = 0u;
-                const uint16_t *out_cover = now_playing_media_get_peek_cover(
-                    controller->media, controller->skip_outgoing_album_uid, cover_cache, &out_size);
-                draw_vinyl_or_fallback(surface, out_cover, out_size, out_x, 180.0f, 180.0f,
-                                       controller->skip_outgoing_angle - dir * slide * 0.4f,
-                                       1.0f - slide * 0.35f, palette, is_dark);
-                draw_vinyl_or_fallback(surface, active_cover, active_size, in_x, 180.0f, 180.0f,
-                                       base_angle, 1.0f, palette, is_dark);
-            } else if (fabsf(controller->skip_drag_offset_x) > 1.0f) {
-                bool cross_album = (controller->skip_peek_valid &&
-                                    controller->skip_peek_cache.action == PLAYBACK_SKIP_TRACK &&
-                                    !controller->skip_peek_cache.same_album);
-                if (cross_album) {
-                    float dx = controller->skip_drag_offset_x;
-                    draw_vinyl_or_fallback(surface, active_cover, active_size, 180.0f + dx, 180.0f,
-                                           180.0f, base_angle + dx * 0.004f, 1.0f, palette,
-                                           is_dark);
-                    if (fabsf(dx) > 12.0f) {
-                        float dir = dx < 0.0f ? 1.0f : -1.0f;
-                        uint32_t pk_size = 0u;
-                        const uint16_t *pk_cover = now_playing_media_get_peek_cover(
-                            controller->media, controller->skip_peek_cache.target_track.album_uid,
-                            cover_cache, &pk_size);
-                        draw_vinyl_or_fallback(surface, pk_cover, pk_size, 180.0f + dx + dir * 370.0f,
-                                               180.0f, 180.0f, base_angle * 0.6f, 0.88f, palette,
-                                               is_dark);
-                    }
+        bool animating_open = (controller->open_transition_progress < 1.0f);
+        bool animating_exit = controller->exit_transition_active;
+        if ((animating_open || animating_exit) &&
+            controller->open_origin == NP_OPEN_FROM_ALBUM_CRATE) {
+            float p = animating_exit ? (1.0f - controller->exit_transition_progress)
+                                     : controller->open_transition_progress;
+            float slip = render_ease_out_cubic(render_normalize_range(p, 0.0f, 0.45f));
+            float expand = render_ease_in_out_cubic(render_normalize_range(p, 0.25f, 1.0f));
+            float vx = render_lerp_f32(218.0f, 246.0f, slip);
+            vx = render_lerp_f32(vx, 180.0f, expand);
+            float vy = render_lerp_f32(152.0f, 180.0f, expand);
+            float vr = render_lerp_f32(52.8f, 180.0f, expand);
+            draw_vinyl_or_fallback_shaded(surface, active_cover, active_size, vx, vy, vr,
+                                          base_angle, 1.0f, cover_shade_256, backdrop_tint, palette,
+                                          is_dark);
+
+            float sleeve_alpha = 1.0f - render_normalize_range(p, 0.38f, 0.72f);
+            if (sleeve_alpha > ALPHA_VISIBILITY_THRESHOLD) {
+                float sx = render_lerp_f32(112.0f, -170.0f, render_ease_out_cubic(p));
+                struct clip_rect s_clip = {0, 92, 360, 212};
+                if (active_cover != NULL) {
+                    render_blit_rgb565_scaled_clipped(surface, active_cover, active_size,
+                                                      active_size, sx, 92.0f, 120.0f, 120.0f,
+                                                      &s_clip, sleeve_alpha);
                 } else {
-                    float twist_scale = (controller->skip_peek_valid &&
-                                         controller->skip_peek_cache.action == PLAYBACK_SKIP_BLOCKED)
-                                            ? 0.0011f
-                                            : 0.0022f;
-                    draw_vinyl_or_fallback(surface, active_cover, active_size, 180.0f, 180.0f,
-                                           180.0f,
-                                           base_angle + controller->skip_drag_offset_x * twist_scale,
-                                           1.0f, palette, is_dark);
+                    render_draw_filled_rect_alpha(surface, sx, 92.0f, 120.0f, 120.0f,
+                                                  palette->surface, sleeve_alpha);
+                }
+            }
+        } else if ((animating_open || animating_exit) &&
+                   controller->open_origin == NP_OPEN_FROM_LIBRARY) {
+            float p = animating_exit ? (1.0f - controller->exit_transition_progress)
+                                     : controller->open_transition_progress;
+            float expand = render_ease_in_out_cubic(p);
+            float vr = render_lerp_f32(54.0f, 180.0f, expand);
+            draw_vinyl_or_fallback_shaded(surface, active_cover, active_size, 180.0f, 180.0f, vr,
+                                          base_angle, 1.0f, cover_shade_256, backdrop_tint, palette,
+                                          is_dark);
+        } else if (controller->skip_slide_active) {
+            float slide = render_ease_out_expo(controller->skip_slide_progress);
+            float dir = (float)controller->skip_slide_direction;
+            float out_x = 180.0f - dir * 370.0f * slide;
+            float in_x = 180.0f + dir * 370.0f * (1.0f - slide);
+            uint32_t out_size = 0u;
+            const uint16_t *out_cover = now_playing_media_get_peek_cover(
+                controller->media, controller->skip_outgoing_album_uid, cover_cache, &out_size);
+            draw_vinyl_or_fallback_shaded(surface, out_cover, out_size, out_x, 180.0f, 180.0f,
+                                          controller->skip_outgoing_angle - dir * slide * 0.4f,
+                                          1.0f - slide * 0.35f, cover_shade_256, backdrop_tint,
+                                          palette, is_dark);
+            draw_vinyl_or_fallback_shaded(surface, active_cover, active_size, in_x, 180.0f,
+                                          180.0f, base_angle, 1.0f, cover_shade_256, backdrop_tint,
+                                          palette, is_dark);
+        } else if (fabsf(controller->skip_drag_offset_x) > 1.0f) {
+            bool cross_album = (controller->skip_peek_valid &&
+                                controller->skip_peek_cache.action == PLAYBACK_SKIP_TRACK &&
+                                !controller->skip_peek_cache.same_album);
+            if (cross_album) {
+                float dx = controller->skip_drag_offset_x;
+                draw_vinyl_or_fallback_shaded(surface, active_cover, active_size, 180.0f + dx,
+                                              180.0f, 180.0f, base_angle + dx * 0.004f, 1.0f,
+                                              cover_shade_256, backdrop_tint, palette, is_dark);
+                if (fabsf(dx) > 12.0f) {
+                    float dir = dx < 0.0f ? 1.0f : -1.0f;
+                    uint32_t pk_size = 0u;
+                    const uint16_t *pk_cover = now_playing_media_get_peek_cover(
+                        controller->media, controller->skip_peek_cache.target_track.album_uid,
+                        cover_cache, &pk_size);
+                    draw_vinyl_or_fallback_shaded(surface, pk_cover, pk_size,
+                                                  180.0f + dx + dir * 370.0f, 180.0f, 180.0f,
+                                                  base_angle * 0.6f, 0.88f, cover_shade_256,
+                                                  backdrop_tint, palette, is_dark);
                 }
             } else {
-                draw_vinyl_or_fallback(surface, active_cover, active_size, 180.0f, 180.0f, 180.0f,
-                                       base_angle, 1.0f, palette, is_dark);
+                float twist_scale = (controller->skip_peek_valid &&
+                                     controller->skip_peek_cache.action == PLAYBACK_SKIP_BLOCKED)
+                                        ? 0.0011f
+                                        : 0.0022f;
+                draw_vinyl_or_fallback_shaded(
+                    surface, active_cover, active_size, 180.0f, 180.0f, 180.0f,
+                    base_angle + controller->skip_drag_offset_x * twist_scale, 1.0f,
+                    cover_shade_256, backdrop_tint, palette, is_dark);
             }
+        } else {
+            draw_vinyl_or_fallback_shaded(surface, active_cover, active_size, 180.0f, 180.0f,
+                                          180.0f, base_angle, 1.0f, cover_shade_256, backdrop_tint,
+                                          palette, is_dark);
         }
 
         draw_lyrics_overlay(surface, controller, palette);

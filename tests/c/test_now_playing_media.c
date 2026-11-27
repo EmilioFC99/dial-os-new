@@ -70,6 +70,17 @@ static void test_lrc_parsing_and_cue_resolution(void) {
     now_playing_media_resolve_cue(NULL, LYRICS_MODE_AUTO, 0u, 100000u, &resolved);
     TEST_ASSERT_EQ_I32(LYRICS_MODE_NONE, resolved.effective_mode);
     TEST_ASSERT_EQ_STR("NO EMBEDDED OR .LRC FILE", resolved.status_note);
+
+    /* [offset:+500] and blank instrumental break timestamps */
+    const char *offset_lrc = "[offset:+500]\n[00:05.00]Start\n[00:10.00] \n[00:15.00]End\n";
+    TEST_ASSERT_TRUE(now_playing_media_parse_lrc_text(offset_lrc, strlen(offset_lrc), &doc));
+    TEST_ASSERT_EQ_U32(3u, doc.cue_count);
+    TEST_ASSERT_EQ_U32(4500u, doc.cues[0].time_ms);
+    TEST_ASSERT_EQ_U32(9500u, doc.cues[1].time_ms);
+    TEST_ASSERT_EQ_STR("", doc.cues[1].text);
+    now_playing_media_resolve_cue(&doc, LYRICS_MODE_AUTO, 10000u, 30000u, &resolved);
+    TEST_ASSERT_EQ_STR("", resolved.active_text);
+    TEST_ASSERT_EQ_STR("End", resolved.upcoming_text);
 }
 
 static void test_sidecar_and_embedded_lyrics_files(void) {
@@ -142,6 +153,48 @@ static void test_sidecar_and_embedded_lyrics_files(void) {
     TEST_ASSERT_TRUE(doc.has_timed);
     TEST_ASSERT_EQ_STR("ID3 Lyric", doc.cues[0].text);
     unlink(mp3_path);
+
+    /* 4. FLAC with UNSYNCEDLYRICS= before timed LYRICS= prefers timed LYRICS= */
+    const char *c1 = "UNSYNCEDLYRICS=Plain line";
+    const char *c2 = "LYRICS=[00:03.00]Synced line";
+    uint32_t l1 = (uint32_t)strlen(c1);
+    uint32_t l2 = (uint32_t)strlen(c2);
+    uint32_t blk_len = 4u + 4u + 4u + l1 + 4u + l2;
+    uint8_t flac2[256];
+    memcpy(flac2, "fLaC", 4u);
+    flac2[4] = 0x84u;
+    flac2[5] = (uint8_t)(blk_len >> 16u);
+    flac2[6] = (uint8_t)(blk_len >> 8u);
+    flac2[7] = (uint8_t)blk_len;
+    write_le32(flac2 + 8, 0u);
+    write_le32(flac2 + 12, 2u);
+    write_le32(flac2 + 16, l1);
+    memcpy(flac2 + 20, c1, l1);
+    write_le32(flac2 + 20 + l1, l2);
+    memcpy(flac2 + 24 + l1, c2, l2);
+    FILE *ff2 = fopen(flac_path, "wb");
+    TEST_ASSERT_TRUE(ff2 != NULL);
+    fwrite(flac2, 1u, 8u + blk_len, ff2);
+    fclose(ff2);
+    TEST_ASSERT_TRUE(now_playing_media_load_lyrics_for_track(flac_path, &doc));
+    TEST_ASSERT_TRUE(doc.has_timed);
+    TEST_ASSERT_EQ_STR("Synced line", doc.cues[0].text);
+    unlink(flac_path);
+
+    /* 5. Requesting a new track immediately clears previous active_lyrics_path & ready flag */
+    struct now_playing_media media;
+    now_playing_media_initialize(&media, NULL);
+    pthread_mutex_lock(&media.mutex);
+    media.active_lyrics_ready = true;
+    snprintf(media.active_lyrics_path, sizeof(media.active_lyrics_path), "/m/old.flac");
+    pthread_mutex_unlock(&media.mutex);
+    now_playing_media_request_active(&media, 0, 0ull, "/m/new.flac");
+    pthread_mutex_lock(&media.mutex);
+    TEST_ASSERT_FALSE(media.active_lyrics_ready);
+    TEST_ASSERT_EQ_STR("", media.active_lyrics_path);
+    pthread_mutex_unlock(&media.mutex);
+    now_playing_media_destroy(&media);
+
     rmdir(temp_dir);
 }
 

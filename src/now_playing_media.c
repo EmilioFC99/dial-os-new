@@ -127,6 +127,7 @@ bool now_playing_media_parse_lrc_text(const char *text, size_t length,
         start = 3u;
     }
 
+    int32_t offset_ms = 0;
     size_t cursor = start;
     while (cursor < length && document_out->cue_count < LYRICS_MAX_CUES) {
         size_t line_start = cursor;
@@ -175,6 +176,18 @@ bool now_playing_media_parse_lrc_text(const char *text, size_t length,
             } else {
                 if (timestamp_count == 0u && scan == line_start) {
                     is_metadata_tag = true;
+                    size_t tag_len = close - (scan + 1u);
+                    const char *tag_ptr = text + scan + 1u;
+                    if (tag_len > 7u && strncasecmp(tag_ptr, "offset:", 7u) == 0) {
+                        char offset_buf[24];
+                        size_t copy_len = tag_len - 7u;
+                        if (copy_len >= sizeof(offset_buf)) {
+                            copy_len = sizeof(offset_buf) - 1u;
+                        }
+                        memcpy(offset_buf, tag_ptr + 7u, copy_len);
+                        offset_buf[copy_len] = '\0';
+                        offset_ms = (int32_t)strtol(offset_buf, NULL, 10);
+                    }
                 }
                 break;
             }
@@ -187,7 +200,7 @@ bool now_playing_media_parse_lrc_text(const char *text, size_t length,
         while (scan < line_end && (text[scan] == ' ' || text[scan] == '\t')) {
             scan++;
         }
-        if (scan >= line_end) {
+        if (scan >= line_end && timestamp_count == 0u) {
             continue;
         }
 
@@ -213,6 +226,16 @@ bool now_playing_media_parse_lrc_text(const char *text, size_t length,
             cue->time_ms = 0u;
             cue->has_timestamp = false;
             copy_text_bounded(cue->text, sizeof(cue->text), clean_line);
+        }
+    }
+
+    if (document_out->has_timed && offset_ms != 0) {
+        for (uint32_t idx = 0u; idx < document_out->cue_count; idx++) {
+            if (!document_out->cues[idx].has_timestamp) {
+                continue;
+            }
+            int64_t adjusted = (int64_t)document_out->cues[idx].time_ms - (int64_t)offset_ms;
+            document_out->cues[idx].time_ms = adjusted < 0 ? 0u : (uint32_t)adjusted;
         }
     }
 
@@ -308,6 +331,7 @@ static bool try_load_flac_lyrics(const char *track_path, struct lyrics_document 
                 if (offset + 4u <= block_len) {
                     uint32_t comment_count = read_le_u32(payload + offset);
                     offset += 4u;
+                    struct lyrics_document *fallback_doc = NULL;
                     for (uint32_t idx = 0u; idx < comment_count && offset + 4u <= block_len; idx++) {
                         uint32_t entry_len = read_le_u32(payload + offset);
                         offset += 4u;
@@ -315,22 +339,40 @@ static bool try_load_flac_lyrics(const char *track_path, struct lyrics_document 
                             break;
                         }
                         const char *entry = (const char *)(payload + offset);
-                        if (entry_len > 7u && strncasecmp(entry, "LYRICS=", 7u) == 0) {
-                            found = now_playing_media_parse_lrc_text(entry + 7u, entry_len - 7u,
-                                                                     document_out);
-                            if (found) {
-                                break;
-                            }
+                        const char *tag_value = NULL;
+                        size_t tag_value_len = 0u;
+                        if (entry_len > 13u && strncasecmp(entry, "SYNCEDLYRICS=", 13u) == 0) {
+                            tag_value = entry + 13u;
+                            tag_value_len = entry_len - 13u;
+                        } else if (entry_len > 7u && strncasecmp(entry, "LYRICS=", 7u) == 0) {
+                            tag_value = entry + 7u;
+                            tag_value_len = entry_len - 7u;
                         } else if (entry_len > 15u &&
                                    strncasecmp(entry, "UNSYNCEDLYRICS=", 15u) == 0) {
-                            found = now_playing_media_parse_lrc_text(entry + 15u, entry_len - 15u,
-                                                                     document_out);
-                            if (found) {
+                            tag_value = entry + 15u;
+                            tag_value_len = entry_len - 15u;
+                        }
+                        if (tag_value != NULL &&
+                            now_playing_media_parse_lrc_text(tag_value, tag_value_len,
+                                                             document_out)) {
+                            if (document_out->has_timed) {
+                                found = true;
                                 break;
+                            }
+                            if (fallback_doc == NULL) {
+                                fallback_doc = malloc(sizeof(*fallback_doc));
+                                if (fallback_doc != NULL) {
+                                    *fallback_doc = *document_out;
+                                }
                             }
                         }
                         offset += entry_len;
                     }
+                    if (!found && fallback_doc != NULL) {
+                        *document_out = *fallback_doc;
+                        found = true;
+                    }
+                    free(fallback_doc);
                 }
             }
             free(payload);
@@ -688,6 +730,23 @@ static void *media_worker_main(void *argument) {
         }
         pthread_mutex_unlock(&media->mutex);
 
+        if (do_active && track_path[0] != '\0') {
+            bool lyrics_ok =
+                now_playing_media_load_lyrics_for_track(track_path, &media->staging_lyrics);
+            pthread_mutex_lock(&media->mutex);
+            if (strcmp(media->req_active_track_path, track_path) == 0) {
+                if (lyrics_ok) {
+                    media->active_lyrics = media->staging_lyrics;
+                } else {
+                    memset(&media->active_lyrics, 0, sizeof(media->active_lyrics));
+                }
+                copy_text_bounded(media->active_lyrics_path, sizeof(media->active_lyrics_path),
+                                  track_path);
+                media->active_lyrics_ready = true;
+            }
+            pthread_mutex_unlock(&media->mutex);
+        }
+
         bool cover_ok = false;
         if (album_id > 0 && media->database != NULL && media->staging_cover_pixels != NULL) {
             struct library_db_cover_job job;
@@ -695,11 +754,6 @@ static void *media_worker_main(void *argument) {
                 cover_ok = library_cover_decode_job_to_rgb565(&job, NOW_PLAYING_COVER_SIZE_PX,
                                                               media->staging_cover_pixels);
             }
-        }
-
-        bool lyrics_ok = false;
-        if (do_active && track_path[0] != '\0') {
-            lyrics_ok = now_playing_media_load_lyrics_for_track(track_path, &media->staging_lyrics);
         }
 
         pthread_mutex_lock(&media->mutex);
@@ -710,16 +764,6 @@ static void *media_worker_main(void *argument) {
                        NOW_PLAYING_COVER_PIXEL_COUNT * sizeof(uint16_t));
                 media->active_cover_album_uid = album_uid;
                 media->active_cover_ready = true;
-            }
-            if (strcmp(media->req_active_track_path, track_path) == 0) {
-                if (lyrics_ok) {
-                    media->active_lyrics = media->staging_lyrics;
-                } else {
-                    memset(&media->active_lyrics, 0, sizeof(media->active_lyrics));
-                }
-                copy_text_bounded(media->active_lyrics_path, sizeof(media->active_lyrics_path),
-                                  track_path);
-                media->active_lyrics_ready = true;
             }
         } else {
             if (media->req_peek_album_uid == album_uid && cover_ok &&
@@ -787,6 +831,7 @@ void now_playing_media_request_active(struct now_playing_media *media, int64_t a
     }
     if (!lyrics_same) {
         media->active_lyrics_ready = false;
+        media->active_lyrics_path[0] = '\0';
         memset(&media->active_lyrics, 0, sizeof(media->active_lyrics));
     }
     media->req_active_album_id = album_id;

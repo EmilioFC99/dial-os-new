@@ -230,6 +230,8 @@ void now_playing_controller_enter(struct now_playing_controller *controller,
     controller->return_target = return_target;
     controller->open_origin = open_origin;
     controller->open_transition_progress = skip_open_transition ? 1.0f : 0.0f;
+    controller->exit_transition_active = false;
+    controller->exit_transition_progress = 0.0f;
     controller->vinyl_rotation_radians = initial_vinyl_radians;
     controller->vinyl_nudge_radians = 0.0f;
     controller->volume_level = volume_level;
@@ -317,7 +319,11 @@ void now_playing_controller_apply_effects(struct now_playing_controller *control
         controller->interpolated_elapsed_ms = (float)controller->engine->elapsed_ms;
         controller->lyrics_last_cue_index = -1;
         controller->lyrics_prev_cue_index = -1;
+        controller->lyrics_prev_cue_text[0] = '\0';
         controller->lyrics_cue_transition = 1.0f;
+        if (!controller->engine->is_playing) {
+            controller->vinyl_nudge_radians = 0.0f;
+        }
     }
 }
 
@@ -347,6 +353,15 @@ bool now_playing_controller_step_back(struct now_playing_controller *controller,
     }
     if (controller->lyrics_open) {
         controller->lyrics_open = false;
+        return true;
+    }
+    if (controller->return_target == NP_RETURN_LIBRARY && controller->engine != NULL &&
+        controller->engine->has_active_track) {
+        controller->exit_transition_active = true;
+        controller->exit_transition_progress = 0.0f;
+        controller->back_swipe_progress = 0.0f;
+        controller->pointer_active = false;
+        controller->pointer_mode = NP_PTR_NONE;
         return true;
     }
     if (action_out != NULL) {
@@ -382,7 +397,18 @@ void now_playing_controller_step(struct now_playing_controller *controller, floa
     }
     controller->elapsed_seconds += delta_seconds;
 
-    if (controller->open_transition_progress < 1.0f) {
+    if (controller->exit_transition_active) {
+        controller->exit_transition_progress =
+            clamp_f32(controller->exit_transition_progress +
+                          delta_seconds / NP_EXIT_DURATION_SECONDS,
+                      0.0f, 1.0f);
+        if (controller->exit_transition_progress >= 1.0f) {
+            controller->exit_transition_active = false;
+            if (action_out != NULL) {
+                *action_out = NP_ACTION_EXIT;
+            }
+        }
+    } else if (controller->open_transition_progress < 1.0f) {
         controller->open_transition_progress =
             clamp_f32(controller->open_transition_progress +
                           delta_seconds / NP_OPEN_DURATION_SECONDS,
@@ -406,11 +432,18 @@ void now_playing_controller_step(struct now_playing_controller *controller, floa
         if (controller->is_seeking) {
             controller->interpolated_elapsed_ms = (float)controller->seek_preview_ms;
         } else if (controller->engine->is_playing) {
-            float diff = (float)controller->engine->elapsed_ms - controller->interpolated_elapsed_ms;
-            if (fabsf(diff) > 1600.0f) {
+            if (!controller->engine->audio_started) {
                 controller->interpolated_elapsed_ms = (float)controller->engine->elapsed_ms;
             } else {
                 controller->interpolated_elapsed_ms += delta_seconds * 1000.0f;
+                float diff =
+                    (float)controller->engine->elapsed_ms - controller->interpolated_elapsed_ms;
+                if (fabsf(diff) > 1200.0f) {
+                    controller->interpolated_elapsed_ms = (float)controller->engine->elapsed_ms;
+                } else if (diff > 0.0f) {
+                    controller->interpolated_elapsed_ms +=
+                        diff * clamp_f32(delta_seconds * 6.0f, 0.0f, 1.0f);
+                }
             }
             if (controller->engine->duration_ms > 0u &&
                 controller->interpolated_elapsed_ms > (float)controller->engine->duration_ms) {
@@ -567,22 +600,31 @@ void now_playing_controller_step(struct now_playing_controller *controller, floa
     /* Lyrics cue transition tracking */
     if (controller->lyrics_open && controller->media != NULL && controller->engine != NULL) {
         struct lyrics_resolved_state resolved;
+        bool lyrics_match = false;
         pthread_mutex_lock(&controller->media->mutex);
-        now_playing_media_resolve_cue(&controller->media->active_lyrics,
-                                      controller->lyrics_mode_pref,
-                                      (uint32_t)controller->interpolated_elapsed_ms,
-                                      controller->engine->duration_ms, &resolved);
-        pthread_mutex_unlock(&controller->media->mutex);
-        if (resolved.active_index != controller->lyrics_last_cue_index) {
-            controller->lyrics_prev_cue_index = controller->lyrics_last_cue_index;
-            controller->lyrics_last_cue_index = resolved.active_index;
-            controller->lyrics_cue_transition = 0.0f;
+        lyrics_match =
+            controller->media->active_lyrics_ready &&
+            strcmp(controller->media->active_lyrics_path, controller->engine->active_track.path) ==
+                0;
+        if (lyrics_match) {
+            now_playing_media_resolve_cue(&controller->media->active_lyrics,
+                                          controller->lyrics_mode_pref,
+                                          (uint32_t)controller->interpolated_elapsed_ms,
+                                          controller->engine->duration_ms, &resolved);
         }
-        if (controller->lyrics_cue_transition < 1.0f) {
-            controller->lyrics_cue_transition =
-                clamp_f32(controller->lyrics_cue_transition +
-                              delta_seconds / NP_LYRICS_TRANSITION_SECONDS,
-                          0.0f, 1.0f);
+        pthread_mutex_unlock(&controller->media->mutex);
+        if (lyrics_match) {
+            if (resolved.active_index != controller->lyrics_last_cue_index) {
+                controller->lyrics_prev_cue_index = controller->lyrics_last_cue_index;
+                controller->lyrics_last_cue_index = resolved.active_index;
+                controller->lyrics_cue_transition = 0.0f;
+            }
+            if (controller->lyrics_cue_transition < 1.0f) {
+                controller->lyrics_cue_transition =
+                    clamp_f32(controller->lyrics_cue_transition +
+                                  delta_seconds / NP_LYRICS_TRANSITION_SECONDS,
+                              0.0f, 1.0f);
+            }
         }
     }
 }
@@ -593,7 +635,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
                                          bool *volume_changed_out,
                                          enum now_playing_action_kind *action_out) {
     clear_outputs(effects_out, volume_changed_out, action_out);
-    if (controller == NULL || event == NULL) {
+    if (controller == NULL || event == NULL || controller->exit_transition_active) {
         return;
     }
 
@@ -658,7 +700,8 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
         float dy = (float)event->y - 180.0f;
         float radius = sqrtf(dx * dx + dy * dy);
         float angle = atan2f(dy, dx);
-        if (radius >= NP_VOLUME_BEZEL_MIN_RADIUS_PX && fabsf(angle) <= (NP_PI * 0.25f)) {
+        if (radius >= NP_VOLUME_BEZEL_MIN_RADIUS_PX &&
+            fabsf(angle) <= NP_VOLUME_BEZEL_MAX_ANGLE_RADIANS) {
             controller->pointer_mode = NP_PTR_VOLUME_PENDING;
             controller->pointer_last_angle = angle;
             controller->pointer_volume_accum = (float)controller->volume_level;
@@ -702,13 +745,18 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
                 break;
 
             case NP_PTR_VOLUME_PENDING:
-                if (drift >= NP_VOLUME_BEZEL_START_MOVE_PX) {
-                    controller->pointer_mode = NP_PTR_VOLUME_BEZEL;
-                    controller->volume_hud_active = true;
-                    controller->volume_hud_alpha = 1.0f;
-                    controller->volume_hud_hold_seconds = NP_VOLUME_HUD_HOLD_SECONDS;
+                if (drift < NP_VOLUME_BEZEL_START_MOVE_PX) {
+                    break;
                 }
-                break;
+                if (delta_x < -14 && fabsf((float)delta_x) > fabsf((float)delta_y) * 1.55f) {
+                    controller->pointer_mode = NP_PTR_SKIP_DRAG;
+                    break;
+                }
+                controller->pointer_mode = NP_PTR_VOLUME_BEZEL;
+                controller->volume_hud_active = true;
+                controller->volume_hud_alpha = 1.0f;
+                controller->volume_hud_hold_seconds = NP_VOLUME_HUD_HOLD_SECONDS;
+                /* fall through to apply initial angle delta */
 
             case NP_PTR_VOLUME_BEZEL: {
                 float angle = atan2f((float)event->y - 180.0f, (float)event->x - 180.0f);
@@ -716,7 +764,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
                 controller->pointer_last_angle = angle;
                 controller->pointer_volume_accum = clamp_f32(
                     controller->pointer_volume_accum -
-                        (delta_angle / NP_PI) * (float)VOLUME_HARD_MAX,
+                        (delta_angle / NP_VOLUME_BEZEL_FULL_ARC_RADIANS) * (float)VOLUME_HARD_MAX,
                     0.0f, (float)VOLUME_HARD_MAX);
                 uint8_t next_vol = (uint8_t)lroundf(controller->pointer_volume_accum);
                 if (next_vol != controller->volume_level) {

@@ -11,14 +11,17 @@
 #include <stdint.h>
 
 #define NP_OPEN_DURATION_SECONDS 0.62f
+#define NP_EXIT_DURATION_SECONDS 0.34f
 #define NP_DOUBLE_TAP_WINDOW_SECONDS 0.25f
 #define NP_SEEK_CHARGE_DELAY_SECONDS 0.10f
 #define NP_SEEK_TRIGGER_SECONDS 0.42f
 #define NP_SEEK_CENTER_RADIUS_PX 90.0f
 #define NP_SEEK_CORE_RADIUS_PX 22.0f
 #define NP_SEEK_END_GUARD_MS 500u
-#define NP_VOLUME_BEZEL_MIN_RADIUS_PX 135.0f
-#define NP_VOLUME_BEZEL_START_MOVE_PX 8.0f
+#define NP_VOLUME_BEZEL_MIN_RADIUS_PX 104.0f
+#define NP_VOLUME_BEZEL_MAX_ANGLE_RADIANS 1.08f
+#define NP_VOLUME_BEZEL_START_MOVE_PX 6.0f
+#define NP_VOLUME_BEZEL_FULL_ARC_RADIANS 1.10f
 #define NP_VOLUME_HUD_HOLD_SECONDS 1.45f
 #define NP_SKIP_COMMIT_PX 56.0f
 #define NP_SKIP_SLIDE_DURATION_SECONDS 0.42f
@@ -77,6 +80,8 @@ struct now_playing_controller {
     enum now_playing_return_target return_target;
     enum now_playing_open_origin open_origin;
     float open_transition_progress;
+    bool exit_transition_active;
+    float exit_transition_progress;
     float elapsed_seconds;
     float interpolated_elapsed_ms;
     uint8_t volume_level;

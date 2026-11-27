@@ -224,5 +224,11 @@ void render_blit_rgb565_circle_rotated(const struct framebuffer_surface *surface
                                        const uint16_t *source_pixels, uint32_t source_width,
                                        uint32_t source_height, float center_x, float center_y,
                                        float radius, float angle_radians, float alpha);
+void render_blit_rgb565_circle_rotated_shaded(const struct framebuffer_surface *surface,
+                                              const uint16_t *source_pixels,
+                                              uint32_t source_width, uint32_t source_height,
+                                              float center_x, float center_y, float radius,
+                                              float angle_radians, float alpha,
+                                              uint32_t shade_256, uint32_t tint_xrgb);
 
 #endif

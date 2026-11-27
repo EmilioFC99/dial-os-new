@@ -1979,7 +1979,7 @@ void library_controller_handle_touch(struct library_controller *controller,
                                                &album_row)) {
                         if (controller->has_active_track &&
                             controller->active_album_id == album_row.id) {
-                            action_out->kind = LIBRARY_ACTION_TOGGLE_PLAY_PAUSE;
+                            action_out->kind = LIBRARY_ACTION_OPEN_NOW_PLAYING;
                         } else {
                             struct library_db_collection album_tracks = {
                                 LIBRARY_DB_COLLECTION_TRACKS_ALBUM, album_row.id};

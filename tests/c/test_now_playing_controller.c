@@ -130,8 +130,69 @@ static void test_tap_seek_volume_and_6_level_back_stack(void) {
     TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
     TEST_ASSERT_FALSE(ctrl.lyrics_open);
     TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
+    TEST_ASSERT_TRUE(ctrl.exit_transition_active);
+    TEST_ASSERT_EQ_I32(NP_ACTION_NONE, action);
+    for (int step = 0; step < 25 && action == NP_ACTION_NONE; step++) {
+        now_playing_controller_step(&ctrl, 0.016f, &effects, &vol_changed, &action);
+    }
+    TEST_ASSERT_FALSE(ctrl.exit_transition_active);
     TEST_ASSERT_EQ_I32(NP_ACTION_EXIT, action);
     TEST_ASSERT_EQ_I32(NP_RETURN_LIBRARY, ctrl.return_target);
+
+    library_db_close(&database);
+    cleanup_ctrl_temp_dir(dir_path);
+}
+
+static void test_bezel_volume_swipe_and_audio_started_clock_sync(void) {
+    char dir_path[128];
+    make_ctrl_temp_dir(dir_path, sizeof(dir_path));
+    struct library_db database;
+    TEST_ASSERT_TRUE(library_db_open(&database, dir_path));
+
+    int64_t t1 = seed_ctrl_track(&database, "/m/1.flac", "Alpha", "Album A", 1u);
+    TEST_ASSERT_TRUE(library_db_recompute_aggregates(&database, NULL, 0u, NULL));
+
+    struct playback_engine engine;
+    playback_engine_initialize(&engine, &database);
+    struct playback_engine_effects effects;
+    struct library_db_collection all_ctx = {LIBRARY_DB_COLLECTION_TRACKS_ALL, 0};
+    TEST_ASSERT_TRUE(
+        playback_engine_launch_context(&engine, &all_ctx, "All songs", t1, false, false, &effects));
+
+    struct now_playing_controller ctrl;
+    now_playing_controller_initialize(&ctrl, &engine, &database, NULL);
+    now_playing_controller_enter(&ctrl, NP_RETURN_HOME, NP_OPEN_FROM_HOME, true, 0.0f, 60u);
+
+    bool vol_changed = false;
+    enum now_playing_action_kind action = NP_ACTION_NONE;
+
+    /* Before audio_started, interpolated_elapsed_ms holds at engine->elapsed_ms */
+    now_playing_controller_step(&ctrl, 0.05f, &effects, &vol_changed, &action);
+    TEST_ASSERT_TRUE(ctrl.interpolated_elapsed_ms == 0.0f);
+    engine.audio_started = true;
+    now_playing_controller_step(&ctrl, 0.05f, &effects, &vol_changed, &action);
+    TEST_ASSERT_TRUE(ctrl.interpolated_elapsed_ms > 40.0f);
+
+    /* Right-bezel swipe inside physical cst816t reach (x=318, y=180) and inner edge (x=295) */
+    struct touch_event bez_down = {TOUCH_EVENT_DOWN, 318, 180, 100ull};
+    struct touch_event bez_move = {TOUCH_EVENT_MOVE, 310, 130, 130ull};
+    struct touch_event bez_up = {TOUCH_EVENT_UP, 310, 130, 160ull};
+    now_playing_controller_handle_touch(&ctrl, &bez_down, &effects, &vol_changed, &action);
+    now_playing_controller_handle_touch(&ctrl, &bez_move, &effects, &vol_changed, &action);
+    TEST_ASSERT_TRUE(vol_changed);
+    TEST_ASSERT_TRUE(ctrl.volume_hud_active);
+    TEST_ASSERT_TRUE(ctrl.volume_level > 60u);
+    now_playing_controller_handle_touch(&ctrl, &bez_up, &effects, &vol_changed, &action);
+
+    uint8_t prev_vol = ctrl.volume_level;
+    struct touch_event bez2_down = {TOUCH_EVENT_DOWN, 295, 180, 200ull};
+    struct touch_event bez2_move = {TOUCH_EVENT_MOVE, 292, 230, 230ull};
+    struct touch_event bez2_up = {TOUCH_EVENT_UP, 292, 230, 260ull};
+    now_playing_controller_handle_touch(&ctrl, &bez2_down, &effects, &vol_changed, &action);
+    now_playing_controller_handle_touch(&ctrl, &bez2_move, &effects, &vol_changed, &action);
+    TEST_ASSERT_TRUE(vol_changed);
+    TEST_ASSERT_TRUE(ctrl.volume_level < prev_vol);
+    now_playing_controller_handle_touch(&ctrl, &bez2_up, &effects, &vol_changed, &action);
 
     library_db_close(&database);
     cleanup_ctrl_temp_dir(dir_path);
@@ -140,4 +201,5 @@ static void test_tap_seek_volume_and_6_level_back_stack(void) {
 void run_now_playing_controller_tests(void) {
     printf("Suite: now_playing_controller\n");
     RUN_TEST(test_tap_seek_volume_and_6_level_back_stack);
+    RUN_TEST(test_bezel_volume_swipe_and_audio_started_clock_sync);
 }

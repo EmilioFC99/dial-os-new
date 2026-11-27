@@ -692,6 +692,14 @@ static void test_now_playing_screens_dark_and_light_with_custom_stride(void) {
     uint32_t blit_center =
         pixels[render_map_coordinate_180(180u) * stride_pixels + render_map_coordinate_180(180u)];
     TEST_ASSERT_TRUE(((blit_center >> 16u) & 0xFFu) >= 240u);
+
+    render_fill_canvas(&surface, 0xFF000000u);
+    render_blit_rgb565_circle_rotated_shaded(&surface, cover_rgb565, 64u, 64u, 180.0f, 180.0f,
+                                             60.0f, 0.5f, 1.0f, 64u, 0xFF000000u);
+    uint32_t shaded_center =
+        pixels[render_map_coordinate_180(180u) * stride_pixels + render_map_coordinate_180(180u)];
+    uint32_t shaded_red = (shaded_center >> 16u) & 0xFFu;
+    TEST_ASSERT_TRUE(shaded_red >= 55u && shaded_red <= 70u);
     TEST_ASSERT_EQ_U32(canary_value, pixels[SCREEN_WIDTH]);
     free(cover_rgb565);
 

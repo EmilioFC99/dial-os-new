@@ -2114,10 +2114,12 @@ void render_blit_rgb565_scaled_clipped(const struct framebuffer_surface *surface
     }
 }
 
-void render_blit_rgb565_circle_rotated(const struct framebuffer_surface *surface,
-                                       const uint16_t *source_pixels, uint32_t source_width,
-                                       uint32_t source_height, float center_x, float center_y,
-                                       float radius, float angle_radians, float alpha) {
+void render_blit_rgb565_circle_rotated_shaded(const struct framebuffer_surface *surface,
+                                              const uint16_t *source_pixels,
+                                              uint32_t source_width, uint32_t source_height,
+                                              float center_x, float center_y, float radius,
+                                              float angle_radians, float alpha,
+                                              uint32_t shade_256, uint32_t tint_xrgb) {
     if (surface == NULL || surface->pixels == NULL || source_pixels == NULL ||
         source_width == 0u || source_height == 0u || radius <= 0.5f ||
         alpha <= ALPHA_VISIBILITY_THRESHOLD) {
@@ -2146,6 +2148,13 @@ void render_blit_rgb565_circle_rotated(const struct framebuffer_surface *surface
     float half_h_fp = (float)source_height * 0.5f * 65536.0f;
     uint32_t alpha_256 = (uint32_t)(render_clamp_f32(alpha, 0.0f, 1.0f) * 256.0f + 0.5f);
     bool opaque = (alpha_256 >= 255u);
+    if (shade_256 > 256u) {
+        shade_256 = 256u;
+    }
+    bool has_shade = (shade_256 < 256u);
+    uint32_t inv_shade = 256u - shade_256;
+    uint32_t tint_rb = (tint_xrgb & 0x00FF00FFu) * inv_shade;
+    uint32_t tint_g = (tint_xrgb & 0x0000FF00u) * inv_shade;
     int32_t max_sx = (int32_t)source_width - 1;
     int32_t max_sy = (int32_t)source_height - 1;
 
@@ -2199,6 +2208,13 @@ void render_blit_rgb565_circle_rotated(const struct framebuffer_surface *surface
             }
             uint16_t raw565 = source_pixels[(uint32_t)sy * source_width + (uint32_t)sx];
             uint32_t src_color = rgb565_to_xrgb8888(raw565);
+            if (has_shade) {
+                uint32_t rb = (((src_color & 0x00FF00FFu) * shade_256 + tint_rb) >> 8u) &
+                              0x00FF00FFu;
+                uint32_t g = (((src_color & 0x0000FF00u) * shade_256 + tint_g) >> 8u) &
+                             0x0000FF00u;
+                src_color = 0xFF000000u | rb | g;
+            }
 
             if (pixel_x >= inner_start_x && pixel_x <= inner_end_x) {
                 if (opaque) {
@@ -2242,4 +2258,13 @@ void render_blit_rgb565_circle_rotated(const struct framebuffer_surface *surface
             v_fp += dv_dx_fp;
         }
     }
+}
+
+void render_blit_rgb565_circle_rotated(const struct framebuffer_surface *surface,
+                                       const uint16_t *source_pixels, uint32_t source_width,
+                                       uint32_t source_height, float center_x, float center_y,
+                                       float radius, float angle_radians, float alpha) {
+    render_blit_rgb565_circle_rotated_shaded(surface, source_pixels, source_width, source_height,
+                                             center_x, center_y, radius, angle_radians, alpha,
+                                             256u, 0u);
 }
