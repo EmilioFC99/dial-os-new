@@ -9,6 +9,7 @@
 #include "render.h"
 #include "render_home.h"
 #include "render_library.h"
+#include "render_now_playing.h"
 #include "render_primitives.h"
 #include "theme.h"
 
@@ -669,6 +670,76 @@ static void test_span_optimized_rect_and_circle_parity(void) {
     free(pixels);
 }
 
+static void test_now_playing_screens_dark_and_light_with_custom_stride(void) {
+    const uint32_t stride_pixels = 384u;
+    const uint32_t canary_value = 0xCAFEBABEu;
+    size_t buffer_pixels = (size_t)stride_pixels * SCREEN_HEIGHT;
+    uint32_t *pixels = malloc(buffer_pixels * sizeof(uint32_t));
+    TEST_ASSERT_TRUE(pixels != NULL);
+    for (size_t index = 0u; index < buffer_pixels; index++) {
+        pixels[index] = canary_value;
+    }
+    struct framebuffer_surface surface = {pixels, stride_pixels};
+
+    uint16_t *cover_rgb565 = malloc(64u * 64u * sizeof(uint16_t));
+    TEST_ASSERT_TRUE(cover_rgb565 != NULL);
+    for (uint32_t idx = 0u; idx < 64u * 64u; idx++) {
+        cover_rgb565[idx] = 0xF800u; /* pure red */
+    }
+    render_fill_canvas(&surface, 0xFF000000u);
+    render_blit_rgb565_circle_rotated(&surface, cover_rgb565, 64u, 64u, 180.0f, 180.0f, 60.0f,
+                                      0.5f, 1.0f);
+    uint32_t blit_center =
+        pixels[render_map_coordinate_180(180u) * stride_pixels + render_map_coordinate_180(180u)];
+    TEST_ASSERT_TRUE(((blit_center >> 16u) & 0xFFu) >= 240u);
+    TEST_ASSERT_EQ_U32(canary_value, pixels[SCREEN_WIDTH]);
+    free(cover_rgb565);
+
+    struct playback_engine engine;
+    playback_engine_initialize(&engine, NULL);
+    struct now_playing_controller ctrl;
+    now_playing_controller_initialize(&ctrl, &engine, NULL, NULL);
+
+    for (uint32_t mode_idx = 0u; mode_idx < 2u; mode_idx++) {
+        enum appearance_mode mode =
+            (mode_idx == 0u) ? APPEARANCE_MODE_DARK : APPEARANCE_MODE_LIGHT;
+        uint32_t canvas = theme_get_palette(mode)->canvas;
+
+        /* Idle state */
+        engine.has_active_track = false;
+        render_draw_now_playing_frame(&surface, &ctrl, NULL, mode);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        /* Active vinyl + Seek + Volume HUD + Quick Actions + Details + Lyrics */
+        engine.has_active_track = true;
+        engine.is_playing = true;
+        engine.duration_ms = 180000u;
+        engine.elapsed_ms = 45000u;
+        snprintf(engine.active_track.title, sizeof(engine.active_track.title), "Shakti Sound");
+        snprintf(engine.active_track.artist, sizeof(engine.active_track.artist), "A Hundred Drums");
+        snprintf(engine.active_track.album, sizeof(engine.active_track.album), "A Hundred Drums");
+        ctrl.is_seeking = true;
+        ctrl.seek_expand_progress = 1.0f;
+        ctrl.volume_hud_alpha = 1.0f;
+        ctrl.volume_level = 110u; /* >85% High Output */
+        ctrl.quick_actions_open = true;
+        ctrl.quick_actions_progress = 1.0f;
+        ctrl.lyrics_open = true;
+        ctrl.lyrics_progress = 1.0f;
+        render_draw_now_playing_frame(&surface, &ctrl, NULL, mode);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        ctrl.details_sheet_open = true;
+        ctrl.details_sheet_progress = 1.0f;
+        render_draw_now_playing_frame(&surface, &ctrl, NULL, mode);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        ctrl.details_sheet_open = false;
+        ctrl.details_sheet_progress = 0.0f;
+        TEST_ASSERT_EQ_U32(canary_value, pixels[SCREEN_WIDTH]);
+    }
+    free(pixels);
+}
+
 void run_render_tests(void) {
     printf("Suite: render\n");
     RUN_TEST(test_coordinate_mapping_and_circles);
@@ -679,4 +750,5 @@ void run_render_tests(void) {
     RUN_TEST(test_library_2d_primitives_and_blits);
     RUN_TEST(test_library_screens_dark_and_light_with_custom_stride);
     RUN_TEST(test_span_optimized_rect_and_circle_parity);
+    RUN_TEST(test_now_playing_screens_dark_and_light_with_custom_stride);
 }

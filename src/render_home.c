@@ -244,6 +244,7 @@ static void draw_turntable_sculpture(const struct framebuffer_surface *surface, 
 static void draw_alive_cube_icon(const struct framebuffer_surface *surface,
                                  const struct home_slot_layout *layout,
                                  const struct home_render_snapshot *snapshot,
+                                 const struct library_controller *library,
                                  const struct appearance_palette *palette, bool is_dark,
                                  float icon_alpha) {
     if (icon_alpha <= ALPHA_VISIBILITY_THRESHOLD) {
@@ -323,10 +324,22 @@ static void draw_alive_cube_icon(const struct framebuffer_surface *surface,
                 surface, layout->center_x + sinf(layout->angle_y) * 3.5f * cube_scale,
                 disc_center_y + 2.2f * cube_scale, disc_radius * scale_x, disc_radius * scale_y,
                 layout->angle_z * 0.6f, rim_shadow, icon_alpha * 0.85f);
-            draw_geometric_vinyl_disc(surface, layout->center_x, disc_center_y, disc_radius,
-                                      scale_x, scale_y, layout->angle_z * 0.6f,
-                                      snapshot->vinyl_rotation_radians, palette, is_dark,
-                                      highlight_active, icon_alpha);
+            const uint16_t *cover_pixels =
+                (library != NULL && library->has_active_track && library->active_album_uid != 0ull &&
+                 library->cover_cache != NULL)
+                    ? library_cover_cache_lookup(library->cover_cache, library->active_album_uid)
+                    : NULL;
+            if (cover_pixels != NULL && scale_x > 0.70f) {
+                render_blit_rgb565_circle_rotated(
+                    surface, cover_pixels, LIBRARY_COVER_SIZE_PX, LIBRARY_COVER_SIZE_PX,
+                    layout->center_x, disc_center_y, disc_radius * scale_x,
+                    snapshot->vinyl_rotation_radians, icon_alpha);
+            } else {
+                draw_geometric_vinyl_disc(surface, layout->center_x, disc_center_y, disc_radius,
+                                          scale_x, scale_y, layout->angle_z * 0.6f,
+                                          snapshot->vinyl_rotation_radians, palette, is_dark,
+                                          highlight_active, icon_alpha);
+            }
         }
 
         if (cube_scale > 0.45f) {
@@ -564,6 +577,7 @@ static void draw_alive_cube_icon(const struct framebuffer_surface *surface,
 static void draw_glass_app_cube(const struct framebuffer_surface *surface,
                                 const struct home_slot_layout *layout,
                                 const struct home_render_snapshot *snapshot,
+                                const struct library_controller *library,
                                 const struct appearance_palette *palette, bool is_dark,
                                 float shell_alpha, float icon_alpha) {
     if (layout->alpha <= ALPHA_VISIBILITY_THRESHOLD || layout->half_size <= 3.0f) {
@@ -697,7 +711,8 @@ static void draw_glass_app_cube(const struct framebuffer_surface *surface,
     }
 
     /* Layer 3: Living 3D interior sculpture */
-    draw_alive_cube_icon(surface, layout, snapshot, palette, is_dark, layout->alpha * icon_alpha);
+    draw_alive_cube_icon(surface, layout, snapshot, library, palette, is_dark,
+                         layout->alpha * icon_alpha);
 
     /* Layer 4: Front crystal facets, diagonal glare streaks & L-brackets */
     if (effective_shell > 0.01f) {
@@ -1311,7 +1326,8 @@ void render_draw_home_with_library_frame(const struct framebuffer_surface *surfa
             }
         }
 
-        draw_glass_app_cube(surface, &layout, snapshot, palette, is_dark, shell_alpha, icon_alpha);
+        draw_glass_app_cube(surface, &layout, snapshot, library, palette, is_dark, shell_alpha,
+                            icon_alpha);
 
         /* Boot -> Home emblem cross-dissolve starting cleanly at r = 38 px */
         if (layout.is_focused && snapshot->entry_progress < 0.44f) {
@@ -1333,8 +1349,20 @@ void render_draw_home_with_library_frame(const struct framebuffer_surface *surfa
         float disc_cx = (float)SCREEN_CENTER_X;
         float disc_cy = render_lerp_f32(start_y, (float)SCREEN_CENTER_Y, zoom_ease);
         float disc_r = render_lerp_f32(start_radius, 180.0f, zoom_ease);
-        draw_geometric_vinyl_disc(surface, disc_cx, disc_cy, disc_r, 1.0f, 1.0f, 0.0f,
-                                  snapshot->vinyl_rotation_radians, palette, is_dark, true, 1.0f);
+        const uint16_t *cover_pixels =
+            (library != NULL && library->has_active_track && library->active_album_uid != 0ull &&
+             library->cover_cache != NULL)
+                ? library_cover_cache_lookup(library->cover_cache, library->active_album_uid)
+                : NULL;
+        if (cover_pixels != NULL) {
+            render_blit_rgb565_circle_rotated(surface, cover_pixels, LIBRARY_COVER_SIZE_PX,
+                                              LIBRARY_COVER_SIZE_PX, disc_cx, disc_cy, disc_r,
+                                              snapshot->vinyl_rotation_radians, 1.0f);
+        } else {
+            draw_geometric_vinyl_disc(surface, disc_cx, disc_cy, disc_r, 1.0f, 1.0f, 0.0f,
+                                      snapshot->vinyl_rotation_radians, palette, is_dark, true,
+                                      1.0f);
+        }
 
         float ring_alpha =
             render_ease_out_cubic(render_normalize_range(snapshot->launch_progress, 0.72f, 1.0f));

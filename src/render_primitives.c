@@ -2129,55 +2129,115 @@ void render_blit_rgb565_circle_rotated(const struct framebuffer_surface *surface
     float inner_reach = radius - 0.5f;
     float inner_sq = inner_reach > 0.0f ? (inner_reach * inner_reach) : 0.0f;
 
-    int32_t min_x = clamp_pixel_x(center_x - outer_reach);
-    int32_t max_x = clamp_pixel_x(center_x + outer_reach);
     int32_t min_y = clamp_pixel_y(center_y - outer_reach);
     int32_t max_y = clamp_pixel_y(center_y + outer_reach);
+    if (min_y > max_y) {
+        return;
+    }
 
     float inv_diameter = 1.0f / (2.0f * radius);
     float cos_a = cosf(angle_radians);
     float sin_a = sinf(angle_radians);
-    int32_t du_dx_fp = (int32_t)(cos_a * inv_diameter * (float)source_width * 65536.0f);
-    int32_t dv_dx_fp = (int32_t)(-sin_a * inv_diameter * (float)source_height * 65536.0f);
+    float scale_x = inv_diameter * (float)source_width * 65536.0f;
+    float scale_y = inv_diameter * (float)source_height * 65536.0f;
+    int32_t du_dx_fp = (int32_t)(cos_a * scale_x);
+    int32_t dv_dx_fp = (int32_t)(-sin_a * scale_y);
     float half_w_fp = (float)source_width * 0.5f * 65536.0f;
     float half_h_fp = (float)source_height * 0.5f * 65536.0f;
+    uint32_t alpha_256 = (uint32_t)(render_clamp_f32(alpha, 0.0f, 1.0f) * 256.0f + 0.5f);
+    bool opaque = (alpha_256 >= 255u);
+    int32_t max_sx = (int32_t)source_width - 1;
+    int32_t max_sy = (int32_t)source_height - 1;
 
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
         float offset_y = (float)pixel_y + 0.5f - center_y;
         float offset_y_sq = offset_y * offset_y;
-        float dx_start = (float)min_x + 0.5f - center_x;
-        int32_t u_fp = (int32_t)((dx_start * cos_a + offset_y * sin_a) * inv_diameter *
-                                     (float)source_width * 65536.0f +
-                                 half_w_fp);
-        int32_t v_fp = (int32_t)((-dx_start * sin_a + offset_y * cos_a) * inv_diameter *
-                                     (float)source_height * 65536.0f +
-                                 half_h_fp);
+        if (offset_y_sq >= outer_sq) {
+            continue;
+        }
+        float half_outer = sqrtf(outer_sq - offset_y_sq);
+        int32_t row_start_x = clamp_pixel_x(center_x - half_outer);
+        int32_t row_end_x = clamp_pixel_x(center_x + half_outer);
+        if (row_start_x > row_end_x) {
+            continue;
+        }
 
-        for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
-            float offset_x = (float)pixel_x + 0.5f - center_x;
-            float dist_sq = offset_x * offset_x + offset_y_sq;
-            if (dist_sq < outer_sq) {
-                int32_t sx = u_fp >> 16;
-                int32_t sy = v_fp >> 16;
-                if (sx < 0) {
-                    sx = 0;
-                } else if ((uint32_t)sx >= source_width) {
-                    sx = (int32_t)(source_width - 1u);
-                }
-                if (sy < 0) {
-                    sy = 0;
-                } else if ((uint32_t)sy >= source_height) {
-                    sy = (int32_t)(source_height - 1u);
-                }
-                uint32_t src_color =
-                    rgb565_to_xrgb8888(source_pixels[(uint32_t)sy * source_width + (uint32_t)sx]);
-                float coverage = 1.0f;
-                if (dist_sq > inner_sq) {
-                    coverage = render_clamp_f32(outer_reach - sqrtf(dist_sq), 0.0f, 1.0f);
-                }
-                render_blend_pixel(surface, pixel_x, pixel_y, src_color,
-                                   alpha_to_u8(alpha * coverage));
+        int32_t inner_start_x = row_end_x + 1;
+        int32_t inner_end_x = row_start_x - 1;
+        if (offset_y_sq < inner_sq) {
+            float half_inner = sqrtf(inner_sq - offset_y_sq);
+            inner_start_x = (int32_t)ceilf(center_x - half_inner - 0.5f);
+            inner_end_x = (int32_t)floorf(center_x + half_inner - 0.5f);
+            if (inner_start_x < row_start_x) {
+                inner_start_x = row_start_x;
             }
+            if (inner_end_x > row_end_x) {
+                inner_end_x = row_end_x;
+            }
+        }
+
+        float dx_start = (float)row_start_x + 0.5f - center_x;
+        int32_t u_fp = (int32_t)((dx_start * cos_a + offset_y * sin_a) * scale_x + half_w_fp);
+        int32_t v_fp = (int32_t)((-dx_start * sin_a + offset_y * cos_a) * scale_y + half_h_fp);
+
+        uint32_t mapped_y = SCREEN_COORDINATE_MAX - (uint32_t)pixel_y;
+        uint32_t *dest_ptr = surface->pixels + mapped_y * surface->stride_pixels +
+                             (SCREEN_COORDINATE_MAX - (uint32_t)row_start_x);
+
+        for (int32_t pixel_x = row_start_x; pixel_x <= row_end_x; pixel_x++) {
+            int32_t sx = u_fp >> 16;
+            int32_t sy = v_fp >> 16;
+            if (sx < 0) {
+                sx = 0;
+            } else if (sx > max_sx) {
+                sx = max_sx;
+            }
+            if (sy < 0) {
+                sy = 0;
+            } else if (sy > max_sy) {
+                sy = max_sy;
+            }
+            uint16_t raw565 = source_pixels[(uint32_t)sy * source_width + (uint32_t)sx];
+            uint32_t src_color = rgb565_to_xrgb8888(raw565);
+
+            if (pixel_x >= inner_start_x && pixel_x <= inner_end_x) {
+                if (opaque) {
+                    *dest_ptr = src_color;
+                } else {
+                    uint32_t dst_color = *dest_ptr;
+                    uint32_t inv_alpha = 256u - alpha_256;
+                    uint32_t rb = (((src_color & 0x00FF00FFu) * alpha_256 +
+                                    (dst_color & 0x00FF00FFu) * inv_alpha) >>
+                                   8u) &
+                                  0x00FF00FFu;
+                    uint32_t g = (((src_color & 0x0000FF00u) * alpha_256 +
+                                   (dst_color & 0x0000FF00u) * inv_alpha) >>
+                                  8u) &
+                                 0x0000FF00u;
+                    *dest_ptr = 0xFF000000u | rb | g;
+                }
+            } else {
+                float offset_x = (float)pixel_x + 0.5f - center_x;
+                float dist_sq = offset_x * offset_x + offset_y_sq;
+                if (dist_sq < outer_sq) {
+                    float coverage = render_clamp_f32(outer_reach - sqrtf(dist_sq), 0.0f, 1.0f);
+                    uint32_t cov_256 = (uint32_t)(alpha * coverage * 256.0f + 0.5f);
+                    if (cov_256 > 0u) {
+                        uint32_t dst_color = *dest_ptr;
+                        uint32_t inv_alpha = 256u - cov_256;
+                        uint32_t rb = (((src_color & 0x00FF00FFu) * cov_256 +
+                                        (dst_color & 0x00FF00FFu) * inv_alpha) >>
+                                       8u) &
+                                      0x00FF00FFu;
+                        uint32_t g = (((src_color & 0x0000FF00u) * cov_256 +
+                                       (dst_color & 0x0000FF00u) * inv_alpha) >>
+                                      8u) &
+                                     0x0000FF00u;
+                        *dest_ptr = 0xFF000000u | rb | g;
+                    }
+                }
+            }
+            dest_ptr--;
             u_fp += du_dx_fp;
             v_fp += dv_dx_fp;
         }
