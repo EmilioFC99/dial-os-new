@@ -313,7 +313,6 @@ bool playback_engine_launch_context(struct playback_engine *engine,
     }
     if (effects_out != NULL) {
         effects_out->track_changed = true;
-        effects_out->vinyl_nudge_radians = 0.24f;
     }
     arm_slice_launch(engine, effects_out);
     return true;

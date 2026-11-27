@@ -66,6 +66,7 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
     TEST_ASSERT_TRUE(
         playback_engine_launch_context(&engine, &all_ctx, "All songs", t1, false, false, &effects));
     TEST_ASSERT_TRUE(effects.launch_slice);
+    TEST_ASSERT_TRUE(effects.vinyl_nudge_radians == 0.0f);
     TEST_ASSERT_EQ_U32(0u, effects.slice_start_slot);
     TEST_ASSERT_EQ_I32(t1, engine.active_track.track_id);
 
