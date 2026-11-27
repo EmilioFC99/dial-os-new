@@ -45,7 +45,7 @@ Every phase follows the same five steps before moving to the next:
 - `Modes` entry screen from the Home Menu (structured to host future `1.x` modes, starting with Storage Mode).
 - Safe USB Mass Storage Mode (clean SD unmount/remount with zero corruption, live transfer status, and clean physical/touch exit back to Home).
 
-### Phase 5 — Library *(In Progress — Hardware Verification)*
+### Phase 5 — Library *(Done)*
 - Embedded SQLite 3 library index (`.dial-os/library.db`, no 16K track cap) with Core 1 `pthread` incremental stat-diff scanner, audio-payload move detection, and single-pass metadata/M3U reconciliation.
 - 60 FPS sliding-window browsing (`96`-row viewport + Core 1 async prefetch) across `Favorites`, `Playlists`, `Artists`, `Albums` cover carousel, `Genres`, `All songs`, and 17-slab Quick-Seek, plus 256-bucket sharded incremental cover cache (`.dial-os/covers/<xx>/<album_uid>.rgb565`) and streaming `0100` M3U playback handoff.
 
