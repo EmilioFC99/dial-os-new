@@ -10,6 +10,7 @@ int main(void) {
     run_home_screen_tests();
     run_logger_tests();
     run_library_catalog_tests();
+    run_library_db_tests();
     run_library_cover_cache_tests();
     run_library_controller_tests();
     run_render_tests();

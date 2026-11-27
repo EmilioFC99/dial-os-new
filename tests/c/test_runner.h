@@ -80,6 +80,7 @@ void run_boot_sequence_tests(void);
 void run_home_screen_tests(void);
 void run_logger_tests(void);
 void run_library_catalog_tests(void);
+void run_library_db_tests(void);
 void run_library_cover_cache_tests(void);
 void run_library_controller_tests(void);
 void run_render_tests(void);
