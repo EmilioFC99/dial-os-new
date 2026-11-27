@@ -83,6 +83,7 @@ void run_library_db_tests(void);
 void run_library_scanner_db_tests(void);
 void run_library_cover_cache_tests(void);
 void run_library_controller_tests(void);
+void run_playback_engine_tests(void);
 void run_render_tests(void);
 void run_app_tests(void);
 
