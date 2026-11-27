@@ -511,6 +511,10 @@ static void test_library_screens_dark_and_light_with_custom_stride(void) {
     uint32_t pl_tracks[1] = {0u};
     TEST_ASSERT_TRUE(library_catalog_add_playlist(&catalog, library_fnv1a_64("pl:test"), "Mix 1",
                                                   NULL, pl_tracks, 1u));
+    TEST_ASSERT_TRUE(
+        library_state_toggle_track_favorite(&store, &catalog, catalog.tracks[0].track_id));
+    TEST_ASSERT_TRUE(
+        library_state_toggle_album_favorite(&store, &catalog, catalog.albums[0].album_id));
 
     struct library_controller ctrl;
     library_controller_initialize(&ctrl, &catalog, &store, NULL);
@@ -558,7 +562,7 @@ static void test_library_screens_dark_and_light_with_custom_stride(void) {
         ctrl.quick_actions_open = false;
         ctrl.quick_actions_progress = 0.0f;
 
-        /* Album Tracklist Crystal Overlay */
+        /* Album Tracklist Crystal Overlay + Track Quick Actions */
         struct touch_event nd = {TOUCH_EVENT_DOWN, 208, 325, 200ull};
         struct touch_event nu = {TOUCH_EVENT_UP, 208, 325, 240ull};
         library_controller_handle_touch(&ctrl, &nd, &action);
@@ -566,6 +570,32 @@ static void test_library_screens_dark_and_light_with_custom_stride(void) {
         ctrl.transition_progress = 1.0f;
         render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
         assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+
+        ctrl.quick_actions_open = true;
+        ctrl.quick_actions_progress = 1.0f;
+        ctrl.quick_action_kind = LIB_QA_TRACK;
+        ctrl.quick_action_target_index = 0u;
+        render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        ctrl.quick_actions_open = false;
+        ctrl.quick_actions_progress = 0.0f;
+
+        /* Favorites -> ALBUMS with 4-slot Radial Sort Wheel */
+        library_controller_reset_to_hub(&ctrl, true);
+        struct touch_event fd = {TOUCH_EVENT_DOWN, 116, 152, 260ull};
+        struct touch_event fu = {TOUCH_EVENT_UP, 116, 152, 290ull};
+        library_controller_handle_touch(&ctrl, &fd, &action);
+        library_controller_handle_touch(&ctrl, &fu, &action);
+        ctrl.transition_progress = 1.0f;
+        ctrl.sort_wheel_open = true;
+        ctrl.sort_wheel_progress = 1.0f;
+        ctrl.sort_wheel_anchor_x = LIBRARY_CRATE_SORT_BTN_X;
+        ctrl.sort_wheel_anchor_y = LIBRARY_CRATE_SORT_BTN_Y;
+        ctrl.sort_wheel_hovered_slot = 2;
+        render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
+        assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        ctrl.sort_wheel_open = false;
+        ctrl.sort_wheel_progress = 0.0f;
 
         /* Playlists + Action Sheet + Hold-to-Delete arc */
         library_controller_reset_to_hub(&ctrl, true);

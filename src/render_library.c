@@ -718,16 +718,32 @@ static void draw_curved_list_body(const struct framebuffer_surface *surface,
             }
 
             float right_reserved = 28.0f;
+            bool row_in_heart_clip =
+                (row_y >= (float)list_clip.top_y + 5.0f && row_y <= (float)list_clip.bottom_y - 5.0f);
             if (is_active) {
                 draw_mini_equalizer(surface, right_pad, row_y, controller->elapsed_seconds, palette,
                                     alpha);
+                if (track->is_favorite && row_in_heart_clip) {
+                    render_draw_heart_filled_aa(surface, right_pad - 24.0f, row_y + 0.5f, 4.5f,
+                                                palette->signal_highlight, alpha);
+                    right_reserved = 38.0f;
+                }
             } else {
-                char dur_str[16];
-                format_duration_mmss(track->duration_seconds, dur_str, sizeof(dur_str));
-                int32_t dur_w = font_atlas_measure_width(font_atlas_get(FONT_STYLE_MONO_10), dur_str);
-                right_reserved = (float)dur_w + 10.0f;
-                render_draw_text_rect_clipped_alpha(surface, FONT_STYLE_MONO_10, dur_str, right_pad,
-                                                    row_y + 0.5f, TEXT_ALIGN_RIGHT,
+                char duration_text[16];
+                format_duration_mmss(track->duration_seconds, duration_text, sizeof(duration_text));
+                int32_t duration_width =
+                    font_atlas_measure_width(font_atlas_get(FONT_STYLE_MONO_10), duration_text);
+                if (track->is_favorite && row_in_heart_clip) {
+                    render_draw_heart_filled_aa(surface,
+                                                right_pad - (float)duration_width - 10.0f,
+                                                row_y + 0.5f, 4.5f, palette->signal_highlight,
+                                                alpha);
+                    right_reserved = (float)duration_width + 24.0f;
+                } else {
+                    right_reserved = (float)duration_width + 10.0f;
+                }
+                render_draw_text_rect_clipped_alpha(surface, FONT_STYLE_MONO_10, duration_text,
+                                                    right_pad, row_y + 0.5f, TEXT_ALIGN_RIGHT,
                                                     TEXT_BASELINE_MIDDLE, &list_clip,
                                                     palette->ink_secondary, alpha);
             }
@@ -1042,9 +1058,7 @@ static void draw_albums_crate_body(const struct framebuffer_surface *surface,
         bx += bar_widths[slot] + 6.0f;
     }
 
-    enum library_sort_mode album_sort =
-        controller->state_store != NULL ? controller->state_store->album_sort_mode
-                                        : LIBRARY_SORT_ALPHABETICAL;
+    enum library_sort_mode album_sort = library_controller_effective_sort_mode(controller, view);
     float sort_bob = sinf(controller->elapsed_seconds * 2.4f + 1.2f) * 1.1f;
     float note_bob = sinf(controller->elapsed_seconds * 2.4f) * 1.1f;
     draw_floating_circle_button(surface, LIBRARY_CRATE_SORT_BTN_X,
@@ -1068,79 +1082,82 @@ static void draw_overlays(const struct framebuffer_surface *surface,
                           const struct appearance_palette *palette, bool is_dark) {
     /* 1. Radial Half-Wheel Sort Selector */
     if (controller->sort_wheel_progress > 0.01f) {
-        float p = controller->sort_wheel_progress;
-        float ease = render_ease_out_expo(p);
+        float progress = controller->sort_wheel_progress;
+        float ease = render_ease_out_expo(progress);
         render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, (float)SCREEN_WIDTH,
                                       (float)SCREEN_HEIGHT, is_dark ? 0xFF060709u : 0xFF0E1116u,
-                                      p * (is_dark ? 0.58f : 0.52f));
+                                      progress * (is_dark ? 0.58f : 0.52f));
         render_draw_annular_wedge_fast(surface, controller->sort_wheel_anchor_x,
                                        controller->sort_wheel_anchor_y, 52.0f * ease, 98.0f * ease,
                                        -0.96f * HALF_CIRCLE_RADIANS, -0.04f * HALF_CIRCLE_RADIANS,
-                                       is_dark ? 0xFF12161Eu : 0xFFF6F7F9u, p * 0.90f);
+                                       is_dark ? 0xFF12161Eu : 0xFFF6F7F9u, progress * 0.90f);
 
+        const struct library_view_frame *current_view = library_controller_current_view(controller);
+        bool exclude_liked_first = (current_view != NULL && current_view->is_favorites_detail);
         struct library_sort_wheel_slot slots[LIBRARY_SORT_MODE_COUNT];
-        library_compute_sort_wheel_slots(controller->sort_wheel_anchor_x,
-                                         controller->sort_wheel_anchor_y, slots);
+        uint32_t slot_count = library_compute_sort_wheel_slots_for_view(
+            controller->sort_wheel_anchor_x, controller->sort_wheel_anchor_y, exclude_liked_first,
+            slots);
+        enum library_sort_mode current_mode =
+            library_controller_effective_sort_mode(controller, current_view);
 
-        const struct library_view_frame *v = library_controller_current_view(controller);
-        enum library_sort_mode current_mode = LIBRARY_SORT_ALPHABETICAL;
-        if (controller->state_store != NULL && v != NULL) {
-            current_mode = (v->kind == LIB_VIEW_ARTISTS) ? controller->state_store->artist_sort_mode
-                                                         : controller->state_store->album_sort_mode;
-        }
-
-        if (controller->sort_wheel_hovered_slot >= 0 &&
-            controller->sort_wheel_hovered_slot < (int32_t)LIBRARY_SORT_MODE_COUNT) {
-            const struct library_sort_wheel_slot *hov = &slots[controller->sort_wheel_hovered_slot];
+        int32_t hovered_slot = controller->sort_wheel_hovered_slot;
+        bool has_hovered = (hovered_slot >= 0 && (uint32_t)hovered_slot < slot_count);
+        if (has_hovered) {
+            const struct library_sort_wheel_slot *hovered_info = &slots[hovered_slot];
             render_draw_annular_wedge_fast(
                 surface, controller->sort_wheel_anchor_x, controller->sort_wheel_anchor_y,
-                52.0f * ease, 98.0f * ease, hov->angle_radians - 0.25f, hov->angle_radians + 0.25f,
-                palette->signal_highlight, p * (is_dark ? 0.16f : 0.20f));
-            render_draw_line_aa(surface, controller->sort_wheel_anchor_x,
-                                controller->sort_wheel_anchor_y,
-                                render_lerp_f32(controller->sort_wheel_anchor_x, hov->center_x, ease),
-                                render_lerp_f32(controller->sort_wheel_anchor_y, hov->center_y, ease),
-                                1.5f, palette->signal_highlight, p);
+                52.0f * ease, 98.0f * ease, hovered_info->angle_radians - 0.25f,
+                hovered_info->angle_radians + 0.25f, palette->signal_highlight,
+                progress * (is_dark ? 0.16f : 0.20f));
+            render_draw_line_aa(
+                surface, controller->sort_wheel_anchor_x, controller->sort_wheel_anchor_y,
+                render_lerp_f32(controller->sort_wheel_anchor_x, hovered_info->center_x, ease),
+                render_lerp_f32(controller->sort_wheel_anchor_y, hovered_info->center_y, ease),
+                1.5f, palette->signal_highlight, progress);
         }
 
-        for (uint32_t idx = 0u; idx < LIBRARY_SORT_MODE_COUNT; idx++) {
-            float cx = render_lerp_f32(controller->sort_wheel_anchor_x, slots[idx].center_x, ease);
-            float cy = render_lerp_f32(controller->sort_wheel_anchor_y, slots[idx].center_y, ease);
-            bool hovered = (controller->sort_wheel_hovered_slot == (int32_t)idx);
-            bool is_cur = (current_mode == slots[idx].mode);
-            float r = LIBRARY_SORT_WHEEL_SLOT_RADIUS_PX * (hovered ? 1.16f : 1.0f);
-            render_draw_filled_circle_aa(surface, cx, cy, r,
+        for (uint32_t slot_index = 0u; slot_index < slot_count; slot_index++) {
+            float center_x =
+                render_lerp_f32(controller->sort_wheel_anchor_x, slots[slot_index].center_x, ease);
+            float center_y =
+                render_lerp_f32(controller->sort_wheel_anchor_y, slots[slot_index].center_y, ease);
+            bool hovered = (hovered_slot == (int32_t)slot_index);
+            bool is_current = (current_mode == slots[slot_index].mode);
+            float slot_radius = LIBRARY_SORT_WHEEL_SLOT_RADIUS_PX * (hovered ? 1.16f : 1.0f);
+            render_draw_filled_circle_aa(surface, center_x, center_y, slot_radius,
                                          hovered ? palette->signal_highlight : palette->surface,
-                                         p * 0.94f);
-            render_draw_arc_aa(surface, cx, cy, r, (hovered || is_cur) ? 1.6f : 1.0f, 0.0f,
-                               FULL_CIRCLE_RADIANS,
-                               (hovered || is_cur) ? palette->signal_highlight
-                                                   : palette->hairline_strong,
-                               p);
-            draw_sort_button_glyph(surface, cx, cy, slots[idx].mode, is_cur && !hovered, palette, p);
+                                         progress * 0.94f);
+            render_draw_arc_aa(surface, center_x, center_y, slot_radius,
+                               (hovered || is_current) ? 1.6f : 1.0f, 0.0f, FULL_CIRCLE_RADIANS,
+                               (hovered || is_current) ? palette->signal_highlight
+                                                       : palette->hairline_strong,
+                               progress);
+            draw_sort_button_glyph(surface, center_x, center_y, slots[slot_index].mode,
+                                   is_current && !hovered, palette, progress);
         }
 
         const char *pill_label =
-            (controller->sort_wheel_hovered_slot >= 0)
-                ? library_sort_mode_toast_label(
-                      (enum library_sort_mode)controller->sort_wheel_hovered_slot)
-                : "DRAG TO SORT";
+            has_hovered ? library_sort_mode_toast_label(slots[hovered_slot].mode)
+                        : "DRAG TO SORT";
         render_draw_chamfer_plate_filled_aa(surface, controller->sort_wheel_anchor_x - 68.0f, 200.0f,
-                                            136.0f, 24.0f, 5.0f, palette->surface, p * 0.94f);
+                                            136.0f, 24.0f, 5.0f, palette->surface,
+                                            progress * 0.94f);
         render_draw_chamfer_plate_stroked_aa(surface, controller->sort_wheel_anchor_x - 68.0f,
                                              200.0f, 136.0f, 24.0f, 5.0f, 1.2f,
-                                             palette->signal_highlight, p);
+                                             palette->signal_highlight, progress);
         render_draw_text_alpha(surface, FONT_STYLE_MONO_9, pill_label,
                                controller->sort_wheel_anchor_x, 212.5f, TEXT_ALIGN_CENTER,
                                TEXT_BASELINE_MIDDLE,
-                               controller->sort_wheel_hovered_slot >= 0 ? palette->signal_highlight
-                                                                        : palette->ink_primary,
-                               p);
+                               has_hovered ? palette->signal_highlight : palette->ink_primary,
+                               progress);
 
         draw_floating_circle_button(surface, controller->sort_wheel_anchor_x,
-                                    controller->sort_wheel_anchor_y, true, palette, is_dark, p);
+                                    controller->sort_wheel_anchor_y, true, palette, is_dark,
+                                    progress);
         draw_sort_button_glyph(surface, controller->sort_wheel_anchor_x,
-                               controller->sort_wheel_anchor_y, current_mode, true, palette, p);
+                               controller->sort_wheel_anchor_y, current_mode, true, palette,
+                               progress);
     }
 
     /* 2. Sort Toast */
@@ -1262,80 +1279,99 @@ static void draw_overlays(const struct framebuffer_surface *surface,
                                TEXT_BASELINE_MIDDLE, palette->ink_secondary, a * 0.8f);
     }
 
-    /* 4. Album / Artist Quick Actions Overlay */
+    /* 4. Album / Artist / Track Quick Actions Overlay */
     if (controller->quick_actions_progress > 0.01f && controller->catalog != NULL) {
-        float p = controller->quick_actions_progress;
-        float ease = render_ease_out_expo(p);
+        float progress = controller->quick_actions_progress;
+        float ease = render_ease_out_expo(progress);
         render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, (float)SCREEN_WIDTH,
                                       (float)SCREEN_HEIGHT, is_dark ? 0xFF060709u : 0xFF0E1116u,
-                                      p * 0.78f);
+                                      progress * 0.78f);
 
-        bool is_album = (controller->quick_action_kind == LIB_QA_ALBUM);
-        bool is_fav = false;
+        bool is_favorite = false;
+        const char *header_label = "ALBUM ACTIONS";
+        const char *action_label_active = "FAVORITED";
+        const char *action_label_idle = "FAVORITE";
         const char *title = "";
-        char sub[128] = {0};
-        if (is_album && controller->quick_action_target_index < controller->catalog->album_count) {
-            const struct library_album *alb =
+        char subtitle[128] = {0};
+
+        if (controller->quick_action_kind == LIB_QA_ALBUM &&
+            controller->quick_action_target_index < controller->catalog->album_count) {
+            const struct library_album *album =
                 &controller->catalog->albums[controller->quick_action_target_index];
-            is_fav = alb->is_favorite;
-            title = library_catalog_get_string(controller->catalog, alb->title_offset);
-            snprintf(sub, sizeof(sub), "%s \xC2\xB7 %u TRACKS",
-                     library_catalog_get_string(controller->catalog, alb->artist_offset),
-                     (unsigned)alb->track_count);
-        } else if (!is_album &&
+            is_favorite = album->is_favorite;
+            title = library_catalog_get_string(controller->catalog, album->title_offset);
+            snprintf(subtitle, sizeof(subtitle), "%s \xC2\xB7 %u TRACKS",
+                     library_catalog_get_string(controller->catalog, album->artist_offset),
+                     (unsigned)album->track_count);
+        } else if (controller->quick_action_kind == LIB_QA_ARTIST &&
                    controller->quick_action_target_index < controller->catalog->artist_count) {
-            const struct library_artist *art =
+            const struct library_artist *artist =
                 &controller->catalog->artists[controller->quick_action_target_index];
-            is_fav = art->is_favorite;
-            title = library_catalog_get_string(controller->catalog, art->name_offset);
-            snprintf(sub, sizeof(sub), "%u ALBUMS \xC2\xB7 %u TRACKS", (unsigned)art->album_count,
-                     (unsigned)art->track_count);
+            is_favorite = artist->is_favorite;
+            header_label = "ARTIST ACTIONS";
+            action_label_active = "LIKED";
+            action_label_idle = "LIKE";
+            title = library_catalog_get_string(controller->catalog, artist->name_offset);
+            snprintf(subtitle, sizeof(subtitle), "%u ALBUMS \xC2\xB7 %u TRACKS",
+                     (unsigned)artist->album_count, (unsigned)artist->track_count);
+        } else if (controller->quick_action_kind == LIB_QA_TRACK &&
+                   controller->quick_action_target_index < controller->catalog->track_count) {
+            const struct library_track *track =
+                &controller->catalog->tracks[controller->quick_action_target_index];
+            is_favorite = track->is_favorite;
+            header_label = "SONG ACTIONS";
+            title = library_catalog_get_string(controller->catalog, track->title_offset);
+            snprintf(subtitle, sizeof(subtitle), "%s \xC2\xB7 %s",
+                     library_catalog_get_string(controller->catalog, track->artist_offset),
+                     library_catalog_get_string(controller->catalog, track->album_offset));
         }
 
-        float hdr_dy = render_lerp_f32(-12.0f, 0.0f, ease);
-        render_draw_text_alpha(surface, FONT_STYLE_MONO_9,
-                               is_album ? "ALBUM ACTIONS" : "ARTIST ACTIONS",
-                               (float)SCREEN_CENTER_X, 68.0f + hdr_dy, TEXT_ALIGN_CENTER,
-                               TEXT_BASELINE_MIDDLE, palette->signal_highlight, p);
+        float header_offset_y = render_lerp_f32(-12.0f, 0.0f, ease);
+        render_draw_text_alpha(surface, FONT_STYLE_MONO_9, header_label, (float)SCREEN_CENTER_X,
+                               68.0f + header_offset_y, TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE,
+                               palette->signal_highlight, progress);
         render_draw_marquee_text(surface, FONT_STYLE_DISPLAY_18, title, (float)SCREEN_CENTER_X,
-                                 94.0f + hdr_dy, 224.0f, controller->elapsed_seconds, 0xFFF5F6F8u,
-                                 p);
-        render_draw_marquee_text(surface, FONT_STYLE_MONO_10, sub, (float)SCREEN_CENTER_X,
-                                 114.0f + hdr_dy, 244.0f, controller->elapsed_seconds,
-                                 0xFFF5F6F8u, p * 0.72f);
-        render_draw_line_aa(surface, 116.0f, 132.0f + hdr_dy, 244.0f, 132.0f + hdr_dy, 1.0f,
-                            0xFFF5FAFFu, p * 0.16f);
+                                 94.0f + header_offset_y, 224.0f, controller->elapsed_seconds,
+                                 0xFFF5F6F8u, progress);
+        render_draw_marquee_text(surface, FONT_STYLE_MONO_10, subtitle, (float)SCREEN_CENTER_X,
+                                 114.0f + header_offset_y, 244.0f, controller->elapsed_seconds,
+                                 0xFFF5F6F8u, progress * 0.72f);
+        render_draw_line_aa(surface, 116.0f, 132.0f + header_offset_y, 244.0f,
+                            132.0f + header_offset_y, 1.0f, 0xFFF5FAFFu, progress * 0.16f);
 
-        float med_dy = render_lerp_f32(14.0f, 0.0f, ease);
-        float r = LIBRARY_QUICK_ACTION_BTN_RADIUS_PX *
-                  (controller->quick_action_pressed ? 0.93f : 1.0f);
-        render_draw_filled_circle_aa(surface, (float)SCREEN_CENTER_X,
-                                     LIBRARY_QUICK_ACTION_BTN_Y + med_dy, r,
-                                     is_fav ? palette->signal_highlight : 0xFF161A22u, p * 0.92f);
-        render_draw_arc_aa(surface, (float)SCREEN_CENTER_X, LIBRARY_QUICK_ACTION_BTN_Y + med_dy, r,
-                           (is_fav || controller->quick_action_pressed) ? 2.0f : 1.5f, 0.0f,
+        float medallion_offset_y = render_lerp_f32(14.0f, 0.0f, ease);
+        float medallion_radius = LIBRARY_QUICK_ACTION_BTN_RADIUS_PX *
+                                 (controller->quick_action_pressed ? 0.93f : 1.0f);
+        render_draw_filled_circle_aa(
+            surface, (float)SCREEN_CENTER_X, LIBRARY_QUICK_ACTION_BTN_Y + medallion_offset_y,
+            medallion_radius, is_favorite ? palette->signal_highlight : 0xFF161A22u,
+            progress * 0.92f);
+        render_draw_arc_aa(surface, (float)SCREEN_CENTER_X,
+                           LIBRARY_QUICK_ACTION_BTN_Y + medallion_offset_y, medallion_radius,
+                           (is_favorite || controller->quick_action_pressed) ? 2.0f : 1.5f, 0.0f,
                            FULL_CIRCLE_RADIANS,
-                           (is_fav || controller->quick_action_pressed) ? palette->signal_highlight
-                                                                        : 0xFFF5FAFFu,
-                           p * ((is_fav || controller->quick_action_pressed) ? 1.0f : 0.34f));
-        if (is_fav) {
+                           (is_favorite || controller->quick_action_pressed)
+                               ? palette->signal_highlight
+                               : 0xFFF5FAFFu,
+                           progress * ((is_favorite || controller->quick_action_pressed) ? 1.0f
+                                                                                         : 0.34f));
+        if (is_favorite) {
             render_draw_heart_filled_aa(surface, (float)SCREEN_CENTER_X,
-                                        LIBRARY_QUICK_ACTION_BTN_Y + med_dy, 14.0f,
-                                        palette->signal_highlight_ink, p);
+                                        LIBRARY_QUICK_ACTION_BTN_Y + medallion_offset_y, 14.0f,
+                                        palette->signal_highlight_ink, progress);
         } else {
             render_draw_heart_stroked_aa(surface, (float)SCREEN_CENTER_X,
-                                         LIBRARY_QUICK_ACTION_BTN_Y + med_dy, 14.0f, 1.8f,
-                                         0xFFF5F6F8u, p);
+                                         LIBRARY_QUICK_ACTION_BTN_Y + medallion_offset_y, 14.0f,
+                                         1.8f, 0xFFF5F6F8u, progress);
         }
         render_draw_text_alpha(surface, FONT_STYLE_MONO_9,
-                               is_album ? (is_fav ? "FAVORITED" : "FAVORITE")
-                                        : (is_fav ? "LIKED" : "LIKE"),
-                               (float)SCREEN_CENTER_X, 246.0f + med_dy, TEXT_ALIGN_CENTER,
-                               TEXT_BASELINE_MIDDLE,
-                               is_fav ? palette->signal_highlight : 0xFFF5F6F8u, p);
+                               is_favorite ? action_label_active : action_label_idle,
+                               (float)SCREEN_CENTER_X, 246.0f + medallion_offset_y,
+                               TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE,
+                               is_favorite ? palette->signal_highlight : 0xFFF5F6F8u, progress);
         render_draw_text_alpha(surface, FONT_STYLE_MONO_8, "TAP OUTSIDE TO CLOSE",
                                (float)SCREEN_CENTER_X, 316.0f, TEXT_ALIGN_CENTER,
-                               TEXT_BASELINE_MIDDLE, 0xFFF5F6F8u, p * 0.48f);
+                               TEXT_BASELINE_MIDDLE, 0xFFF5F6F8u, progress * 0.48f);
     }
 
     /* 5. Playlist Action Sheet + 360-deg Delete Countdown */
@@ -1572,7 +1608,7 @@ void render_draw_library_frame(const struct framebuffer_surface *surface,
         } else {
             if (view->is_favorites_detail && view->item_count == 0u) {
                 draw_empty_state(surface, LIB_HUB_FAVORITES, "No Favorite Songs",
-                                 "HEART A TRACK WHILE LISTENING", 152.0f, false,
+                                 "HOLD A SONG ROW TO FAVORITE", 152.0f, false,
                                  controller->elapsed_seconds, palette, is_dark, body_alpha);
             } else {
                 draw_curved_list_body(surface, controller, view, slide_x, 0.0f, body_alpha, palette,

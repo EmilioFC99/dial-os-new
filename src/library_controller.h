@@ -125,7 +125,8 @@ enum library_bloom_direction {
 enum library_quick_action_kind {
     LIB_QA_NONE = 0,
     LIB_QA_ALBUM = 1,
-    LIB_QA_ARTIST = 2
+    LIB_QA_ARTIST = 2,
+    LIB_QA_TRACK = 3
 };
 
 enum library_action_kind {
@@ -280,7 +281,7 @@ struct library_controller {
     float sort_toast_remaining_seconds;
     char sort_toast_text[48];
 
-    /* Quick Actions overlay (Album / Artist) */
+    /* Quick Actions overlay (Album / Artist / Track) */
     bool quick_actions_open;
     float quick_actions_progress;
     enum library_quick_action_kind quick_action_kind;
@@ -311,10 +312,18 @@ int32_t library_resolve_rim_slice_index(float angle_radians);
 uint32_t library_shortest_slice_distance(uint32_t first_slice, uint32_t second_slice);
 void library_compute_windowed_crate_bars(uint32_t total_count, float scroll_position,
                                          struct library_crate_bars_window *window_out);
+uint32_t library_compute_sort_wheel_slots_for_view(float anchor_x, float anchor_y,
+                                                   bool exclude_liked_first,
+                                                   struct library_sort_wheel_slot *slots_out);
+int32_t library_resolve_sort_wheel_hovered_slot_for_view(float anchor_x, float anchor_y,
+                                                         float touch_x, float touch_y,
+                                                         bool exclude_liked_first);
 void library_compute_sort_wheel_slots(float anchor_x, float anchor_y,
                                       struct library_sort_wheel_slot *slots_out);
 int32_t library_resolve_sort_wheel_hovered_mode(float anchor_x, float anchor_y, float touch_x,
                                                 float touch_y);
+enum library_sort_mode library_controller_effective_sort_mode(
+    const struct library_controller *controller, const struct library_view_frame *view);
 
 /* Controller lifecycle */
 void library_controller_initialize(struct library_controller *controller,

@@ -228,9 +228,205 @@ static void test_sort_wheel_quick_seek_and_long_press_overlays(void) {
     library_catalog_destroy(&catalog);
 }
 
+static void test_track_row_long_press_quick_action(void) {
+    struct library_catalog catalog;
+    struct library_state_store store;
+    build_test_catalog(&catalog, &store);
+
+    struct library_controller controller;
+    library_controller_initialize(&controller, &catalog, &store, NULL);
+    struct library_controller_action action;
+
+    /* Open All songs (Hub pair 2, right tile = (244, 152)) */
+    controller.view_stack[0].scroll_position = 2.0f;
+    controller.view_stack[0].target_index = 2;
+    send_tap(&controller, 244, 152, 1000ull, &action);
+    step_for_seconds(&controller, 0.35f);
+    const struct library_view_frame *tracks_view = library_controller_current_view(&controller);
+    TEST_ASSERT_EQ_I32(LIB_VIEW_TRACKS, tracks_view->kind);
+    TEST_ASSERT_EQ_U32(4u, tracks_view->item_count);
+
+    /* Boundary: drift > LIBRARY_TAP_DRIFT_LIMIT_PX cancels long-press */
+    struct touch_event drift_down = {TOUCH_EVENT_DOWN, 180, 126, 1500ull};
+    struct touch_event drift_move = {TOUCH_EVENT_MOVE, 180, 142, 1540ull};
+    struct touch_event drift_up = {TOUCH_EVENT_UP, 180, 142, 1580ull};
+    library_controller_handle_touch(&controller, &drift_down, &action);
+    library_controller_handle_touch(&controller, &drift_move, &action);
+    step_for_seconds(&controller, 0.52f);
+    TEST_ASSERT_FALSE(controller.quick_actions_open);
+    library_controller_handle_touch(&controller, &drift_up, &action);
+    controller.view_stack[controller.stack_depth - 1u].scroll_position = 0.0f;
+    controller.view_stack[controller.stack_depth - 1u].target_index = 0;
+
+    /* Long-press row 0 (Alpha) for 0.52s -> opens LIB_QA_TRACK */
+    uint64_t expected_track_id = catalog.tracks[tracks_view->item_indices[0]].track_id;
+    struct touch_event hold_down = {TOUCH_EVENT_DOWN, 180, 126, 2000ull};
+    library_controller_handle_touch(&controller, &hold_down, &action);
+    step_for_seconds(&controller, 0.52f);
+    TEST_ASSERT_TRUE(controller.quick_actions_open);
+    TEST_ASSERT_EQ_I32(LIB_QA_TRACK, controller.quick_action_kind);
+    TEST_ASSERT_TRUE(controller.quick_action_target_id == expected_track_id);
+    struct touch_event hold_up = {TOUCH_EVENT_UP, 180, 126, 2540ull};
+    library_controller_handle_touch(&controller, &hold_up, &action);
+
+    /* Negative: tap outside medallion closes without toggling favorite */
+    send_tap(&controller, 180, 316, 2600ull, &action);
+    TEST_ASSERT_FALSE(controller.quick_actions_open);
+    TEST_ASSERT_FALSE(action.state_dirty);
+    TEST_ASSERT_EQ_U32(0u, catalog.favorite_track_count);
+
+    /* Re-open long-press -> tap medallion -> favorites track + auto-closes */
+    struct touch_event hold2_down = {TOUCH_EVENT_DOWN, 180, 126, 3000ull};
+    library_controller_handle_touch(&controller, &hold2_down, &action);
+    step_for_seconds(&controller, 0.52f);
+    TEST_ASSERT_TRUE(controller.quick_actions_open);
+    struct touch_event hold2_up = {TOUCH_EVENT_UP, 180, 126, 3540ull};
+    library_controller_handle_touch(&controller, &hold2_up, &action);
+
+    send_tap(&controller, 180, 196, 3600ull, &action);
+    TEST_ASSERT_TRUE(action.state_dirty);
+    TEST_ASSERT_EQ_U32(1u, catalog.favorite_track_count);
+    TEST_ASSERT_EQ_U32(1u, store.favorite_track_count);
+    TEST_ASSERT_TRUE(catalog.tracks[tracks_view->item_indices[0]].is_favorite);
+    step_for_seconds(&controller, 0.30f);
+    TEST_ASSERT_FALSE(controller.quick_actions_open);
+
+    /* Album Tracklist also supports track row long-press Quick Actions */
+    library_controller_reset_to_hub(&controller, true);
+    controller.view_stack[0].scroll_position = 1.0f;
+    controller.view_stack[0].target_index = 1;
+    send_tap(&controller, 244, 152, 4000ull, &action);
+    step_for_seconds(&controller, 0.6f);
+    send_tap(&controller, 208, 325, 4700ull, &action);
+    step_for_seconds(&controller, 0.35f);
+    TEST_ASSERT_EQ_I32(LIB_TRACKS_ALBUM, library_controller_current_view(&controller)->source_type);
+    struct touch_event album_row_down = {TOUCH_EVENT_DOWN, 180, 126, 5200ull};
+    library_controller_handle_touch(&controller, &album_row_down, &action);
+    step_for_seconds(&controller, 0.52f);
+    TEST_ASSERT_TRUE(controller.quick_actions_open);
+    TEST_ASSERT_EQ_I32(LIB_QA_TRACK, controller.quick_action_kind);
+    struct touch_event album_row_up = {TOUCH_EVENT_UP, 180, 126, 5740ull};
+    library_controller_handle_touch(&controller, &album_row_up, &action);
+    controller.quick_actions_open = false;
+
+    /* Favorites -> SONGS opens automatically when only favorite tracks exist; unfavoriting refreshes list */
+    library_controller_reset_to_hub(&controller, true);
+    send_tap(&controller, 116, 152, 6000ull, &action);
+    step_for_seconds(&controller, 0.35f);
+    const struct library_view_frame *fav_view = library_controller_current_view(&controller);
+    TEST_ASSERT_TRUE(fav_view->is_favorites_detail);
+    TEST_ASSERT_EQ_I32(LIB_VIEW_TRACKS, fav_view->kind);
+    TEST_ASSERT_EQ_I32(LIB_TRACKS_FAVORITES, fav_view->source_type);
+    TEST_ASSERT_EQ_U32(1u, fav_view->item_count);
+
+    struct touch_event fav_hold_down = {TOUCH_EVENT_DOWN, 180, 126, 6500ull};
+    library_controller_handle_touch(&controller, &fav_hold_down, &action);
+    step_for_seconds(&controller, 0.52f);
+    TEST_ASSERT_TRUE(controller.quick_actions_open);
+    TEST_ASSERT_EQ_I32(LIB_QA_TRACK, controller.quick_action_kind);
+    struct touch_event fav_hold_up = {TOUCH_EVENT_UP, 180, 126, 7040ull};
+    library_controller_handle_touch(&controller, &fav_hold_up, &action);
+    send_tap(&controller, 180, 196, 7100ull, &action);
+    TEST_ASSERT_TRUE(action.state_dirty);
+    TEST_ASSERT_EQ_U32(0u, catalog.favorite_track_count);
+    TEST_ASSERT_EQ_U32(0u, fav_view->item_count);
+
+    library_controller_destroy(&controller);
+    library_state_destroy(&store);
+    library_catalog_destroy(&catalog);
+}
+
+static void test_favorites_excludes_liked_first_sort(void) {
+    struct library_sort_wheel_slot slots[LIBRARY_SORT_MODE_COUNT];
+    uint32_t slot_count = library_compute_sort_wheel_slots_for_view(152.0f, 325.0f, true, slots);
+    TEST_ASSERT_EQ_U32(4u, slot_count);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_ALPHABETICAL, slots[0].mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_REVERSE_ALPHABETICAL, slots[1].mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_RECENT, slots[2].mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_OLDEST, slots[3].mode);
+    for (uint32_t idx = 0u; idx < slot_count; idx++) {
+        TEST_ASSERT_TRUE(slots[idx].mode != LIBRARY_SORT_LIKED_FIRST);
+    }
+
+    TEST_ASSERT_EQ_I32(
+        -1, library_resolve_sort_wheel_hovered_slot_for_view(152.0f, 325.0f, 152.0f, 315.0f, true));
+    TEST_ASSERT_EQ_I32(
+        -1, library_resolve_sort_wheel_hovered_slot_for_view(152.0f, 325.0f, 152.0f, 360.0f, true));
+    for (uint32_t idx = 0u; idx < slot_count; idx++) {
+        int32_t hovered = library_resolve_sort_wheel_hovered_slot_for_view(
+            152.0f, 325.0f, slots[idx].center_x, slots[idx].center_y, true);
+        TEST_ASSERT_EQ_I32((int32_t)idx, hovered);
+    }
+
+    struct library_catalog catalog;
+    struct library_state_store store;
+    build_test_catalog(&catalog, &store);
+    TEST_ASSERT_TRUE(library_state_toggle_album_favorite(&store, &catalog, catalog.albums[0].album_id));
+    TEST_ASSERT_TRUE(library_state_toggle_album_favorite(&store, &catalog, catalog.albums[1].album_id));
+    store.album_sort_mode = LIBRARY_SORT_LIKED_FIRST;
+
+    struct library_controller controller;
+    library_controller_initialize(&controller, &catalog, &store, NULL);
+    struct library_controller_action action;
+
+    /* Open Favorites -> ALBUMS (preferred default when favorite albums exist) */
+    send_tap(&controller, 116, 152, 1000ull, &action);
+    step_for_seconds(&controller, 0.35f);
+    const struct library_view_frame *fav_albums = library_controller_current_view(&controller);
+    TEST_ASSERT_TRUE(fav_albums->is_favorites_detail);
+    TEST_ASSERT_EQ_I32(LIB_VIEW_ALBUMS, fav_albums->kind);
+    TEST_ASSERT_EQ_U32(2u, fav_albums->item_count);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_ALPHABETICAL,
+                       library_controller_effective_sort_mode(&controller, fav_albums));
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_LIKED_FIRST, store.album_sort_mode);
+
+    /* Tap-cycling Sort button skips LIBRARY_SORT_LIKED_FIRST */
+    send_tap(&controller, 152, 325, 2000ull, &action);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_REVERSE_ALPHABETICAL, store.album_sort_mode);
+    send_tap(&controller, 152, 325, 2200ull, &action);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_RECENT, store.album_sort_mode);
+    send_tap(&controller, 152, 325, 2400ull, &action);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_OLDEST, store.album_sort_mode);
+    send_tap(&controller, 152, 325, 2600ull, &action);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_ALPHABETICAL, store.album_sort_mode);
+
+    /* Holding Sort button opens 4-slot wheel; slot 2 selects MOST RECENT, slot 3 selects OLDEST */
+    struct touch_event wheel_down = {TOUCH_EVENT_DOWN, 152, 325, 3000ull};
+    library_controller_handle_touch(&controller, &wheel_down, &action);
+    step_for_seconds(&controller, 0.40f);
+    TEST_ASSERT_TRUE(controller.sort_wheel_open);
+    struct touch_event wheel_move = {TOUCH_EVENT_MOVE, (int32_t)lroundf(slots[2].center_x),
+                                     (int32_t)lroundf(slots[2].center_y), 3420ull};
+    struct touch_event wheel_up = {TOUCH_EVENT_UP, (int32_t)lroundf(slots[2].center_x),
+                                   (int32_t)lroundf(slots[2].center_y), 3460ull};
+    library_controller_handle_touch(&controller, &wheel_move, &action);
+    TEST_ASSERT_EQ_I32(2, controller.sort_wheel_hovered_slot);
+    library_controller_handle_touch(&controller, &wheel_up, &action);
+    TEST_ASSERT_FALSE(controller.sort_wheel_open);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_RECENT, store.album_sort_mode);
+
+    struct touch_event wheel2_down = {TOUCH_EVENT_DOWN, 152, 325, 4000ull};
+    library_controller_handle_touch(&controller, &wheel2_down, &action);
+    step_for_seconds(&controller, 0.40f);
+    struct touch_event wheel2_move = {TOUCH_EVENT_MOVE, (int32_t)lroundf(slots[3].center_x),
+                                      (int32_t)lroundf(slots[3].center_y), 4420ull};
+    struct touch_event wheel2_up = {TOUCH_EVENT_UP, (int32_t)lroundf(slots[3].center_x),
+                                    (int32_t)lroundf(slots[3].center_y), 4460ull};
+    library_controller_handle_touch(&controller, &wheel2_move, &action);
+    TEST_ASSERT_EQ_I32(3, controller.sort_wheel_hovered_slot);
+    library_controller_handle_touch(&controller, &wheel2_up, &action);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_OLDEST, store.album_sort_mode);
+
+    library_controller_destroy(&controller);
+    library_state_destroy(&store);
+    library_catalog_destroy(&catalog);
+}
+
 void run_library_controller_tests(void) {
     printf("Suite: library_controller\n");
     RUN_TEST(test_geometry_formulas);
     RUN_TEST(test_hub_bloom_scroll_preservation_and_playback);
     RUN_TEST(test_sort_wheel_quick_seek_and_long_press_overlays);
+    RUN_TEST(test_track_row_long_press_quick_action);
+    RUN_TEST(test_favorites_excludes_liked_first_sort);
 }

@@ -156,23 +156,38 @@ void library_compute_windowed_crate_bars(uint32_t total_count, float scroll_posi
     window_out->total_count = total_count;
 }
 
-void library_compute_sort_wheel_slots(float anchor_x, float anchor_y,
-                                      struct library_sort_wheel_slot *slots_out) {
+uint32_t library_compute_sort_wheel_slots_for_view(float anchor_x, float anchor_y,
+                                                   bool exclude_liked_first,
+                                                   struct library_sort_wheel_slot *slots_out) {
     if (slots_out == NULL) {
-        return;
+        return 0u;
     }
-    for (uint32_t index = 0u; index < LIBRARY_SORT_MODE_COUNT; index++) {
-        float factor = (float)index / (float)(LIBRARY_SORT_MODE_COUNT - 1u);
+    enum library_sort_mode modes[LIBRARY_SORT_MODE_COUNT];
+    uint32_t slot_count = 0u;
+    for (uint32_t mode_index = 0u; mode_index < LIBRARY_SORT_MODE_COUNT; mode_index++) {
+        enum library_sort_mode candidate = (enum library_sort_mode)mode_index;
+        if (exclude_liked_first && candidate == LIBRARY_SORT_LIKED_FIRST) {
+            continue;
+        }
+        modes[slot_count++] = candidate;
+    }
+    if (slot_count == 0u) {
+        return 0u;
+    }
+    for (uint32_t slot_index = 0u; slot_index < slot_count; slot_index++) {
+        float factor = (slot_count > 1u) ? ((float)slot_index / (float)(slot_count - 1u)) : 0.5f;
         float angle = lerp_f32(LIBRARY_SORT_WHEEL_START_ANGLE, LIBRARY_SORT_WHEEL_END_ANGLE, factor);
-        slots_out[index].mode = (enum library_sort_mode)index;
-        slots_out[index].angle_radians = angle;
-        slots_out[index].center_x = anchor_x + cosf(angle) * LIBRARY_SORT_WHEEL_RADIUS_PX;
-        slots_out[index].center_y = anchor_y + sinf(angle) * LIBRARY_SORT_WHEEL_RADIUS_PX;
+        slots_out[slot_index].mode = modes[slot_index];
+        slots_out[slot_index].angle_radians = angle;
+        slots_out[slot_index].center_x = anchor_x + cosf(angle) * LIBRARY_SORT_WHEEL_RADIUS_PX;
+        slots_out[slot_index].center_y = anchor_y + sinf(angle) * LIBRARY_SORT_WHEEL_RADIUS_PX;
     }
+    return slot_count;
 }
 
-int32_t library_resolve_sort_wheel_hovered_mode(float anchor_x, float anchor_y, float touch_x,
-                                                float touch_y) {
+int32_t library_resolve_sort_wheel_hovered_slot_for_view(float anchor_x, float anchor_y,
+                                                         float touch_x, float touch_y,
+                                                         bool exclude_liked_first) {
     float delta_x = touch_x - anchor_x;
     float delta_y = touch_y - anchor_y;
     if (hypotf(delta_x, delta_y) < LIBRARY_SORT_WHEEL_ENGAGE_RADIUS_PX || delta_y > 24.0f) {
@@ -180,18 +195,48 @@ int32_t library_resolve_sort_wheel_hovered_mode(float anchor_x, float anchor_y, 
     }
     float touch_angle = atan2f(delta_y, delta_x);
     struct library_sort_wheel_slot slots[LIBRARY_SORT_MODE_COUNT];
-    library_compute_sort_wheel_slots(anchor_x, anchor_y, slots);
+    uint32_t slot_count =
+        library_compute_sort_wheel_slots_for_view(anchor_x, anchor_y, exclude_liked_first, slots);
 
     int32_t best_slot = -1;
     float best_abs_delta = 1e9f;
-    for (uint32_t index = 0u; index < LIBRARY_SORT_MODE_COUNT; index++) {
-        float abs_delta = fabsf(normalize_angle_delta(touch_angle, slots[index].angle_radians));
+    for (uint32_t slot_index = 0u; slot_index < slot_count; slot_index++) {
+        float abs_delta = fabsf(normalize_angle_delta(touch_angle, slots[slot_index].angle_radians));
         if (abs_delta <= 0.34f && abs_delta < best_abs_delta) {
             best_abs_delta = abs_delta;
-            best_slot = (int32_t)index;
+            best_slot = (int32_t)slot_index;
         }
     }
     return best_slot;
+}
+
+void library_compute_sort_wheel_slots(float anchor_x, float anchor_y,
+                                      struct library_sort_wheel_slot *slots_out) {
+    (void)library_compute_sort_wheel_slots_for_view(anchor_x, anchor_y, false, slots_out);
+}
+
+int32_t library_resolve_sort_wheel_hovered_mode(float anchor_x, float anchor_y, float touch_x,
+                                                float touch_y) {
+    return library_resolve_sort_wheel_hovered_slot_for_view(anchor_x, anchor_y, touch_x, touch_y,
+                                                            false);
+}
+
+enum library_sort_mode library_controller_effective_sort_mode(
+    const struct library_controller *controller, const struct library_view_frame *view) {
+    if (controller == NULL || controller->state_store == NULL || view == NULL) {
+        return LIBRARY_SORT_ALPHABETICAL;
+    }
+    if (view->kind == LIB_VIEW_ARTISTS) {
+        return controller->state_store->artist_sort_mode;
+    }
+    if (view->kind == LIB_VIEW_ALBUMS) {
+        enum library_sort_mode sort_mode = controller->state_store->album_sort_mode;
+        if (view->is_favorites_detail && sort_mode == LIBRARY_SORT_LIKED_FIRST) {
+            return LIBRARY_SORT_ALPHABETICAL;
+        }
+        return sort_mode;
+    }
+    return LIBRARY_SORT_ALPHABETICAL;
 }
 
 static void free_view_frame(struct library_view_frame *frame) {
@@ -253,9 +298,7 @@ static void populate_albums_view(struct library_controller *controller,
         }
     }
 
-    enum library_sort_mode sort_mode =
-        controller->state_store != NULL ? controller->state_store->album_sort_mode
-                                        : LIBRARY_SORT_ALPHABETICAL;
+    enum library_sort_mode sort_mode = library_controller_effective_sort_mode(controller, view);
     library_catalog_sort_album_indices(catalog, sort_mode, buffer, count);
     view->item_indices = buffer;
     view->item_count = count;
@@ -521,15 +564,9 @@ static void rebuild_seek_anchors_for_current_view(struct library_controller *con
     if (!current_view_supports_quick_seek(view) || controller->catalog == NULL) {
         return;
     }
-    enum library_sort_mode sort_mode = LIBRARY_SORT_ALPHABETICAL;
-    bool supports_date = false;
-    if (view->kind == LIB_VIEW_ALBUMS && controller->state_store != NULL) {
-        sort_mode = controller->state_store->album_sort_mode;
-        supports_date = true;
-    } else if (view->kind == LIB_VIEW_ARTISTS && controller->state_store != NULL) {
-        sort_mode = controller->state_store->artist_sort_mode;
-        supports_date = true;
-    }
+    enum library_sort_mode sort_mode = library_controller_effective_sort_mode(controller, view);
+    bool supports_date = (view->kind == LIB_VIEW_ALBUMS || view->kind == LIB_VIEW_ARTISTS) &&
+                         controller->state_store != NULL;
     controller->seek_anchor_count = library_build_seek_anchors(
         controller->catalog, sort_mode, supports_date, view->item_count, seek_anchor_item_getter,
         (void *)view, controller->seek_anchors, LIBRARY_MAX_SEEK_ANCHORS);
@@ -710,6 +747,9 @@ static void apply_sort_mode_for_current_view(struct library_controller *controll
         return;
     }
     if (view->kind == LIB_VIEW_ALBUMS) {
+        if (view->is_favorites_detail && mode == LIBRARY_SORT_LIKED_FIRST) {
+            mode = LIBRARY_SORT_ALPHABETICAL;
+        }
         controller->state_store->album_sort_mode = mode;
     } else if (view->kind == LIB_VIEW_ARTISTS) {
         controller->state_store->artist_sort_mode = mode;
@@ -812,7 +852,7 @@ static void handle_hub_tile_tap(struct library_controller *controller, uint32_t 
             uint32_t total_favs = catalog->favorite_track_count + catalog->favorite_album_count;
             if (total_favs == 0u) {
                 push_empty_view(controller, LIB_HUB_FAVORITES, "Favorites", "0 FAVORITES",
-                                "No Favorites Yet", "HEART A TRACK WHILE LISTENING");
+                                "No Favorites Yet", "HOLD A SONG OR ALBUM TO LIKE");
                 return;
             }
             struct library_view_frame *view = push_new_view(controller);
@@ -821,7 +861,16 @@ static void handle_hub_tile_tap(struct library_controller *controller, uint32_t 
             }
             view->is_favorites_detail = true;
             snprintf(view->title, sizeof(view->title), "Favorites");
-            if (controller->preferred_favorites_tab == LIB_TAB_ALBUMS) {
+            enum library_tab_mode initial_tab = controller->preferred_favorites_tab;
+            if (initial_tab == LIB_TAB_ALBUMS && catalog->favorite_album_count == 0u &&
+                catalog->favorite_track_count > 0u) {
+                initial_tab = LIB_TAB_SONGS;
+            } else if (initial_tab == LIB_TAB_SONGS && catalog->favorite_track_count == 0u &&
+                       catalog->favorite_album_count > 0u) {
+                initial_tab = LIB_TAB_ALBUMS;
+            }
+            controller->favorites_mode_blend = (initial_tab == LIB_TAB_SONGS) ? 1.0f : 0.0f;
+            if (initial_tab == LIB_TAB_ALBUMS) {
                 view->kind = LIB_VIEW_ALBUMS;
                 populate_albums_view(controller, view);
             } else {
@@ -1167,32 +1216,51 @@ void library_controller_step(struct library_controller *controller, float delta_
             controller->long_press_armed = false;
             controller->pointer_active = false;
             controller->pointer_mode = LIB_PTR_NONE;
-            const struct library_view_frame *v = library_controller_current_view(controller);
-            if (v != NULL && v->kind == LIB_VIEW_ALBUMS &&
+            const struct library_view_frame *current_view =
+                library_controller_current_view(controller);
+            if (current_view != NULL && current_view->kind == LIB_VIEW_ALBUMS &&
                 controller->long_press_target_index >= 0 &&
-                (uint32_t)controller->long_press_target_index < v->item_count) {
-                uint32_t album_idx = v->item_indices[controller->long_press_target_index];
+                (uint32_t)controller->long_press_target_index < current_view->item_count) {
+                uint32_t album_index =
+                    current_view->item_indices[controller->long_press_target_index];
                 controller->quick_actions_open = true;
                 controller->quick_action_kind = LIB_QA_ALBUM;
-                controller->quick_action_target_index = album_idx;
-                controller->quick_action_target_id = controller->catalog->albums[album_idx].album_id;
+                controller->quick_action_target_index = album_index;
+                controller->quick_action_target_id =
+                    controller->catalog->albums[album_index].album_id;
                 controller->quick_action_auto_close_timer = 0.0f;
-            } else if (v != NULL && v->kind == LIB_VIEW_ARTISTS &&
+            } else if (current_view != NULL && current_view->kind == LIB_VIEW_ARTISTS &&
                        controller->long_press_target_index >= 0 &&
-                       (uint32_t)controller->long_press_target_index < v->item_count) {
-                uint32_t artist_idx = v->item_indices[controller->long_press_target_index];
+                       (uint32_t)controller->long_press_target_index < current_view->item_count) {
+                uint32_t artist_index =
+                    current_view->item_indices[controller->long_press_target_index];
                 controller->quick_actions_open = true;
                 controller->quick_action_kind = LIB_QA_ARTIST;
-                controller->quick_action_target_index = artist_idx;
+                controller->quick_action_target_index = artist_index;
                 controller->quick_action_target_id =
-                    controller->catalog->artists[artist_idx].artist_id;
+                    controller->catalog->artists[artist_index].artist_id;
                 controller->quick_action_auto_close_timer = 0.0f;
-            } else if (v != NULL && v->kind == LIB_VIEW_PLAYLISTS &&
+            } else if (current_view != NULL && current_view->kind == LIB_VIEW_TRACKS &&
                        controller->long_press_target_index >= 0 &&
-                       (uint32_t)controller->long_press_target_index < v->item_count) {
-                uint32_t pl_idx = v->item_indices[controller->long_press_target_index];
+                       (uint32_t)controller->long_press_target_index < current_view->item_count &&
+                       controller->catalog != NULL) {
+                uint32_t track_index =
+                    current_view->item_indices[controller->long_press_target_index];
+                if (track_index < controller->catalog->track_count) {
+                    controller->quick_actions_open = true;
+                    controller->quick_action_kind = LIB_QA_TRACK;
+                    controller->quick_action_target_index = track_index;
+                    controller->quick_action_target_id =
+                        controller->catalog->tracks[track_index].track_id;
+                    controller->quick_action_auto_close_timer = 0.0f;
+                }
+            } else if (current_view != NULL && current_view->kind == LIB_VIEW_PLAYLISTS &&
+                       controller->long_press_target_index >= 0 &&
+                       (uint32_t)controller->long_press_target_index < current_view->item_count) {
+                uint32_t playlist_index =
+                    current_view->item_indices[controller->long_press_target_index];
                 controller->playlist_sheet_open = true;
-                controller->playlist_sheet_index = pl_idx;
+                controller->playlist_sheet_index = playlist_index;
                 controller->playlist_sheet_pressed_button = -1;
                 controller->delete_hold_progress = 0.0f;
             }
@@ -1422,14 +1490,14 @@ void library_controller_handle_touch(struct library_controller *controller,
         }
 
         /* 3. Sort buttons */
-        if (view->kind == LIB_VIEW_ALBUMS &&
+        if (view->kind == LIB_VIEW_ALBUMS && view->item_count > 0u &&
             point_in_circle(event->x, event->y, LIBRARY_CRATE_SORT_BTN_X, LIBRARY_CRATE_SORT_BTN_Y,
                             LIBRARY_BOTTOM_BTN_HIT_RADIUS_PX)) {
             controller->sort_long_press_armed = true;
             controller->sort_long_press_elapsed_seconds = 0.0f;
             return;
         }
-        if (view->kind == LIB_VIEW_ARTISTS &&
+        if (view->kind == LIB_VIEW_ARTISTS && view->item_count > 0u &&
             point_in_circle(event->x, event->y, LIBRARY_ARTISTS_SORT_BTN_X,
                             LIBRARY_ARTISTS_SORT_BTN_Y, LIBRARY_BOTTOM_BTN_HIT_RADIUS_PX)) {
             controller->sort_long_press_armed = true;
@@ -1484,7 +1552,8 @@ void library_controller_handle_touch(struct library_controller *controller,
             if (row >= 0) {
                 controller->pressed_row_index = row;
                 controller->pressed_row_intensity = 0.35f;
-                if (view->kind == LIB_VIEW_ARTISTS || view->kind == LIB_VIEW_PLAYLISTS) {
+                if (view->kind == LIB_VIEW_ARTISTS || view->kind == LIB_VIEW_PLAYLISTS ||
+                    view->kind == LIB_VIEW_TRACKS) {
                     controller->long_press_armed = true;
                     controller->long_press_elapsed_seconds = 0.0f;
                     controller->long_press_target_index = row;
@@ -1519,9 +1588,9 @@ void library_controller_handle_touch(struct library_controller *controller,
         }
 
         if (controller->pointer_mode == LIB_PTR_SORT_WHEEL) {
-            controller->sort_wheel_hovered_slot = library_resolve_sort_wheel_hovered_mode(
+            controller->sort_wheel_hovered_slot = library_resolve_sort_wheel_hovered_slot_for_view(
                 controller->sort_wheel_anchor_x, controller->sort_wheel_anchor_y, (float)event->x,
-                (float)event->y);
+                (float)event->y, view->is_favorites_detail);
             return;
         }
 
@@ -1700,12 +1769,15 @@ void library_controller_handle_touch(struct library_controller *controller,
         bool is_tap = (controller->max_pointer_drift_px <= LIBRARY_TAP_DRIFT_LIMIT_PX);
 
         if (controller->pointer_mode == LIB_PTR_SORT_WHEEL) {
-            int32_t chosen = controller->sort_wheel_hovered_slot;
+            int32_t chosen_slot = controller->sort_wheel_hovered_slot;
             controller->sort_wheel_open = false;
             controller->pointer_mode = LIB_PTR_NONE;
-            if (chosen >= 0 && chosen < (int32_t)LIBRARY_SORT_MODE_COUNT) {
-                apply_sort_mode_for_current_view(controller, (enum library_sort_mode)chosen,
-                                                 action_out);
+            struct library_sort_wheel_slot slots[LIBRARY_SORT_MODE_COUNT];
+            uint32_t slot_count = library_compute_sort_wheel_slots_for_view(
+                controller->sort_wheel_anchor_x, controller->sort_wheel_anchor_y,
+                view->is_favorites_detail, slots);
+            if (chosen_slot >= 0 && (uint32_t)chosen_slot < slot_count) {
+                apply_sort_mode_for_current_view(controller, slots[chosen_slot].mode, action_out);
             }
             return;
         }
@@ -1758,6 +1830,14 @@ void library_controller_handle_touch(struct library_controller *controller,
                     (void)library_state_toggle_artist_favorite(
                         controller->state_store, controller->catalog,
                         controller->quick_action_target_id);
+                } else if (controller->quick_action_kind == LIB_QA_TRACK) {
+                    (void)library_state_toggle_track_favorite(
+                        controller->state_store, controller->catalog,
+                        controller->quick_action_target_id);
+                }
+                if (view->is_favorites_detail) {
+                    refresh_view_items(controller, view);
+                    rebuild_seek_anchors_for_current_view(controller);
                 }
                 controller->quick_action_auto_close_timer = LIBRARY_QUICK_ACTION_AUTO_CLOSE_SECONDS;
                 if (action_out != NULL) {
@@ -1816,12 +1896,18 @@ void library_controller_handle_touch(struct library_controller *controller,
         }
 
         if (view->kind == LIB_VIEW_ALBUMS) {
-            if (point_in_circle(event->x, event->y, LIBRARY_CRATE_SORT_BTN_X,
+            if (view->item_count > 0u &&
+                point_in_circle(event->x, event->y, LIBRARY_CRATE_SORT_BTN_X,
                                 LIBRARY_CRATE_SORT_BTN_Y, LIBRARY_BOTTOM_BTN_HIT_RADIUS_PX) &&
                 controller->state_store != NULL) {
+                enum library_sort_mode current_mode =
+                    library_controller_effective_sort_mode(controller, view);
                 enum library_sort_mode next_mode =
-                    (enum library_sort_mode)((controller->state_store->album_sort_mode + 1u) %
-                                             LIBRARY_SORT_MODE_COUNT);
+                    (enum library_sort_mode)((current_mode + 1u) % LIBRARY_SORT_MODE_COUNT);
+                if (view->is_favorites_detail && next_mode == LIBRARY_SORT_LIKED_FIRST) {
+                    next_mode =
+                        (enum library_sort_mode)((next_mode + 1u) % LIBRARY_SORT_MODE_COUNT);
+                }
                 apply_sort_mode_for_current_view(controller, next_mode, action_out);
                 return;
             }
