@@ -3,6 +3,8 @@
 
 #include "library_catalog.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -10,13 +12,14 @@
 #define LIBRARY_COVER_SIZE_PX 120u
 #define LIBRARY_COVER_PIXEL_COUNT (LIBRARY_COVER_SIZE_PX * LIBRARY_COVER_SIZE_PX)
 #define LIBRARY_COVER_BYTE_SIZE (LIBRARY_COVER_PIXEL_COUNT * sizeof(uint16_t))
-#define LIBRARY_COVER_LRU_SLOTS 128u
-#define LIBRARY_COVER_BOOT_RAM_PRELOAD_LIMIT 32u
-#define LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS 4000000ull
+#define LIBRARY_COVER_LRU_SLOTS 256u
+#define LIBRARY_COVER_BOOT_RAM_PRELOAD_LIMIT 64u
+#define LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS 2000000ull
 #define LIBRARY_COVER_PENDING_QUEUE_CAPACITY 12u
 #define LIBRARY_COVER_FAILED_SET_CAPACITY 64u
-#define LIBRARY_COVER_MAX_INPUT_BYTES (8u * 1024u * 1024u)
-#define LIBRARY_COVER_MAX_DIMENSION_PX 4096u
+#define LIBRARY_COVER_MAX_FAIL_LOGS 8u
+#define LIBRARY_COVER_MAX_INPUT_BYTES (16u * 1024u * 1024u)
+#define LIBRARY_COVER_MAX_DIMENSION_PX 3072u
 
 enum library_cover_fail_reason {
     LIBRARY_COVER_FAIL_NONE = 0,
@@ -42,6 +45,12 @@ struct library_cover_request {
     uint32_t data_length;
 };
 
+struct library_cover_fail_entry {
+    uint32_t done_index;
+    enum library_cover_fail_reason reason;
+    char path[256];
+};
+
 struct library_cover_cache {
     char covers_directory[320];
     struct library_cover_slot *slots;
@@ -64,6 +73,21 @@ struct library_cover_cache {
     uint32_t precache_max_decode_ms;
     enum library_cover_fail_reason last_fail_reason;
     char last_fail_path[256];
+
+    pthread_t precache_thread;
+    bool precache_thread_running;
+    struct library_cover_request *precache_jobs;
+    uint32_t precache_job_count;
+    _Atomic bool precache_cancel_requested;
+    _Atomic bool precache_worker_finished;
+    _Atomic uint32_t precache_atomic_done;
+    _Atomic uint32_t precache_atomic_decoded;
+    _Atomic uint32_t precache_atomic_disk_hits;
+    _Atomic uint32_t precache_atomic_failed;
+    _Atomic uint32_t precache_atomic_max_decode_ms;
+    struct library_cover_fail_entry precache_fail_logs[LIBRARY_COVER_MAX_FAIL_LOGS];
+    _Atomic uint32_t precache_fail_log_count;
+    uint32_t precache_fail_log_read_cursor;
 
     uint32_t window_ram_hits;
     uint32_t window_disk_hits;

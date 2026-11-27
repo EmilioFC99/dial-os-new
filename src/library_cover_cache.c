@@ -1,5 +1,7 @@
 #include "library_cover_cache.h"
 
+#include "jpeg_fast_thumb.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -7,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #pragma GCC diagnostic push
@@ -62,6 +65,7 @@ void library_cover_cache_clear(struct library_cover_cache *cache) {
     if (cache == NULL) {
         return;
     }
+    library_cover_cache_cancel_boot_precache(cache);
     if (cache->slots != NULL) {
         memset(cache->slots, 0, LIBRARY_COVER_LRU_SLOTS * sizeof(struct library_cover_slot));
     }
@@ -79,6 +83,8 @@ void library_cover_cache_clear(struct library_cover_cache *cache) {
     cache->precache_max_decode_ms = 0u;
     cache->last_fail_reason = LIBRARY_COVER_FAIL_NONE;
     cache->last_fail_path[0] = '\0';
+    cache->precache_fail_log_read_cursor = 0u;
+    atomic_store(&cache->precache_fail_log_count, 0u);
     cache->window_ram_hits = 0u;
     cache->window_disk_hits = 0u;
     cache->window_decodes = 0u;
@@ -89,6 +95,7 @@ void library_cover_cache_destroy(struct library_cover_cache *cache) {
     if (cache == NULL) {
         return;
     }
+    library_cover_cache_cancel_boot_precache(cache);
     free(cache->slots);
     memset(cache, 0, sizeof(*cache));
 }
@@ -355,11 +362,17 @@ static void record_cover_failure(struct library_cover_cache *cache,
     copy_path_bounded(cache->last_fail_path, sizeof(cache->last_fail_path), source_path);
 }
 
-static bool decode_request_to_cache(struct library_cover_cache *cache,
-                                    const struct library_cover_request *request) {
+static bool decode_request_to_pixels(const struct library_cover_request *request,
+                                     uint16_t *pixels_out,
+                                     enum library_cover_fail_reason *fail_reason_out) {
+    if (jpeg_fast_thumb_decode_file(request->source_path, request->data_offset,
+                                    request->data_length, pixels_out, LIBRARY_COVER_SIZE_PX)) {
+        return true;
+    }
+
     FILE *file = fopen(request->source_path, "rb");
     if (file == NULL) {
-        record_cover_failure(cache, LIBRARY_COVER_FAIL_OPEN, request->source_path);
+        *fail_reason_out = LIBRARY_COVER_FAIL_OPEN;
         return false;
     }
 
@@ -367,14 +380,14 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
     if (request->cover_source_kind == LIBRARY_COVER_SIDECAR) {
         if (fseek(file, 0L, SEEK_END) != 0) {
             fclose(file);
-            record_cover_failure(cache, LIBRARY_COVER_FAIL_SIZE, request->source_path);
+            *fail_reason_out = LIBRARY_COVER_FAIL_SIZE;
             return false;
         }
         long file_size = ftell(file);
         if (file_size <= 0 || (uint64_t)file_size > LIBRARY_COVER_MAX_INPUT_BYTES ||
             fseek(file, 0L, SEEK_SET) != 0) {
             fclose(file);
-            record_cover_failure(cache, LIBRARY_COVER_FAIL_SIZE, request->source_path);
+            *fail_reason_out = LIBRARY_COVER_FAIL_SIZE;
             return false;
         }
         payload_length = (size_t)file_size;
@@ -382,7 +395,7 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
         if (request->data_length == 0u || request->data_length > LIBRARY_COVER_MAX_INPUT_BYTES ||
             fseek(file, (long)request->data_offset, SEEK_SET) != 0) {
             fclose(file);
-            record_cover_failure(cache, LIBRARY_COVER_FAIL_SIZE, request->source_path);
+            *fail_reason_out = LIBRARY_COVER_FAIL_SIZE;
             return false;
         }
         payload_length = request->data_length;
@@ -391,14 +404,14 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
     uint8_t *raw_bytes = malloc(payload_length);
     if (raw_bytes == NULL) {
         fclose(file);
-        record_cover_failure(cache, LIBRARY_COVER_FAIL_SIZE, request->source_path);
+        *fail_reason_out = LIBRARY_COVER_FAIL_SIZE;
         return false;
     }
     size_t read_bytes = fread(raw_bytes, 1u, payload_length, file);
     fclose(file);
     if (read_bytes != payload_length) {
         free(raw_bytes);
-        record_cover_failure(cache, LIBRARY_COVER_FAIL_OPEN, request->source_path);
+        *fail_reason_out = LIBRARY_COVER_FAIL_OPEN;
         return false;
     }
 
@@ -411,7 +424,7 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
         (uint32_t)image_width > LIBRARY_COVER_MAX_DIMENSION_PX ||
         (uint32_t)image_height > LIBRARY_COVER_MAX_DIMENSION_PX) {
         free(raw_bytes);
-        record_cover_failure(cache, LIBRARY_COVER_FAIL_INFO, request->source_path);
+        *fail_reason_out = LIBRARY_COVER_FAIL_INFO;
         return false;
     }
 
@@ -422,20 +435,29 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
                                              &decoded_height, &decoded_channels, 3);
     free(raw_bytes);
     if (decoded == NULL || decoded_width <= 0 || decoded_height <= 0) {
-        record_cover_failure(cache, LIBRARY_COVER_FAIL_DECODE, request->source_path);
+        *fail_reason_out = LIBRARY_COVER_FAIL_DECODE;
         return false;
     }
 
+    downsample_rgb888_to_rgb565(decoded, (uint32_t)decoded_width, (uint32_t)decoded_height,
+                                pixels_out);
+    stbi_image_free(decoded);
+    return true;
+}
+
+static bool decode_request_to_cache(struct library_cover_cache *cache,
+                                    const struct library_cover_request *request) {
     struct library_cover_slot *slot = allocate_lru_slot(cache, request->album_id);
     if (slot == NULL) {
-        stbi_image_free(decoded);
         record_cover_failure(cache, LIBRARY_COVER_FAIL_SLOT, request->source_path);
         return false;
     }
-    downsample_rgb888_to_rgb565(decoded, (uint32_t)decoded_width, (uint32_t)decoded_height,
-                                slot->pixels);
-    stbi_image_free(decoded);
-
+    enum library_cover_fail_reason fail_reason = LIBRARY_COVER_FAIL_NONE;
+    if (!decode_request_to_pixels(request, slot->pixels, &fail_reason)) {
+        slot->occupied = false;
+        record_cover_failure(cache, fail_reason, request->source_path);
+        return false;
+    }
     save_rgb565_to_disk_atomic(cache, request->album_id, slot->pixels);
     return true;
 }
@@ -476,11 +498,66 @@ bool library_cover_cache_step(struct library_cover_cache *cache, bool allow_heav
     return true;
 }
 
+static uint64_t worker_monotonic_ns(void) {
+    struct timespec timestamp;
+    if (clock_gettime(CLOCK_MONOTONIC, &timestamp) != 0) {
+        return 0ull;
+    }
+    return (uint64_t)timestamp.tv_sec * 1000000000ull + (uint64_t)timestamp.tv_nsec;
+}
+
+static void *precache_worker_main(void *argument) {
+    struct library_cover_cache *cache = (struct library_cover_cache *)argument;
+    uint16_t pixels[LIBRARY_COVER_PIXEL_COUNT];
+    uint32_t max_decode_ms = 0u;
+
+    for (uint32_t job_idx = 0u; job_idx < cache->precache_job_count; job_idx++) {
+        if (atomic_load(&cache->precache_cancel_requested)) {
+            break;
+        }
+        const struct library_cover_request *job = &cache->precache_jobs[job_idx];
+        if (has_rgb565_on_disk(cache, job->album_id)) {
+            atomic_fetch_add(&cache->precache_atomic_disk_hits, 1u);
+            atomic_fetch_add(&cache->precache_atomic_done, 1u);
+            continue;
+        }
+
+        uint64_t start_ns = worker_monotonic_ns();
+        enum library_cover_fail_reason fail_reason = LIBRARY_COVER_FAIL_NONE;
+        if (decode_request_to_pixels(job, pixels, &fail_reason)) {
+            save_rgb565_to_disk_atomic(cache, job->album_id, pixels);
+            atomic_fetch_add(&cache->precache_atomic_decoded, 1u);
+        } else {
+            uint32_t fail_slot = atomic_load(&cache->precache_fail_log_count);
+            if (fail_slot < LIBRARY_COVER_MAX_FAIL_LOGS) {
+                cache->precache_fail_logs[fail_slot].done_index =
+                    atomic_load(&cache->precache_atomic_done) + 1u;
+                cache->precache_fail_logs[fail_slot].reason = fail_reason;
+                copy_path_bounded(cache->precache_fail_logs[fail_slot].path,
+                                  sizeof(cache->precache_fail_logs[fail_slot].path),
+                                  job->source_path);
+                atomic_store(&cache->precache_fail_log_count, fail_slot + 1u);
+            }
+            atomic_fetch_add(&cache->precache_atomic_failed, 1u);
+        }
+        uint64_t elapsed_ms = (worker_monotonic_ns() - start_ns) / 1000000ull;
+        if ((uint32_t)elapsed_ms > max_decode_ms) {
+            max_decode_ms = (uint32_t)elapsed_ms;
+            atomic_store(&cache->precache_atomic_max_decode_ms, max_decode_ms);
+        }
+        atomic_fetch_add(&cache->precache_atomic_done, 1u);
+    }
+
+    atomic_store(&cache->precache_worker_finished, true);
+    return NULL;
+}
+
 void library_cover_cache_begin_boot_precache(struct library_cover_cache *cache,
                                              const struct library_catalog *catalog) {
     if (cache == NULL) {
         return;
     }
+    library_cover_cache_cancel_boot_precache(cache);
     cache->precache_active = false;
     cache->precache_cursor = 0u;
     cache->precache_total = 0u;
@@ -490,21 +567,74 @@ void library_cover_cache_begin_boot_precache(struct library_cover_cache *cache,
     cache->precache_ram_preloaded = 0u;
     cache->precache_failed = 0u;
     cache->precache_max_decode_ms = 0u;
+    cache->precache_fail_log_read_cursor = 0u;
+    atomic_store(&cache->precache_cancel_requested, false);
+    atomic_store(&cache->precache_worker_finished, false);
+    atomic_store(&cache->precache_atomic_done, 0u);
+    atomic_store(&cache->precache_atomic_decoded, 0u);
+    atomic_store(&cache->precache_atomic_disk_hits, 0u);
+    atomic_store(&cache->precache_atomic_failed, 0u);
+    atomic_store(&cache->precache_atomic_max_decode_ms, 0u);
+    atomic_store(&cache->precache_fail_log_count, 0u);
+
     if (catalog == NULL || catalog->album_count == 0u || cache->covers_directory[0] == '\0') {
         return;
     }
+    uint32_t cover_count = 0u;
     for (uint32_t index = 0u; index < catalog->album_count; index++) {
         if (catalog->albums[index].cover_source_kind != LIBRARY_COVER_NONE) {
-            cache->precache_total++;
+            cover_count++;
         }
     }
-    cache->precache_active = (cache->precache_total > 0u);
+    if (cover_count == 0u) {
+        return;
+    }
+
+    cache->precache_jobs = calloc(cover_count, sizeof(struct library_cover_request));
+    if (cache->precache_jobs == NULL) {
+        return;
+    }
+    uint32_t job_index = 0u;
+    for (uint32_t index = 0u; index < catalog->album_count; index++) {
+        const struct library_album *album = &catalog->albums[index];
+        if (album->cover_source_kind == LIBRARY_COVER_NONE) {
+            continue;
+        }
+        struct library_cover_request *job = &cache->precache_jobs[job_index++];
+        job->album_id = album->album_id;
+        job->cover_source_kind = album->cover_source_kind;
+        copy_path_bounded(job->source_path, sizeof(job->source_path),
+                          library_catalog_get_string(catalog, album->cover_path_offset));
+        job->data_offset = album->cover_data_offset;
+        job->data_length = album->cover_data_length;
+    }
+    cache->precache_job_count = job_index;
+    cache->precache_total = job_index;
+    cache->precache_active = true;
+
+    if (pthread_create(&cache->precache_thread, NULL, precache_worker_main, cache) == 0) {
+        cache->precache_thread_running = true;
+    } else {
+        /* Fallback to synchronous stepping if thread creation fails */
+        cache->precache_thread_running = false;
+        free(cache->precache_jobs);
+        cache->precache_jobs = NULL;
+        cache->precache_job_count = 0u;
+    }
 }
 
 void library_cover_cache_cancel_boot_precache(struct library_cover_cache *cache) {
     if (cache == NULL) {
         return;
     }
+    if (cache->precache_thread_running) {
+        atomic_store(&cache->precache_cancel_requested, true);
+        (void)pthread_join(cache->precache_thread, NULL);
+        cache->precache_thread_running = false;
+    }
+    free(cache->precache_jobs);
+    cache->precache_jobs = NULL;
+    cache->precache_job_count = 0u;
     cache->precache_active = false;
 }
 
@@ -519,9 +649,55 @@ bool library_cover_cache_step_boot_precache(struct library_cover_cache *cache,
     if (cache == NULL || !cache->precache_active || catalog == NULL) {
         return false;
     }
+
+    if (cache->precache_thread_running) {
+        cache->precache_done = atomic_load(&cache->precache_atomic_done);
+        cache->precache_decoded = atomic_load(&cache->precache_atomic_decoded);
+        cache->precache_disk_hits = atomic_load(&cache->precache_atomic_disk_hits);
+        cache->precache_failed = atomic_load(&cache->precache_atomic_failed);
+        cache->precache_max_decode_ms = atomic_load(&cache->precache_atomic_max_decode_ms);
+
+        if (!atomic_load(&cache->precache_worker_finished)) {
+            return true;
+        }
+        (void)pthread_join(cache->precache_thread, NULL);
+        cache->precache_thread_running = false;
+        free(cache->precache_jobs);
+        cache->precache_jobs = NULL;
+        cache->precache_job_count = 0u;
+        cache->precache_cursor = 0u;
+    }
+
+    if (cache->precache_jobs == NULL && !cache->precache_thread_running &&
+        atomic_load(&cache->precache_worker_finished)) {
+        /* Cooperative RAM preload of up to LIBRARY_COVER_BOOT_RAM_PRELOAD_LIMIT covers */
+        uint64_t start_ns = (monotonic_ns != NULL) ? monotonic_ns(clock_context) : 0ull;
+        while (cache->precache_cursor < catalog->album_count &&
+               cache->precache_ram_preloaded < LIBRARY_COVER_BOOT_RAM_PRELOAD_LIMIT) {
+            const struct library_album *album = &catalog->albums[cache->precache_cursor];
+            cache->precache_cursor++;
+            if (album->cover_source_kind == LIBRARY_COVER_NONE) {
+                continue;
+            }
+            if (!has_slot_in_ram(cache, album->album_id) &&
+                try_load_rgb565_from_disk(cache, album->album_id) != NULL) {
+                cache->precache_ram_preloaded++;
+            }
+            if (monotonic_ns != NULL && budget_ns > 0ull &&
+                (monotonic_ns(clock_context) - start_ns) >= budget_ns) {
+                break;
+            }
+        }
+        if (cache->precache_cursor >= catalog->album_count ||
+            cache->precache_ram_preloaded >= LIBRARY_COVER_BOOT_RAM_PRELOAD_LIMIT) {
+            cache->precache_active = false;
+        }
+        return true;
+    }
+
+    /* Synchronous fallback path if pthread_create failed */
     uint64_t start_ns = (monotonic_ns != NULL) ? monotonic_ns(clock_context) : 0ull;
     bool did_work = false;
-
     while (cache->precache_cursor < catalog->album_count) {
         const struct library_album *album = &catalog->albums[cache->precache_cursor];
         cache->precache_cursor++;
@@ -533,10 +709,9 @@ bool library_cover_cache_step_boot_precache(struct library_cover_cache *cache,
             cache->precache_disk_hits++;
             cache->precache_done++;
             if (cache->precache_ram_preloaded < LIBRARY_COVER_BOOT_RAM_PRELOAD_LIMIT &&
-                !has_slot_in_ram(cache, album->album_id)) {
-                if (try_load_rgb565_from_disk(cache, album->album_id) != NULL) {
-                    cache->precache_ram_preloaded++;
-                }
+                !has_slot_in_ram(cache, album->album_id) &&
+                try_load_rgb565_from_disk(cache, album->album_id) != NULL) {
+                cache->precache_ram_preloaded++;
             }
             if (monotonic_ns != NULL && budget_ns > 0ull &&
                 (monotonic_ns(clock_context) - start_ns) >= budget_ns) {
@@ -544,7 +719,6 @@ bool library_cover_cache_step_boot_precache(struct library_cover_cache *cache,
             }
             continue;
         }
-
         struct library_cover_request request;
         memset(&request, 0, sizeof(request));
         request.album_id = album->album_id;
@@ -553,27 +727,15 @@ bool library_cover_cache_step_boot_precache(struct library_cover_cache *cache,
                           library_catalog_get_string(catalog, album->cover_path_offset));
         request.data_offset = album->cover_data_offset;
         request.data_length = album->cover_data_length;
-
-        uint64_t decode_start_ns = (monotonic_ns != NULL) ? monotonic_ns(clock_context) : 0ull;
-        bool decoded_ok = decode_request_to_cache(cache, &request);
-        if (monotonic_ns != NULL) {
-            uint64_t elapsed_ns = monotonic_ns(clock_context) - decode_start_ns;
-            uint32_t elapsed_ms = (uint32_t)(elapsed_ns / 1000000ull);
-            if (elapsed_ms > cache->precache_max_decode_ms) {
-                cache->precache_max_decode_ms = elapsed_ms;
-            }
-        }
-        if (decoded_ok) {
+        if (decode_request_to_cache(cache, &request)) {
             cache->precache_decoded++;
         } else {
             cache->precache_failed++;
             mark_album_failed(cache, album->album_id);
         }
         cache->precache_done++;
-        /* Yield after 1 heavy JPEG/PNG decode so Boot Act 02 stays animated. */
         break;
     }
-
     if (cache->precache_cursor >= catalog->album_count) {
         cache->precache_active = false;
     }

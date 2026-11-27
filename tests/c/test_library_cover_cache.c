@@ -1,5 +1,6 @@
 #include "test_runner.h"
 
+#include "jpeg_fast_thumb.h"
 #include "library_cover_cache.h"
 
 #include <stdio.h>
@@ -251,20 +252,19 @@ static void test_boot_cover_precache_warm_and_cold(void) {
     struct library_cover_cache cache;
     library_cover_cache_initialize(&cache, covers_dir);
 
-    /* Cold precache: 2 albums with covers, 1 heavy decode per step */
+    /* Cold precache on background pthread: poll until finished */
     uint64_t clock_ns = 0ull;
     library_cover_cache_begin_boot_precache(&cache, &catalog);
     TEST_ASSERT_TRUE(library_cover_cache_is_boot_precaching(&cache));
     TEST_ASSERT_EQ_U32(2u, cache.precache_total);
-    TEST_ASSERT_TRUE(library_cover_cache_step_boot_precache(
-        &cache, &catalog, fake_precache_clock_ns, &clock_ns, LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS));
-    TEST_ASSERT_EQ_U32(1u, cache.precache_decoded);
-    TEST_ASSERT_TRUE(library_cover_cache_is_boot_precaching(&cache));
 
-    while (library_cover_cache_is_boot_precaching(&cache)) {
+    for (uint32_t spin = 0u; spin < 500u && library_cover_cache_is_boot_precaching(&cache);
+         spin++) {
         (void)library_cover_cache_step_boot_precache(&cache, &catalog, fake_precache_clock_ns,
                                                    &clock_ns, LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
+        usleep(1000u);
     }
+    TEST_ASSERT_FALSE(library_cover_cache_is_boot_precaching(&cache));
     TEST_ASSERT_EQ_U32(2u, cache.precache_done);
     TEST_ASSERT_EQ_U32(2u, cache.precache_decoded);
     TEST_ASSERT_EQ_U32(0u, cache.precache_disk_hits);
@@ -272,10 +272,13 @@ static void test_boot_cover_precache_warm_and_cold(void) {
     /* Warm precache: skips JPEG/PNG decode, hits disk and preloads RAM */
     library_cover_cache_clear(&cache);
     library_cover_cache_begin_boot_precache(&cache, &catalog);
-    while (library_cover_cache_is_boot_precaching(&cache)) {
+    for (uint32_t spin = 0u; spin < 500u && library_cover_cache_is_boot_precaching(&cache);
+         spin++) {
         (void)library_cover_cache_step_boot_precache(&cache, &catalog, fake_precache_clock_ns,
                                                    &clock_ns, LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
+        usleep(1000u);
     }
+    TEST_ASSERT_FALSE(library_cover_cache_is_boot_precaching(&cache));
     TEST_ASSERT_EQ_U32(0u, cache.precache_decoded);
     TEST_ASSERT_EQ_U32(2u, cache.precache_disk_hits);
     TEST_ASSERT_EQ_U32(2u, cache.precache_ram_preloaded);
@@ -285,8 +288,54 @@ static void test_boot_cover_precache_warm_and_cold(void) {
     (void)system(rm_cmd);
 }
 
+static void test_jpeg_fast_thumb_large_baseline_decode(void) {
+    char jpg_path[256];
+    snprintf(jpg_path, sizeof(jpg_path), "/tmp/dialos_fast_jpg_%d.jpg", (int)getpid());
+    FILE *file = fopen(jpg_path, "wb");
+    TEST_ASSERT_TRUE(file != NULL);
+
+    /* Minimal valid 960x960 grayscale baseline SOF0 JPEG (14,400 blocks * 2 zero bits) */
+    static const uint8_t JPEG_HEADER[] = {
+        0xFFu, 0xD8u,                                           /* SOI */
+        0xFFu, 0xDBu, 0x00u, 0x43u, 0x00u,                      /* DQT id=0, 8-bit */
+        0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, /* 64 quant entries */
+        0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u,
+        0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u,
+        0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u,
+        0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u,
+        0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u,
+        0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u,
+        0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u, 0x01u,
+        0xFFu, 0xC4u, 0x00u, 0x14u, 0x00u,                      /* DHT DC id=0: 1 code '0' -> 0 */
+        0x01u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u,
+        0xFFu, 0xC4u, 0x00u, 0x14u, 0x10u,                      /* DHT AC id=0: 1 code '0' -> EOB */
+        0x01u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u,
+        0xFFu, 0xC0u, 0x00u, 0x0Bu, 0x08u, 0x03u, 0xC0u, 0x03u, 0xC0u, /* SOF0 960x960 */
+        0x01u, 0x01u, 0x11u, 0x00u,
+        0xFFu, 0xDAu, 0x00u, 0x08u, 0x01u, 0x01u, 0x00u, 0x00u, 0x3Fu, 0x00u, /* SOS */
+    };
+    fwrite(JPEG_HEADER, 1u, sizeof(JPEG_HEADER), file);
+    uint8_t zero_scan[3600];
+    memset(zero_scan, 0, sizeof(zero_scan));
+    fwrite(zero_scan, 1u, sizeof(zero_scan), file);
+    static const uint8_t EOI[2] = {0xFFu, 0xD9u};
+    fwrite(EOI, 1u, 2u, file);
+    fclose(file);
+
+    uint16_t rgb565[LIBRARY_COVER_PIXEL_COUNT];
+    memset(rgb565, 0, sizeof(rgb565));
+    TEST_ASSERT_TRUE(jpeg_fast_thumb_decode_file(jpg_path, 0u, 0u, rgb565, LIBRARY_COVER_SIZE_PX));
+    /* luma=128 -> R=16, G=32, B=16 -> 0x8410 */
+    TEST_ASSERT_EQ_U32(0x8410u, rgb565[0]);
+    TEST_ASSERT_EQ_U32(0x8410u, rgb565[LIBRARY_COVER_PIXEL_COUNT - 1u]);
+    unlink(jpg_path);
+}
+
 void run_library_cover_cache_tests(void) {
     printf("Suite: library_cover_cache\n");
     RUN_TEST(test_cover_decode_disk_cache_and_lru);
     RUN_TEST(test_boot_cover_precache_warm_and_cold);
+    RUN_TEST(test_jpeg_fast_thumb_large_baseline_decode);
 }
