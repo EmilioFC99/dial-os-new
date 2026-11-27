@@ -15,13 +15,16 @@ These rules apply to every session, subagent, and swarm worker operating in this
 - **SD-Card Non-Destruction (Non-Negotiable):**
   - Never ship an unpatched `mq_player` containing `rm -rf %s` in `mount_sdcard()`; `dial-os-mac build` must patch and verify `rmdir  %s`.
   - Never delete, format, or modify user music files during deploy or on-device runs; write only inside `.dial-os/` atomically (`temp` + `fsync` + `rename`).
+  - Open all read-only user media/artwork files on `/tmp/sdcard` with `O_RDONLY | O_NOATIME` (e.g. `library_fopen_readonly_noatime()`); stock `mq_player` mounts FAT32 without `noatime` and shifts `sys_tz` mid-boot, so `fopen()` `atime` writeback overwrites on-disk FAT32 `mtime`s.
   - Disable `mq_player`'s unsynced idle `poweroff -f` (`0664=0`) and `fsync()` logs/state.
 - **On-Device Transparency:** Any on-device test or long-running operation must show live animated progress (spinner/progress bar + current step) so the operator always knows the device has not frozen.
+- **Pre-1.0 YAGNI (No Throwaway Migration Code):** While DialOS is pre-1.0 and unreleased, never add one-time backwards-compatibility or legacy `.dial-os/` cleanup code; remove obsolete dev cache files manually before `./dial-os-mac sd-update`.
 - **No Theme Leakage:** Zero theme names in file names, identifiers, or strings; use semantic **Dark Mode** and **Light Mode** tokens only.
 - **Hardware-Verified Only:** No milestone is complete until verified on the real FiiO Snowsky Disc (`V2.57`).
 
 ## 3. Verified Hardware Runtime Invariants
 - **Non-Blocking 60 FPS UI Thread (Dual-Core X2000):** Keep Core 0 strictly non-blocking (`avg_ms <= 14 ms`, `slow_frames == 0`). Offload heavy SD card I/O and artwork decoding to a `-static -pthread` worker on Core 1 with mutex-guarded handoff, or bound cooperative main-thread work to `<= 1 ms/frame`. Never run blocking `statvfs`/directory scans on the render path, and always clamp frame `delta_seconds <= 0.05 s` so OS hiccups cannot skip choreography acts.
+- **FAT32 `sys_tz` & Embedded SQLite 3 Invariants:** Stock `mq_player` mutates kernel `sys_tz` mid-boot via `settimeofday()`; defer library scans until `aa24`, normalize FAT32 `st_mtime` via raw `syscall(SYS_gettimeofday, &tv, &tz)` (`raw_mtime - tz.minutes_west * 60`, since musl ignores `tz`), and reuse walk `st_mtime` instead of re-statting mid-scan. Always open `.dial-os/library.db` with `PRAGMA journal_mode = DELETE` (never `WAL` on FAT32/exFAT), keep Core 0 off `database->mutex` while Core 1 commits, and join all Core 1 workers before `library_db_close()`.
 - **Span-Vectorized Integer Rendering:** Hoist clipping, `180°` coordinate mapping, and alpha precomputation out of inner pixel loops. Use integer fixed-point alpha/blits and per-row span fills (never per-pixel float math or `sqrtf()`).
 - **RAM-Bounded Asset Decoding & Caching (~64 MB Target):** Never decode full-resolution user artwork into RAM. Stream-downsample thumbnails (`< 250 KB` peak RAM) into pre-cached `120×120` RGB565 files under `.dial-os/` plus a bounded RAM LRU so scrolling never decodes synchronously.
 - **Smooth Choreography & Zero Empty-State Flashes:** Defer indexing, warm-boot delta checks, and precaching to Boot Act 02 (after `aa24` signal lock) without jumping progress; never wipe a warm catalog while on Home.

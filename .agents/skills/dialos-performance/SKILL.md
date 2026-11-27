@@ -35,9 +35,9 @@ description: >-
 ## 3. Memory-Bounded Artwork & Cache Workflow
 
 - **Stream-Downsample Large JPEGs:** Use a streaming 1/8-scale DC-only baseline JPEG decoder (`< 250 KB` RAM) before falling back, preventing OOM on `4000–5100 px` / `20 MB` embedded covers.
-- **Pre-Cache to `.dial-os/`:** Persist `120×120` `.rgb565` thumbnails atomically (`temp` + `fsync` + `rename`) and preload a bounded RAM LRU (`~64` slots at boot, `256` max) so scrolling is pure memory blit.
+- **Pre-Cache to `.dial-os/`:** Persist `120×120` `.rgb565` thumbnails atomically (`temp` + `fsync` + `rename`) into 256-bucket sharded paths (`.dial-os/covers/<xx>/<album_uid>.rgb565`), open source media/covers with `O_NOATIME`, and preload a bounded RAM LRU (`~64` slots at boot, `256` max) paired with a `96`-row SQLite sliding-window viewport + Core 1 async prefetch.
 - **Non-Destructive Cold-Cache Reset:** To re-benchmark cold boot/cover precaching without touching user music files, delete only DialOS cache artifacts:
-  `rm -f /Volumes/MUSIC/.dial-os/library.idx /Volumes/MUSIC/.dial-os/covers/*.rgb565`
+  `rm -rf /Volumes/MUSIC/.dial-os/library.db /Volumes/MUSIC/.dial-os/covers`
 
 ## 4. Boot Choreography & Warm-Catalog Continuity
 
@@ -48,5 +48,6 @@ description: >-
 
 Inspect `.dial-os/dialos.log` after on-device runs and verify:
 - `BOOT` / `PERF`: `fps_x10 >= 580`, `avg_ms <= 14`, `max_ms <= 18`, `slow_frames == 0`.
+- **Warm Incremental Sync:** Unchanged reboots log `BOOT scan_done ... added=0 updated=0 moved=0 removed=0`, skip `BOOT precache_start` (`0` pending covers), and finish inside Act 02 (`~2 s` for ~1,500 tracks) with zero FAT32 `mtime` drift.
 - Cover precache summary: `failed == 0` across all albums.
 - Visual smoothness: no skipped boot acts and no `"0 albums"` empty-state flashes on warm boot.
