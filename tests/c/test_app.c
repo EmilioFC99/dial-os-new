@@ -355,8 +355,10 @@ static void test_nominal_boot_aa24_retry_and_a607(void) {
     advance_runtime_ticks(&runtime, &fake, IPC_RETRY_INTERVAL_MS);
     TEST_ASSERT_TRUE(runtime.idle_poweroff_disabled);
     TEST_ASSERT_FALSE(runtime.pending_disable_idle_poweroff);
-    TEST_ASSERT_EQ_U32(1u, fake.ipc_count);
+    TEST_ASSERT_EQ_U32(3u, fake.ipc_count);
     TEST_ASSERT_EQ_STR("0664000C0000", fake.ipc_messages[0]);
+    TEST_ASSERT_EQ_STR("0711000C0078", fake.ipc_messages[1]);
+    TEST_ASSERT_EQ_STR("0647000C0001", fake.ipc_messages[2]);
 
     /* Complete remaining boot acts (~9.75s total) -> enters READY and writes telemetry */
     advance_runtime_ticks(&runtime, &fake, 9300u);
@@ -368,12 +370,12 @@ static void test_nominal_boot_aa24_retry_and_a607(void) {
     struct inbound_ipc_message a607 = {0};
     a607.kind = IPC_INBOUND_INPUT_MODE_READY;
     app_handle_ipc_message(&runtime, &a607);
-    TEST_ASSERT_EQ_U32(2u, fake.ipc_count);
-    TEST_ASSERT_EQ_STR("0664000C0000", fake.ipc_messages[1]);
+    TEST_ASSERT_EQ_U32(4u, fake.ipc_count);
+    TEST_ASSERT_EQ_STR("0664000C0000", fake.ipc_messages[3]);
 
     /* Second a607 does not spam 0664 */
     app_handle_ipc_message(&runtime, &a607);
-    TEST_ASSERT_EQ_U32(2u, fake.ipc_count);
+    TEST_ASSERT_EQ_U32(4u, fake.ipc_count);
     app_destroy(&runtime);
 }
 
@@ -470,20 +472,23 @@ static void test_volume_lock_wake_ordering_and_shutdown(void) {
     advance_runtime_ticks(&runtime, &fake, 9850u);
     TEST_ASSERT_EQ_I32(UI_STATE_READY, runtime.state);
 
-    /* Clamp at 0 on Vol- and max_volume (2) on Vol+ */
+    /* aa24 forces max_volume=120; Vol- clamps at 0 and Vol+ steps by 1 */
+    TEST_ASSERT_EQ_U32(MAX_VOLUME_DEFAULT, runtime.max_volume);
     app_handle_button_action(&runtime, BUTTON_ACTION_VOLUME_DOWN);
     TEST_ASSERT_EQ_U32(0u, runtime.volume_level);
     app_handle_button_action(&runtime, BUTTON_ACTION_VOLUME_UP);
     app_handle_button_action(&runtime, BUTTON_ACTION_VOLUME_UP);
     app_handle_button_action(&runtime, BUTTON_ACTION_VOLUME_UP);
-    TEST_ASSERT_EQ_U32(2u, runtime.volume_level);
+    TEST_ASSERT_EQ_U32(3u, runtime.volume_level);
 
-    /* Lock gates volume taps */
+    /* Locked pocket controls: Vol- adjusts global volume without waking LCD */
     app_handle_button_action(&runtime, BUTTON_ACTION_POWER_SHORT);
     TEST_ASSERT_EQ_I32(UI_STATE_LOCKED, runtime.state);
     TEST_ASSERT_TRUE(fake.is_sleeping);
     app_handle_button_action(&runtime, BUTTON_ACTION_VOLUME_DOWN);
     TEST_ASSERT_EQ_U32(2u, runtime.volume_level);
+    TEST_ASSERT_TRUE(fake.is_sleeping);
+    TEST_ASSERT_EQ_STR("0715000C0002", fake.ipc_messages[fake.ipc_count - 1u]);
 
     /* Wake must call begin_wake -> probe -> acquire -> present -> finish_wake */
     fake.trace_count = 0u;
@@ -558,7 +563,7 @@ static void test_home_touch_appearance_persistence_and_live_telemetry(void) {
     advance_runtime_ticks(&runtime, &fake, 9850u);
     TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
     TEST_ASSERT_EQ_U32(50u, runtime.home.telemetry.volume_percent);
-    TEST_ASSERT_EQ_U32(85u, runtime.home.telemetry.volume_limit_percent);
+    TEST_ASSERT_EQ_U32(100u, runtime.home.telemetry.volume_limit_percent);
 
     /* Advance 60 FPS frames on Home */
     uint32_t presents_before = fake.present_count;
@@ -587,8 +592,8 @@ static void test_home_touch_appearance_persistence_and_live_telemetry(void) {
     struct inbound_ipc_message vol_msg;
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a714000C0078", 12u, &vol_msg));
     app_handle_ipc_message(&runtime, &vol_msg);
-    TEST_ASSERT_EQ_U32(102u, runtime.volume_level);
-    TEST_ASSERT_EQ_U32(85u, runtime.home.telemetry.volume_percent);
+    TEST_ASSERT_EQ_U32(120u, runtime.volume_level);
+    TEST_ASSERT_EQ_U32(100u, runtime.home.telemetry.volume_percent);
 
     /* Drag to Settings (slot 3), tap to open inline preview, tap row 0 to toggle Light -> Dark */
     struct touch_event drag_down = {TOUCH_EVENT_DOWN, 120, 150, 10000ull};
@@ -810,15 +815,30 @@ static void test_library_boot_scan_playback_and_sd_hotswap(void) {
     advance_runtime_ticks(&runtime, &fake, 350u);
     TEST_ASSERT_EQ_I32(LIB_VIEW_TRACKS, library_controller_current_view(&runtime.library)->kind);
 
-    /* Tap track 0 -> sends 0100 M3U IPC and stays inside Library */
+    /* Tap track 0 -> sends 0100 M3U IPC and enters Now Playing */
     uint32_t ipc_before = fake.ipc_count;
     struct touch_event track_down = {TOUCH_EVENT_DOWN, 180, 126, 14000ull};
     struct touch_event track_up = {TOUCH_EVENT_UP, 180, 126, 14030ull};
     app_handle_touch_event(&runtime, &track_down);
     app_handle_touch_event(&runtime, &track_up);
-    TEST_ASSERT_EQ_I32(ACTIVE_SCREEN_LIBRARY_SHELL, runtime.home.active_screen);
+    TEST_ASSERT_EQ_I32(ACTIVE_SCREEN_NOW_PLAYING_SHELL, runtime.home.active_screen);
     TEST_ASSERT_TRUE(fake.ipc_count > ipc_before);
-    TEST_ASSERT_TRUE(strncmp(fake.ipc_messages[fake.ipc_count - 1u], "0100", 4u) == 0);
+    bool found_play_m3u = false;
+    for (uint32_t idx = ipc_before; idx < fake.ipc_count; idx++) {
+        if (strncmp(fake.ipc_messages[idx], "0100", 4u) == 0) {
+            found_play_m3u = true;
+        }
+    }
+    TEST_ASSERT_TRUE(found_play_m3u);
+
+    /* Left-edge back-swipe returns from Now Playing to Library */
+    struct touch_event back_down = {TOUCH_EVENT_DOWN, 6, 180, 14100ull};
+    struct touch_event back_move = {TOUCH_EVENT_MOVE, 180, 180, 14130ull};
+    struct touch_event back_up = {TOUCH_EVENT_UP, 180, 180, 14150ull};
+    app_handle_touch_event(&runtime, &back_down);
+    app_handle_touch_event(&runtime, &back_move);
+    app_handle_touch_event(&runtime, &back_up);
+    TEST_ASSERT_EQ_I32(ACTIVE_SCREEN_LIBRARY_SHELL, runtime.home.active_screen);
 
     /* Tap same active track -> sends 0201 toggle */
     ipc_before = fake.ipc_count;
@@ -1050,6 +1070,212 @@ static void test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts(vo
     (void)system(remove_command);
 }
 
+static void create_two_track_test_sd(char *root_out, size_t root_cap, char *music_out,
+                                     size_t music_cap, char *dialos_out, size_t dialos_cap,
+                                     char *temp_out, size_t temp_cap) {
+    char template_path[] = "/tmp/dialos_app_np_XXXXXX";
+    char *temp_root = mkdtemp(template_path);
+    TEST_ASSERT_TRUE(temp_root != NULL);
+    snprintf(root_out, root_cap, "%s", temp_root);
+    snprintf(music_out, music_cap, "%s/music", temp_root);
+    snprintf(dialos_out, dialos_cap, "%s/.dial-os", temp_root);
+    snprintf(temp_out, temp_cap, "%s/tmp", temp_root);
+    TEST_ASSERT_EQ_I32(0, mkdir(music_out, 0755));
+    TEST_ASSERT_EQ_I32(0, mkdir(temp_out, 0755));
+
+    char wav_one[320];
+    char wav_two[320];
+    snprintf(wav_one, sizeof(wav_one), "%s/01_alpha.wav", music_out);
+    snprintf(wav_two, sizeof(wav_two), "%s/02_beta.wav", music_out);
+    static const uint8_t WAV_HEADER[44] = {
+        'R', 'I', 'F', 'F', 36, 0, 0, 0, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' ',
+        16,  0,   0,   0,   1,  0, 2, 0, 68,  172, 0,   0,   16,  177, 2,   0,
+        4,   0,   16,  0,   'd', 'a', 't', 'a', 0, 0, 0, 0};
+    FILE *file_one = fopen(wav_one, "wb");
+    TEST_ASSERT_TRUE(file_one != NULL);
+    fwrite(WAV_HEADER, 1u, 44u, file_one);
+    fclose(file_one);
+    FILE *file_two = fopen(wav_two, "wb");
+    TEST_ASSERT_TRUE(file_two != NULL);
+    fwrite(WAV_HEADER, 1u, 44u, file_two);
+    fclose(file_two);
+}
+
+static void test_now_playing_global_buttons_locked_and_volume_hud(void) {
+    char root_dir[256], music_dir[288], dialos_dir[288], temp_dir[288];
+    create_two_track_test_sd(root_dir, sizeof(root_dir), music_dir, sizeof(music_dir), dialos_dir,
+                             sizeof(dialos_dir), temp_dir, sizeof(temp_dir));
+    char remove_command[320];
+    snprintf(remove_command, sizeof(remove_command), "rm -rf '%s'", root_dir);
+
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_dir;
+    operations.library_dialos_directory = dialos_dir;
+    operations.library_temp_directory = temp_dir;
+    fake.hardware.sd_mounted = true;
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+    struct inbound_ipc_message aa24 = make_aa24_message(40u, 85u, 100u);
+    app_handle_ipc_message(&runtime, &aa24);
+    wait_for_library_scan_ready(&runtime, &fake);
+    advance_runtime_ticks(&runtime, &fake, 10900u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+
+    /* Launch playback directly via Library All Songs -> enters Now Playing */
+    struct library_db_collection all_songs = {LIBRARY_DB_COLLECTION_TRACKS_ALL, 0};
+    struct library_db_row first_row;
+    TEST_ASSERT_EQ_U32(1u, library_db_fetch_window(&runtime.library_db, &all_songs,
+                                                   LIBRARY_SORT_ALPHABETICAL, 0u, 1u, &first_row));
+    struct playback_engine_effects effects;
+    TEST_ASSERT_TRUE(playback_engine_launch_context(&runtime.playback, &all_songs, "All Songs",
+                                                    first_row.id, false, false, &effects));
+    runtime.playback.slice_count = 2u;
+    now_playing_controller_enter(&runtime.now_playing, NP_RETURN_HOME, NP_OPEN_FROM_HOME, true,
+                                 0.0f, runtime.volume_level);
+    runtime.home.active_screen = ACTIVE_SCREEN_NOW_PLAYING_SHELL;
+    runtime.now_playing_entered_from_home = true;
+
+    /* Volume up on Now Playing activates Volume HUD & updates global volume */
+    app_handle_button_action(&runtime, BUTTON_ACTION_VOLUME_UP);
+    TEST_ASSERT_EQ_U32(41u, runtime.volume_level);
+    TEST_ASSERT_TRUE(runtime.now_playing.volume_hud_active);
+    TEST_ASSERT_EQ_U32(home_normalize_volume_percent(41u), runtime.home.telemetry.volume_percent);
+
+    /* Exit back to Home -> Vol+ updates global volume silently WITHOUT Volume HUD */
+    runtime.now_playing.volume_hud_active = false;
+    runtime.home.active_screen = ACTIVE_SCREEN_HOME;
+    runtime.now_playing_entered_from_home = false;
+    app_handle_button_action(&runtime, BUTTON_ACTION_VOLUME_UP);
+    TEST_ASSERT_EQ_U32(42u, runtime.volume_level);
+    TEST_ASSERT_FALSE(runtime.now_playing.volume_hud_active);
+    TEST_ASSERT_EQ_U32(home_normalize_volume_percent(42u), runtime.home.telemetry.volume_percent);
+
+    /* Global Play/Pause & Next/Prev work on Home and while UI_STATE_LOCKED without waking */
+    uint32_t ipc_before = fake.ipc_count;
+    app_handle_button_action(&runtime, BUTTON_ACTION_PLAY_PAUSE);
+    TEST_ASSERT_FALSE(runtime.playback.is_playing);
+    TEST_ASSERT_EQ_STR("0201000C0000", fake.ipc_messages[fake.ipc_count - 1u]);
+
+    app_handle_button_action(&runtime, BUTTON_ACTION_POWER_SHORT);
+    TEST_ASSERT_EQ_I32(UI_STATE_LOCKED, runtime.state);
+    TEST_ASSERT_TRUE(fake.is_sleeping);
+
+    ipc_before = fake.ipc_count;
+    app_handle_button_action(&runtime, BUTTON_ACTION_PLAY_PAUSE);
+    TEST_ASSERT_TRUE(runtime.playback.is_playing);
+    TEST_ASSERT_TRUE(fake.is_sleeping);
+    TEST_ASSERT_EQ_U32(ipc_before + 1u, fake.ipc_count);
+
+    app_handle_button_action(&runtime, BUTTON_ACTION_NEXT_TRACK);
+    TEST_ASSERT_EQ_U32(1u, runtime.playback.current_slot);
+    TEST_ASSERT_TRUE(fake.is_sleeping);
+
+    /* 3-second rule on Prev while elapsed >= 3000ms restarts current track */
+    runtime.playback.elapsed_ms = 5200u;
+    app_handle_button_action(&runtime, BUTTON_ACTION_PREV_TRACK);
+    TEST_ASSERT_EQ_U32(1u, runtime.playback.current_slot);
+    TEST_ASSERT_TRUE(strncmp(fake.ipc_messages[fake.ipc_count - 1u], "0103", 4u) == 0);
+    TEST_ASSERT_TRUE(fake.is_sleeping);
+
+    app_destroy(&runtime);
+    (void)system(remove_command);
+}
+
+static void test_now_playing_persistence_across_reboot_and_resume_seek(void) {
+    char root_dir[256], music_dir[288], dialos_dir[288], temp_dir[288];
+    create_two_track_test_sd(root_dir, sizeof(root_dir), music_dir, sizeof(music_dir), dialos_dir,
+                             sizeof(dialos_dir), temp_dir, sizeof(temp_dir));
+    char remove_command[320];
+    snprintf(remove_command, sizeof(remove_command), "rm -rf '%s'", root_dir);
+
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_dir;
+    operations.library_dialos_directory = dialos_dir;
+    operations.library_temp_directory = temp_dir;
+    fake.hardware.sd_mounted = true;
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+    struct inbound_ipc_message aa24 = make_aa24_message(50u, 85u, 100u);
+    app_handle_ipc_message(&runtime, &aa24);
+    wait_for_library_scan_ready(&runtime, &fake);
+    advance_runtime_ticks(&runtime, &fake, 10900u);
+
+    struct library_db_collection all_songs = {LIBRARY_DB_COLLECTION_TRACKS_ALL, 0};
+    struct library_db_row first_row;
+    TEST_ASSERT_EQ_U32(1u, library_db_fetch_window(&runtime.library_db, &all_songs,
+                                                   LIBRARY_SORT_ALPHABETICAL, 0u, 1u, &first_row));
+    struct playback_engine_effects effects;
+    TEST_ASSERT_TRUE(playback_engine_launch_context(&runtime.playback, &all_songs, "All Songs",
+                                                    first_row.id, false, false, &effects));
+    runtime.playback.slice_count = 2u;
+    TEST_ASSERT_TRUE(playback_engine_toggle_shuffle(&runtime.playback, &effects));
+    TEST_ASSERT_TRUE(playback_engine_cycle_repeat(&runtime.playback, &effects));
+    TEST_ASSERT_EQ_I32(PLAYBACK_REPEAT_ALL, runtime.playback.repeat_mode);
+
+    runtime.volume_level = 77u;
+    runtime.playback.elapsed_ms = 42000u;
+    runtime.persistence_dirty = true;
+
+    /* Shutdown saves volume 77 (before sending mute 0715000C0000) */
+    app_handle_button_action(&runtime, BUTTON_ACTION_POWER_LONG);
+    TEST_ASSERT_TRUE(fake.shutdown_called);
+    app_destroy(&runtime);
+
+    /* Reboot fresh runtime against same DB */
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_dir;
+    operations.library_dialos_directory = dialos_dir;
+    operations.library_temp_directory = temp_dir;
+    fake.hardware.sd_mounted = true;
+    app_initialize(&runtime, &operations);
+    app_handle_ipc_message(&runtime, &aa24);
+    wait_for_library_scan_ready(&runtime, &fake);
+    advance_runtime_ticks(&runtime, &fake, 10900u);
+
+    TEST_ASSERT_EQ_U32(77u, runtime.volume_level);
+    TEST_ASSERT_TRUE(runtime.playback.shuffle_enabled);
+    TEST_ASSERT_EQ_I32(PLAYBACK_REPEAT_ALL, runtime.playback.repeat_mode);
+    TEST_ASSERT_TRUE(runtime.playback.has_active_track);
+    TEST_ASSERT_FALSE(runtime.playback.is_playing);
+    TEST_ASSERT_EQ_U32(42000u, runtime.playback.elapsed_ms);
+
+    bool restored_vol_ipc = false;
+    for (uint32_t idx = 0u; idx < fake.ipc_count; idx++) {
+        if (strcmp(fake.ipc_messages[idx], "0715000C004D") == 0) {
+            restored_vol_ipc = true;
+        }
+    }
+    TEST_ASSERT_TRUE(restored_vol_ipc);
+
+    /* Pressing Play launches slice and sends deferred 0103 seek once a202 confirms playing */
+    uint32_t ipc_before = fake.ipc_count;
+    app_handle_button_action(&runtime, BUTTON_ACTION_PLAY_PAUSE);
+    TEST_ASSERT_TRUE(fake.ipc_count > ipc_before);
+    TEST_ASSERT_TRUE(strncmp(fake.ipc_messages[fake.ipc_count - 1u], "0100", 4u) == 0);
+
+    struct inbound_ipc_message playing_msg = {0};
+    playing_msg.kind = IPC_INBOUND_PLAYBACK_STATUS;
+    playing_msg.playback_status.has_state = true;
+    playing_msg.playback_status.state = IPC_PLAYBACK_PLAYING;
+    playing_msg.playback_status.has_track_path = true;
+    snprintf(playing_msg.playback_status.track_path,
+             sizeof(playing_msg.playback_status.track_path), "%s",
+             runtime.playback.active_track.path);
+    ipc_before = fake.ipc_count;
+    app_handle_ipc_message(&runtime, &playing_msg);
+    TEST_ASSERT_TRUE(fake.ipc_count > ipc_before);
+    TEST_ASSERT_TRUE(strncmp(fake.ipc_messages[fake.ipc_count - 1u], "0103", 4u) == 0);
+
+    app_destroy(&runtime);
+    (void)system(remove_command);
+}
+
 void run_app_tests(void) {
     printf("Suite: app\n");
     RUN_TEST(test_crash_formatting_and_count_parsing);
@@ -1066,4 +1292,6 @@ void run_app_tests(void) {
     RUN_TEST(test_library_boot_scan_playback_and_sd_hotswap);
     RUN_TEST(test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker);
     RUN_TEST(test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts);
+    RUN_TEST(test_now_playing_global_buttons_locked_and_volume_hud);
+    RUN_TEST(test_now_playing_persistence_across_reboot_and_resume_seek);
 }

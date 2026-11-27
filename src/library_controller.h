@@ -203,12 +203,16 @@ struct library_controller_action {
     enum library_action_kind kind;
     struct library_db_collection play_collection;
     uint32_t play_start_offset;
+    bool play_has_shuffle_override;
     bool play_shuffle;
+    bool play_from_album_crate;
+    char play_context_title[LIBRARY_DB_ROW_TEXT_BYTES];
     char play_first_track_path[LIBRARY_DB_PATH_BYTES];
     char play_first_track_title[LIBRARY_DB_ROW_TEXT_BYTES];
     int64_t play_first_track_id;
     int64_t play_first_album_id;
     uint64_t play_first_album_uid;
+    bool favorite_mutated;
     bool state_dirty;
 };
 
@@ -330,6 +334,7 @@ struct library_controller {
     int32_t playlist_sheet_pressed_button; /* -1 none, 0 play, 1 shuffle, 2 delete */
     float delete_hold_progress;
     float delete_completed_flash;
+    int64_t pending_deleted_playlist_id;
 };
 
 /* Pure geometry helpers */
@@ -365,6 +370,9 @@ void library_controller_reset_to_hub(struct library_controller *controller, bool
 void library_controller_refresh_catalog_views(struct library_controller *controller);
 void library_controller_set_active_playback(struct library_controller *controller,
                                             const char *track_path, bool is_playing);
+int64_t library_controller_take_deleted_playlist_id(struct library_controller *controller);
+void library_controller_focus_album_if_crate(struct library_controller *controller,
+                                             int64_t album_id);
 
 const struct library_db_row *library_controller_get_row(const struct library_controller *controller,
                                                         uint32_t item_index);

@@ -12,7 +12,10 @@
 #include "library_db.h"
 #include "library_scanner.h"
 #include "logger.h"
+#include "now_playing_controller.h"
+#include "now_playing_media.h"
 #include "platform.h"
+#include "playback_engine.h"
 #include "protocol.h"
 #include "theme.h"
 
@@ -57,6 +60,15 @@ struct app_runtime {
     struct library_db_scanner library_scanner;
     struct library_cover_cache library_covers;
     struct library_controller library;
+    struct playback_engine playback;
+    struct now_playing_media now_playing_media;
+    struct now_playing_controller now_playing;
+    bool boot_player_configured;
+    bool playback_state_restored;
+    bool persistence_dirty;
+    uint64_t persistence_dirty_since_ns;
+    bool now_playing_entered_from_home;
+    char last_synced_track_path[LIBRARY_DB_PATH_BYTES];
     bool library_scan_started;
     bool library_scan_finished_handled;
     bool library_prev_sd_mounted;
