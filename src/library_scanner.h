@@ -3,9 +3,13 @@
 
 #include "library_catalog.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+struct library_db;
 
 #define LIBRARY_SCAN_DEFAULT_BUDGET_NS 4000000ull
 #define LIBRARY_SCAN_DELTA_BUDGET_NS 1000000ull
@@ -80,5 +84,73 @@ bool library_scanner_is_ready(const struct library_scanner *scanner);
 bool library_parse_audio_file_metadata(const char *file_path, const char *root_path,
                                        struct library_track_input *input_out,
                                        char *string_scratch, size_t scratch_capacity);
+bool library_compute_audio_fingerprint(const char *file_path, uint64_t audio_start_offset,
+                                       uint64_t audio_payload_bytes, uint64_t *fingerprint_out);
+
+enum library_db_scan_phase {
+    LIB_DB_SCAN_IDLE = 0,
+    LIB_DB_SCAN_DISCOVERING = 1,
+    LIB_DB_SCAN_PARSING = 2,
+    LIB_DB_SCAN_COMMITTING = 3,
+    LIB_DB_SCAN_READY = 4
+};
+
+struct library_db_scan_telemetry {
+    uint32_t unchanged_count;
+    uint32_t modified_count;
+    uint32_t moved_count;
+    uint32_t moved_edited_count;
+    uint32_t added_count;
+    uint32_t deleted_count;
+    uint32_t files_opened;
+    uint32_t db_writes;
+    uint32_t m3u_parsed_count;
+    uint32_t sidecars_updated_count;
+};
+
+struct library_db_scan_snapshot {
+    enum library_db_scan_phase phase;
+    uint32_t discovered_files;
+    uint32_t delta_files;
+    uint32_t scanned_files;
+    uint32_t album_count;
+    uint32_t track_count;
+    bool music_root_exists;
+    bool ready;
+    bool has_changes;
+    struct library_db_scan_telemetry telemetry;
+};
+
+struct library_db_scanner {
+    struct library_db *database;
+    char root_path[256];
+    char covers_directory[320];
+
+    pthread_t worker_thread;
+    bool worker_running;
+    pthread_mutex_t snapshot_mutex;
+
+    _Atomic uint32_t atomic_phase;
+    _Atomic uint32_t atomic_discovered_files;
+    _Atomic uint32_t atomic_delta_files;
+    _Atomic uint32_t atomic_scanned_files;
+    _Atomic uint32_t atomic_album_count;
+    _Atomic uint32_t atomic_track_count;
+    _Atomic bool atomic_music_root_exists;
+    _Atomic bool atomic_ready;
+    _Atomic bool atomic_has_changes;
+    _Atomic bool cancel_requested;
+
+    struct library_db_scan_telemetry telemetry;
+};
+
+void library_db_scanner_initialize(struct library_db_scanner *scanner);
+void library_db_scanner_destroy(struct library_db_scanner *scanner);
+bool library_db_scanner_start(struct library_db_scanner *scanner, struct library_db *database,
+                              const char *music_root, const char *covers_directory);
+void library_db_scanner_cancel(struct library_db_scanner *scanner);
+bool library_db_scanner_wait(struct library_db_scanner *scanner);
+void library_db_scanner_poll(struct library_db_scanner *scanner,
+                             struct library_db_scan_snapshot *snapshot_out);
 
 #endif

@@ -130,6 +130,8 @@ struct library_track_input {
     const char *cover_path;
     uint32_t cover_data_offset;
     uint32_t cover_data_length;
+    uint64_t audio_start_offset;
+    uint64_t audio_payload_bytes;
 };
 
 struct library_catalog {

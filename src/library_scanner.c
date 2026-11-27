@@ -1,12 +1,16 @@
 #include "library_scanner.h"
 
+#include "library_db.h"
+
 #include <ctype.h>
 #include <dirent.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #define FLAC_METADATA_LAST_MASK 0x80u
 #define FLAC_BLOCK_TYPE_MASK 0x7Fu
@@ -245,6 +249,8 @@ struct parsed_tag_fields {
     uint8_t cover_kind;
     uint32_t cover_offset;
     uint32_t cover_length;
+    uint64_t audio_start_offset;
+    uint64_t audio_payload_bytes;
 };
 
 static void apply_tag_pair(struct parsed_tag_fields *fields, const char *key, const char *value) {
@@ -277,7 +283,7 @@ static void apply_tag_pair(struct parsed_tag_fields *fields, const char *key, co
     }
 }
 
-static void parse_flac_file(FILE *file, struct parsed_tag_fields *fields) {
+static void parse_flac_file(FILE *file, uint64_t file_size_bytes, struct parsed_tag_fields *fields) {
     uint8_t magic[4];
     if (fread(magic, 1u, 4u, file) != 4u || memcmp(magic, "fLaC", 4u) != 0) {
         return;
@@ -378,7 +384,15 @@ static void parse_flac_file(FILE *file, struct parsed_tag_fields *fields) {
             }
         }
 
-        if (is_last || fseek(file, block_start + (long)block_size, SEEK_SET) != 0) {
+        if (is_last) {
+            uint64_t after_block = (uint64_t)block_start + (uint64_t)block_size;
+            if (after_block <= file_size_bytes) {
+                fields->audio_start_offset = after_block;
+                fields->audio_payload_bytes = file_size_bytes - after_block;
+            }
+            break;
+        }
+        if (fseek(file, block_start + (long)block_size, SEEK_SET) != 0) {
             break;
         }
     }
@@ -524,6 +538,20 @@ static void parse_mp3_file(FILE *file, uint64_t file_size_bytes, struct parsed_t
         }
     }
 
+    if ((uint64_t)audio_start <= file_size_bytes) {
+        uint64_t payload_end = file_size_bytes;
+        if (file_size_bytes >= (uint64_t)audio_start + 128ull) {
+            uint8_t id3v1_marker[3];
+            if (fseek(file, (long)(file_size_bytes - 128ull), SEEK_SET) == 0 &&
+                fread(id3v1_marker, 1u, 3u, file) == 3u &&
+                memcmp(id3v1_marker, "TAG", 3u) == 0) {
+                payload_end -= 128ull;
+            }
+        }
+        fields->audio_start_offset = (uint64_t)audio_start;
+        fields->audio_payload_bytes = payload_end - (uint64_t)audio_start;
+    }
+
     /* MPEG duration estimate from first frame header */
     if (fseek(file, audio_start, SEEK_SET) == 0) {
         uint8_t scan_buf[4096];
@@ -590,6 +618,12 @@ static void parse_m4a_atoms(FILE *file, long end_offset, struct parsed_tag_field
         if (strcmp(atom_name, "moov") == 0 || strcmp(atom_name, "udta") == 0 ||
             strcmp(atom_name, "ilst") == 0) {
             parse_m4a_atoms(file, atom_end, fields, depth + 1u);
+        } else if (strcmp(atom_name, "mdat") == 0) {
+            long payload_start = atom_start + header_bytes;
+            if (atom_end >= payload_start) {
+                fields->audio_start_offset = (uint64_t)payload_start;
+                fields->audio_payload_bytes = (uint64_t)(atom_end - payload_start);
+            }
         } else if (strcmp(atom_name, "meta") == 0) {
             if (fseek(file, 4L, SEEK_CUR) == 0) {
                 parse_m4a_atoms(file, atom_end, fields, depth + 1u);
@@ -680,6 +714,11 @@ static void parse_wav_file(FILE *file, struct parsed_tag_fields *fields) {
                 break;
             }
         } else if (memcmp(ch, "data", 4u) == 0) {
+            long data_pos = ftell(file);
+            if (data_pos >= 0) {
+                fields->audio_start_offset = (uint64_t)data_pos;
+                fields->audio_payload_bytes = ch_size;
+            }
             data_size = ch_size;
             break;
         } else {
@@ -825,7 +864,7 @@ bool library_parse_audio_file_metadata(const char *file_path, const char *root_p
     FILE *file = fopen(file_path, "rb");
     if (file != NULL) {
         if (format_kind == LIBRARY_FORMAT_FLAC) {
-            parse_flac_file(file, &fields);
+            parse_flac_file(file, (uint64_t)file_stat.st_size, &fields);
         } else if (format_kind == LIBRARY_FORMAT_MP3) {
             parse_mp3_file(file, (uint64_t)file_stat.st_size, &fields);
         } else if (format_kind == LIBRARY_FORMAT_M4A) {
@@ -834,6 +873,10 @@ bool library_parse_audio_file_metadata(const char *file_path, const char *root_p
             parse_wav_file(file, &fields);
         }
         fclose(file);
+    }
+    if (fields.audio_payload_bytes == 0u &&
+        (uint64_t)file_stat.st_size > fields.audio_start_offset) {
+        fields.audio_payload_bytes = (uint64_t)file_stat.st_size - fields.audio_start_offset;
     }
 
     char fallback_artist[160];
@@ -897,6 +940,8 @@ bool library_parse_audio_file_metadata(const char *file_path, const char *root_p
     input_out->cover_path = s_cover;
     input_out->cover_data_offset = fields.cover_offset;
     input_out->cover_data_length = fields.cover_length;
+    input_out->audio_start_offset = fields.audio_start_offset;
+    input_out->audio_payload_bytes = fields.audio_payload_bytes;
     return true;
 }
 
@@ -1310,4 +1355,942 @@ bool library_scanner_is_busy(const struct library_scanner *scanner) {
 
 bool library_scanner_is_ready(const struct library_scanner *scanner) {
     return scanner != NULL && scanner->phase == LIB_SCAN_READY;
+}
+
+#define AUDIO_FINGERPRINT_WINDOW_BYTES 4096u
+#define AUDIO_FINGERPRINT_DIRECT_LIMIT_BYTES (AUDIO_FINGERPRINT_WINDOW_BYTES * 2u)
+#define FNV1A_64_OFFSET_BASIS 14695981039346656037ull
+#define FNV1A_64_PRIME 1099511628211ull
+#define FAT32_MTIME_TOLERANCE_SECONDS 2ll
+#define DELETED_ALBUM_UNLINK_BATCH 128u
+
+static uint64_t fnv1a_extend(uint64_t hash, const uint8_t *bytes, size_t length) {
+    for (size_t index = 0u; index < length; index++) {
+        hash ^= bytes[index];
+        hash *= FNV1A_64_PRIME;
+    }
+    return hash;
+}
+
+bool library_compute_audio_fingerprint(const char *file_path, uint64_t audio_start_offset,
+                                       uint64_t audio_payload_bytes, uint64_t *fingerprint_out) {
+    if (file_path == NULL || fingerprint_out == NULL) {
+        return false;
+    }
+    FILE *file = fopen(file_path, "rb");
+    if (file == NULL) {
+        return false;
+    }
+
+    uint8_t window_buffer[AUDIO_FINGERPRINT_WINDOW_BYTES];
+    uint64_t hash = FNV1A_64_OFFSET_BASIS;
+    hash = fnv1a_extend(hash, (const uint8_t *)&audio_payload_bytes, sizeof(audio_payload_bytes));
+
+    if (audio_payload_bytes <= AUDIO_FINGERPRINT_DIRECT_LIMIT_BYTES) {
+        if (fseek(file, (long)audio_start_offset, SEEK_SET) == 0) {
+            uint64_t remaining = audio_payload_bytes;
+            while (remaining > 0u) {
+                size_t chunk = (remaining > AUDIO_FINGERPRINT_WINDOW_BYTES)
+                                   ? AUDIO_FINGERPRINT_WINDOW_BYTES
+                                   : (size_t)remaining;
+                size_t bytes_read = fread(window_buffer, 1u, chunk, file);
+                if (bytes_read == 0u) {
+                    break;
+                }
+                hash = fnv1a_extend(hash, window_buffer, bytes_read);
+                remaining -= bytes_read;
+            }
+        }
+    } else {
+        if (fseek(file, (long)audio_start_offset, SEEK_SET) == 0) {
+            size_t head_read = fread(window_buffer, 1u, AUDIO_FINGERPRINT_WINDOW_BYTES, file);
+            hash = fnv1a_extend(hash, window_buffer, head_read);
+        }
+        uint64_t mid_offset = audio_start_offset + (audio_payload_bytes / 2ull);
+        if (fseek(file, (long)mid_offset, SEEK_SET) == 0) {
+            size_t mid_read = fread(window_buffer, 1u, AUDIO_FINGERPRINT_WINDOW_BYTES, file);
+            hash = fnv1a_extend(hash, window_buffer, mid_read);
+        }
+    }
+
+    fclose(file);
+    *fingerprint_out = hash;
+    return true;
+}
+
+struct cached_track_stamp {
+    int64_t track_id;
+    char *path;
+    uint64_t path_hash;
+    uint64_t file_size_bytes;
+    int64_t mtime_seconds;
+    uint64_t audio_fingerprint;
+    bool matched;
+};
+
+struct cached_m3u_stamp {
+    char *path;
+    uint64_t file_size_bytes;
+    int64_t mtime_seconds;
+    bool matched;
+};
+
+struct discovered_audio_file {
+    char *path;
+    uint64_t file_size_bytes;
+    int64_t mtime_seconds;
+    uint8_t format_kind;
+    int64_t matched_track_id;
+    bool needs_parse;
+};
+
+struct discovered_sidecar_cover {
+    char *directory_path;
+    char *cover_path;
+    uint64_t file_size_bytes;
+    int64_t mtime_seconds;
+};
+
+struct discovered_m3u_file {
+    char *path;
+    uint64_t file_size_bytes;
+    int64_t mtime_seconds;
+    bool needs_parse;
+};
+
+struct scanner_work_state {
+    struct library_db_scanner *owner;
+    struct cached_track_stamp *cached_tracks;
+    uint32_t cached_count;
+    uint32_t cached_capacity;
+    uint32_t *hash_slots;
+    uint32_t hash_slot_count;
+
+    struct cached_m3u_stamp *cached_m3u;
+    uint32_t cached_m3u_count;
+    uint32_t cached_m3u_capacity;
+
+    struct discovered_audio_file *discovered_audio;
+    uint32_t discovered_audio_count;
+    uint32_t discovered_audio_capacity;
+
+    struct discovered_sidecar_cover *discovered_sidecars;
+    uint32_t discovered_sidecar_count;
+    uint32_t discovered_sidecar_capacity;
+
+    struct discovered_m3u_file *discovered_m3u;
+    uint32_t discovered_m3u_count;
+    uint32_t discovered_m3u_capacity;
+};
+
+static char *duplicate_c_string(const char *text) {
+    size_t length = strlen(text);
+    char *copy = malloc(length + 1u);
+    if (copy != NULL) {
+        memcpy(copy, text, length + 1u);
+    }
+    return copy;
+}
+
+static bool timestamps_match_fat32(int64_t first_seconds, int64_t second_seconds) {
+    int64_t difference = first_seconds - second_seconds;
+    if (difference < 0) {
+        difference = -difference;
+    }
+    return difference <= FAT32_MTIME_TOLERANCE_SECONDS;
+}
+
+static void collect_cached_track_stamp(void *callback_context, int64_t track_id, const char *path,
+                                       uint64_t file_size_bytes, int64_t mtime_seconds,
+                                       uint64_t audio_fingerprint) {
+    struct scanner_work_state *state = (struct scanner_work_state *)callback_context;
+    if (state->cached_count >= state->cached_capacity) {
+        uint32_t next_capacity =
+            (state->cached_capacity == 0u) ? 256u : state->cached_capacity * 2u;
+        struct cached_track_stamp *grown = realloc(
+            state->cached_tracks, (size_t)next_capacity * sizeof(struct cached_track_stamp));
+        if (grown == NULL) {
+            return;
+        }
+        state->cached_tracks = grown;
+        state->cached_capacity = next_capacity;
+    }
+    char *path_copy = duplicate_c_string(path);
+    if (path_copy == NULL) {
+        return;
+    }
+    state->cached_tracks[state->cached_count++] = (struct cached_track_stamp){
+        .track_id = track_id,
+        .path = path_copy,
+        .path_hash = library_fnv1a_64(path),
+        .file_size_bytes = file_size_bytes,
+        .mtime_seconds = mtime_seconds,
+        .audio_fingerprint = audio_fingerprint,
+        .matched = false,
+    };
+}
+
+static void collect_cached_m3u_stamp(void *callback_context, const char *path,
+                                     uint64_t file_size_bytes, int64_t mtime_seconds) {
+    struct scanner_work_state *state = (struct scanner_work_state *)callback_context;
+    if (state->cached_m3u_count >= state->cached_m3u_capacity) {
+        uint32_t next_capacity =
+            (state->cached_m3u_capacity == 0u) ? 16u : state->cached_m3u_capacity * 2u;
+        struct cached_m3u_stamp *grown =
+            realloc(state->cached_m3u, (size_t)next_capacity * sizeof(struct cached_m3u_stamp));
+        if (grown == NULL) {
+            return;
+        }
+        state->cached_m3u = grown;
+        state->cached_m3u_capacity = next_capacity;
+    }
+    char *path_copy = duplicate_c_string(path);
+    if (path_copy == NULL) {
+        return;
+    }
+    state->cached_m3u[state->cached_m3u_count++] = (struct cached_m3u_stamp){
+        .path = path_copy,
+        .file_size_bytes = file_size_bytes,
+        .mtime_seconds = mtime_seconds,
+        .matched = false,
+    };
+}
+
+static void build_cached_path_hash_table(struct scanner_work_state *state) {
+    if (state->cached_count == 0u) {
+        return;
+    }
+    uint32_t slot_count = 64u;
+    while (slot_count < state->cached_count * 2u) {
+        slot_count *= 2u;
+    }
+    state->hash_slots = malloc((size_t)slot_count * sizeof(uint32_t));
+    if (state->hash_slots == NULL) {
+        return;
+    }
+    for (uint32_t index = 0u; index < slot_count; index++) {
+        state->hash_slots[index] = UINT32_MAX;
+    }
+    state->hash_slot_count = slot_count;
+    uint32_t mask = slot_count - 1u;
+    for (uint32_t index = 0u; index < state->cached_count; index++) {
+        uint32_t slot = (uint32_t)(state->cached_tracks[index].path_hash & mask);
+        while (state->hash_slots[slot] != UINT32_MAX) {
+            slot = (slot + 1u) & mask;
+        }
+        state->hash_slots[slot] = index;
+    }
+}
+
+static struct cached_track_stamp *lookup_cached_track_by_path(const struct scanner_work_state *state,
+                                                              const char *path) {
+    if (state->hash_slots == NULL || state->hash_slot_count == 0u) {
+        return NULL;
+    }
+    uint64_t path_hash = library_fnv1a_64(path);
+    uint32_t mask = state->hash_slot_count - 1u;
+    uint32_t slot = (uint32_t)(path_hash & mask);
+    while (state->hash_slots[slot] != UINT32_MAX) {
+        struct cached_track_stamp *candidate = &state->cached_tracks[state->hash_slots[slot]];
+        if (candidate->path_hash == path_hash && strcmp(candidate->path, path) == 0) {
+            return candidate;
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return NULL;
+}
+
+static int classify_sidecar_cover_rank(const char *filename) {
+    static const char *const CANDIDATE_NAMES[6] = {"cover", "folder", "front",
+                                                   "album", "artwork", "disc"};
+    static const char *const CANDIDATE_EXTS[3] = {".jpg", ".jpeg", ".png"};
+    for (int name_index = 0; name_index < 6; name_index++) {
+        for (int ext_index = 0; ext_index < 3; ext_index++) {
+            char target[64];
+            snprintf(target, sizeof(target), "%s%s", CANDIDATE_NAMES[name_index],
+                     CANDIDATE_EXTS[ext_index]);
+            if (library_compare_ascii_casefold(filename, target) == 0) {
+                return name_index * 4 + ext_index;
+            }
+        }
+    }
+    return -1;
+}
+
+static void record_discovered_audio(struct scanner_work_state *state, const char *path,
+                                    uint64_t file_size_bytes, int64_t mtime_seconds,
+                                    uint8_t format_kind) {
+    if (state->discovered_audio_count >= state->discovered_audio_capacity) {
+        uint32_t next_capacity =
+            (state->discovered_audio_capacity == 0u) ? 256u : state->discovered_audio_capacity * 2u;
+        struct discovered_audio_file *grown = realloc(
+            state->discovered_audio, (size_t)next_capacity * sizeof(struct discovered_audio_file));
+        if (grown == NULL) {
+            return;
+        }
+        state->discovered_audio = grown;
+        state->discovered_audio_capacity = next_capacity;
+    }
+    char *path_copy = duplicate_c_string(path);
+    if (path_copy == NULL) {
+        return;
+    }
+    state->discovered_audio[state->discovered_audio_count++] = (struct discovered_audio_file){
+        .path = path_copy,
+        .file_size_bytes = file_size_bytes,
+        .mtime_seconds = mtime_seconds,
+        .format_kind = format_kind,
+        .matched_track_id = 0,
+        .needs_parse = true,
+    };
+}
+
+static void record_discovered_sidecar(struct scanner_work_state *state, const char *directory_path,
+                                      const char *cover_path, uint64_t file_size_bytes,
+                                      int64_t mtime_seconds) {
+    if (state->discovered_sidecar_count >= state->discovered_sidecar_capacity) {
+        uint32_t next_capacity = (state->discovered_sidecar_capacity == 0u)
+                                     ? 64u
+                                     : state->discovered_sidecar_capacity * 2u;
+        struct discovered_sidecar_cover *grown =
+            realloc(state->discovered_sidecars,
+                    (size_t)next_capacity * sizeof(struct discovered_sidecar_cover));
+        if (grown == NULL) {
+            return;
+        }
+        state->discovered_sidecars = grown;
+        state->discovered_sidecar_capacity = next_capacity;
+    }
+    char *directory_copy = duplicate_c_string(directory_path);
+    char *cover_copy = (cover_path != NULL) ? duplicate_c_string(cover_path) : NULL;
+    if (directory_copy == NULL || (cover_path != NULL && cover_copy == NULL)) {
+        free(directory_copy);
+        free(cover_copy);
+        return;
+    }
+    state->discovered_sidecars[state->discovered_sidecar_count++] = (struct discovered_sidecar_cover){
+        .directory_path = directory_copy,
+        .cover_path = cover_copy,
+        .file_size_bytes = file_size_bytes,
+        .mtime_seconds = mtime_seconds,
+    };
+}
+
+static void record_discovered_m3u(struct scanner_work_state *state, const char *path,
+                                  uint64_t file_size_bytes, int64_t mtime_seconds) {
+    if (state->discovered_m3u_count >= state->discovered_m3u_capacity) {
+        uint32_t next_capacity =
+            (state->discovered_m3u_capacity == 0u) ? 16u : state->discovered_m3u_capacity * 2u;
+        struct discovered_m3u_file *grown = realloc(
+            state->discovered_m3u, (size_t)next_capacity * sizeof(struct discovered_m3u_file));
+        if (grown == NULL) {
+            return;
+        }
+        state->discovered_m3u = grown;
+        state->discovered_m3u_capacity = next_capacity;
+    }
+    char *path_copy = duplicate_c_string(path);
+    if (path_copy == NULL) {
+        return;
+    }
+    state->discovered_m3u[state->discovered_m3u_count++] = (struct discovered_m3u_file){
+        .path = path_copy,
+        .file_size_bytes = file_size_bytes,
+        .mtime_seconds = mtime_seconds,
+        .needs_parse = true,
+    };
+}
+
+static void walk_music_directory(struct scanner_work_state *state, const char *directory_path,
+                                 uint32_t depth) {
+    if (depth >= LIBRARY_SCAN_MAX_DEPTH || atomic_load(&state->owner->cancel_requested)) {
+        return;
+    }
+    DIR *directory_handle = opendir(directory_path);
+    if (directory_handle == NULL) {
+        return;
+    }
+
+    int best_cover_rank = 999;
+    char best_cover_path[512];
+    uint64_t best_cover_size = 0u;
+    int64_t best_cover_mtime = 0;
+    bool directory_has_audio = false;
+    best_cover_path[0] = '\0';
+
+    struct dirent *entry = NULL;
+    while ((entry = readdir(directory_handle)) != NULL) {
+        if (atomic_load(&state->owner->cancel_requested)) {
+            break;
+        }
+        if (should_skip_directory_name(entry->d_name)) {
+            continue;
+        }
+        char full_path[512];
+        snprintf(full_path, sizeof(full_path), "%s/%s", directory_path, entry->d_name);
+        struct stat entry_stat;
+        if (stat(full_path, &entry_stat) != 0) {
+            continue;
+        }
+        if (S_ISDIR(entry_stat.st_mode)) {
+            walk_music_directory(state, full_path, depth + 1u);
+        } else if (S_ISREG(entry_stat.st_mode)) {
+            uint8_t format_kind = classify_audio_extension(entry->d_name);
+            if (format_kind != LIBRARY_FORMAT_UNKNOWN) {
+                directory_has_audio = true;
+                record_discovered_audio(state, full_path, (uint64_t)entry_stat.st_size,
+                                        (int64_t)entry_stat.st_mtime, format_kind);
+                atomic_store(&state->owner->atomic_discovered_files,
+                             state->discovered_audio_count);
+            } else if (is_m3u_filename(entry->d_name)) {
+                record_discovered_m3u(state, full_path, (uint64_t)entry_stat.st_size,
+                                      (int64_t)entry_stat.st_mtime);
+            } else {
+                int cover_rank = classify_sidecar_cover_rank(entry->d_name);
+                if (cover_rank >= 0 && cover_rank < best_cover_rank) {
+                    best_cover_rank = cover_rank;
+                    copy_string_bounded(best_cover_path, sizeof(best_cover_path), full_path,
+                                        sizeof(best_cover_path) - 1u);
+                    best_cover_size = (uint64_t)entry_stat.st_size;
+                    best_cover_mtime = (int64_t)entry_stat.st_mtime;
+                }
+            }
+        }
+    }
+    closedir(directory_handle);
+
+    if (directory_has_audio) {
+        record_discovered_sidecar(state, directory_path,
+                                  (best_cover_path[0] != '\0') ? best_cover_path : NULL,
+                                  best_cover_size, best_cover_mtime);
+    }
+}
+
+static void parse_m3u_into_db(struct library_db *database, const char *m3u_path) {
+    FILE *file = fopen(m3u_path, "r");
+    if (file == NULL) {
+        return;
+    }
+
+    const char *slash = strrchr(m3u_path, '/');
+    const char *base_name = (slash != NULL) ? (slash + 1) : m3u_path;
+    const char *dot = strrchr(base_name, '.');
+    size_t name_length = (dot != NULL) ? (size_t)(dot - base_name) : strlen(base_name);
+    char playlist_name[128];
+    copy_string_bounded(playlist_name, sizeof(playlist_name), base_name, name_length);
+
+    char m3u_directory[320];
+    if (slash != NULL) {
+        copy_string_bounded(m3u_directory, sizeof(m3u_directory), m3u_path,
+                            (size_t)(slash - m3u_path));
+    } else {
+        m3u_directory[0] = '\0';
+    }
+
+    char **track_paths = malloc(512u * sizeof(char *));
+    if (track_paths == NULL) {
+        fclose(file);
+        return;
+    }
+    uint32_t track_count = 0u;
+    char line[512];
+    while (fgets(line, sizeof(line), file) != NULL && track_count < 512u) {
+        size_t length = strlen(line);
+        while (length > 0u && (line[length - 1u] == '\n' || line[length - 1u] == '\r')) {
+            line[--length] = '\0';
+        }
+        if (length == 0u || line[0] == '#') {
+            continue;
+        }
+        char resolved[512];
+        if (line[0] == '/') {
+            copy_string_bounded(resolved, sizeof(resolved), line, sizeof(resolved) - 1u);
+        } else if (m3u_directory[0] != '\0') {
+            snprintf(resolved, sizeof(resolved), "%s/%s", m3u_directory, line);
+        } else {
+            copy_string_bounded(resolved, sizeof(resolved), line, sizeof(resolved) - 1u);
+        }
+        char *copy = duplicate_c_string(resolved);
+        if (copy != NULL) {
+            track_paths[track_count++] = copy;
+        }
+    }
+    fclose(file);
+
+    if (track_count > 0u) {
+        (void)library_db_upsert_m3u_playlist(database, playlist_name, m3u_path,
+                                             (const char *const *)track_paths, track_count);
+    }
+    for (uint32_t index = 0u; index < track_count; index++) {
+        free(track_paths[index]);
+    }
+    free(track_paths);
+}
+
+static void unlink_sharded_cover_file(const char *covers_directory, uint64_t album_uid) {
+    if (covers_directory == NULL || covers_directory[0] == '\0' || album_uid == 0ull) {
+        return;
+    }
+    char shard_path[512];
+    snprintf(shard_path, sizeof(shard_path), "%s/%02x/%016" PRIx64 ".rgb565", covers_directory,
+             (unsigned)((album_uid >> 56u) & 0xFFu), album_uid);
+    (void)unlink(shard_path);
+}
+
+static int64_t find_unique_missing_by_stat(struct scanner_work_state *state,
+                                           uint64_t file_size_bytes, int64_t mtime_seconds) {
+    uint32_t match_index = UINT32_MAX;
+    for (uint32_t index = 0u; index < state->cached_count; index++) {
+        struct cached_track_stamp *cached = &state->cached_tracks[index];
+        if (cached->matched) {
+            continue;
+        }
+        if (cached->file_size_bytes == file_size_bytes &&
+            timestamps_match_fat32(cached->mtime_seconds, mtime_seconds)) {
+            if (match_index != UINT32_MAX) {
+                return 0; /* Ambiguous: fall back to audio_fingerprint matching. */
+            }
+            match_index = index;
+        }
+    }
+    if (match_index != UINT32_MAX) {
+        state->cached_tracks[match_index].matched = true;
+        return state->cached_tracks[match_index].track_id;
+    }
+    return 0;
+}
+
+static int64_t find_missing_by_fingerprint(struct scanner_work_state *state,
+                                           uint64_t audio_fingerprint) {
+    for (uint32_t index = 0u; index < state->cached_count; index++) {
+        struct cached_track_stamp *cached = &state->cached_tracks[index];
+        if (!cached->matched && cached->audio_fingerprint == audio_fingerprint) {
+            cached->matched = true;
+            return cached->track_id;
+        }
+    }
+    return 0;
+}
+
+static void free_scanner_work_state(struct scanner_work_state *state) {
+    for (uint32_t index = 0u; index < state->cached_count; index++) {
+        free(state->cached_tracks[index].path);
+    }
+    free(state->cached_tracks);
+    free(state->hash_slots);
+
+    for (uint32_t index = 0u; index < state->cached_m3u_count; index++) {
+        free(state->cached_m3u[index].path);
+    }
+    free(state->cached_m3u);
+
+    for (uint32_t index = 0u; index < state->discovered_audio_count; index++) {
+        free(state->discovered_audio[index].path);
+    }
+    free(state->discovered_audio);
+
+    for (uint32_t index = 0u; index < state->discovered_sidecar_count; index++) {
+        free(state->discovered_sidecars[index].directory_path);
+        free(state->discovered_sidecars[index].cover_path);
+    }
+    free(state->discovered_sidecars);
+
+    for (uint32_t index = 0u; index < state->discovered_m3u_count; index++) {
+        free(state->discovered_m3u[index].path);
+    }
+    free(state->discovered_m3u);
+}
+
+static void *db_scanner_worker_main(void *argument) {
+    struct library_db_scanner *scanner = (struct library_db_scanner *)argument;
+    struct library_db_scan_telemetry telemetry;
+    memset(&telemetry, 0, sizeof(telemetry));
+
+    struct stat root_stat;
+    bool root_exists =
+        (stat(scanner->root_path, &root_stat) == 0 && S_ISDIR(root_stat.st_mode));
+    atomic_store(&scanner->atomic_music_root_exists, root_exists);
+    if (!root_exists) {
+        atomic_store(&scanner->atomic_phase, LIB_DB_SCAN_READY);
+        atomic_store(&scanner->atomic_ready, true);
+        return NULL;
+    }
+
+    struct scanner_work_state state;
+    memset(&state, 0, sizeof(state));
+    state.owner = scanner;
+
+    library_db_for_each_track_stamp(scanner->database, collect_cached_track_stamp, &state);
+    library_db_for_each_m3u_file(scanner->database, collect_cached_m3u_stamp, &state);
+    build_cached_path_hash_table(&state);
+
+    walk_music_directory(&state, scanner->root_path, 0u);
+    if (atomic_load(&scanner->cancel_requested)) {
+        free_scanner_work_state(&state);
+        return NULL;
+    }
+
+    /* Pass 1: exact path matches first so moved files only claim truly missing entries. */
+    uint32_t parse_needed_count = 0u;
+    for (uint32_t index = 0u; index < state.discovered_audio_count; index++) {
+        struct discovered_audio_file *discovered = &state.discovered_audio[index];
+        struct cached_track_stamp *cached = lookup_cached_track_by_path(&state, discovered->path);
+        if (cached != NULL) {
+            cached->matched = true;
+            discovered->matched_track_id = cached->track_id;
+            if (cached->file_size_bytes == discovered->file_size_bytes &&
+                timestamps_match_fat32(cached->mtime_seconds, discovered->mtime_seconds)) {
+                discovered->needs_parse = false;
+                telemetry.unchanged_count++;
+            } else {
+                discovered->needs_parse = true;
+                parse_needed_count++;
+            }
+        }
+    }
+
+    /* Pass 2: fast-path unique (size, mtime) move match, then queue remaining for tag parse. */
+    for (uint32_t index = 0u; index < state.discovered_audio_count; index++) {
+        struct discovered_audio_file *discovered = &state.discovered_audio[index];
+        if (discovered->matched_track_id > 0) {
+            continue;
+        }
+        int64_t fast_moved_id = find_unique_missing_by_stat(&state, discovered->file_size_bytes,
+                                                            discovered->mtime_seconds);
+        if (fast_moved_id > 0) {
+            discovered->matched_track_id = -fast_moved_id; /* Negative marks stat-only move. */
+            discovered->needs_parse = false;
+        } else {
+            discovered->needs_parse = true;
+            parse_needed_count++;
+        }
+    }
+
+    bool any_m3u_dirty = false;
+    for (uint32_t index = 0u; index < state.discovered_m3u_count; index++) {
+        struct discovered_m3u_file *m3u = &state.discovered_m3u[index];
+        m3u->needs_parse = true;
+        for (uint32_t cached_idx = 0u; cached_idx < state.cached_m3u_count; cached_idx++) {
+            struct cached_m3u_stamp *cached = &state.cached_m3u[cached_idx];
+            if (strcmp(cached->path, m3u->path) == 0) {
+                cached->matched = true;
+                if (cached->file_size_bytes == m3u->file_size_bytes &&
+                    timestamps_match_fat32(cached->mtime_seconds, m3u->mtime_seconds)) {
+                    m3u->needs_parse = false;
+                }
+                break;
+            }
+        }
+        if (m3u->needs_parse) {
+            any_m3u_dirty = true;
+        }
+    }
+    for (uint32_t cached_idx = 0u; cached_idx < state.cached_m3u_count; cached_idx++) {
+        if (!state.cached_m3u[cached_idx].matched) {
+            any_m3u_dirty = true;
+            break;
+        }
+    }
+
+    atomic_store(&scanner->atomic_delta_files, parse_needed_count);
+    atomic_store(&scanner->atomic_phase, LIB_DB_SCAN_PARSING);
+
+    bool has_track_or_cover_delta = false;
+    for (uint32_t index = 0u; index < state.discovered_audio_count; index++) {
+        if (state.discovered_audio[index].needs_parse ||
+            state.discovered_audio[index].matched_track_id < 0) {
+            has_track_or_cover_delta = true;
+            break;
+        }
+    }
+    if (!has_track_or_cover_delta) {
+        for (uint32_t index = 0u; index < state.cached_count; index++) {
+            if (!state.cached_tracks[index].matched) {
+                has_track_or_cover_delta = true;
+                break;
+            }
+        }
+    }
+
+    /* Even if 0 tracks changed, a sidecar cover.jpg might have been added, replaced, or deleted. */
+    uint32_t pending_before_sidecars = library_db_count_pending_covers(scanner->database);
+    if (!has_track_or_cover_delta && !any_m3u_dirty && state.discovered_sidecar_count > 0u) {
+        if (library_db_begin(scanner->database)) {
+            for (uint32_t index = 0u; index < state.discovered_sidecar_count; index++) {
+                struct discovered_sidecar_cover *sidecar = &state.discovered_sidecars[index];
+                (void)library_db_apply_sidecar_cover(scanner->database, sidecar->directory_path,
+                                                     sidecar->cover_path, sidecar->mtime_seconds,
+                                                     sidecar->file_size_bytes);
+            }
+            uint32_t pending_after_sidecars = library_db_count_pending_covers(scanner->database);
+            if (pending_after_sidecars != pending_before_sidecars) {
+                (void)library_db_commit(scanner->database);
+                telemetry.db_writes = 1u;
+                telemetry.sidecars_updated_count = 1u;
+                has_track_or_cover_delta = true;
+            } else {
+                library_db_rollback(scanner->database);
+            }
+        }
+    }
+
+    if (!has_track_or_cover_delta && !any_m3u_dirty) {
+        struct library_db_counts counts;
+        if (library_db_read_counts(scanner->database, &counts)) {
+            atomic_store(&scanner->atomic_album_count, counts.albums);
+            atomic_store(&scanner->atomic_track_count, counts.tracks);
+        }
+        pthread_mutex_lock(&scanner->snapshot_mutex);
+        scanner->telemetry = telemetry;
+        pthread_mutex_unlock(&scanner->snapshot_mutex);
+        atomic_store(&scanner->atomic_has_changes, false);
+        atomic_store(&scanner->atomic_phase, LIB_DB_SCAN_READY);
+        atomic_store(&scanner->atomic_ready, true);
+        free_scanner_work_state(&state);
+        return NULL;
+    }
+
+    if (library_db_begin(scanner->database)) {
+        char scratch[2048];
+        uint32_t parsed_progress = 0u;
+
+        for (uint32_t index = 0u; index < state.discovered_audio_count; index++) {
+            if (atomic_load(&scanner->cancel_requested)) {
+                library_db_rollback(scanner->database);
+                free_scanner_work_state(&state);
+                return NULL;
+            }
+            struct discovered_audio_file *discovered = &state.discovered_audio[index];
+            if (!discovered->needs_parse) {
+                if (discovered->matched_track_id < 0) {
+                    int64_t moved_id = -discovered->matched_track_id;
+                    if (library_db_update_track_location(scanner->database, moved_id,
+                                                         discovered->path,
+                                                         discovered->mtime_seconds)) {
+                        telemetry.moved_count++;
+                    }
+                }
+                continue;
+            }
+
+            struct library_track_input legacy_input;
+            telemetry.files_opened++;
+            if (library_parse_audio_file_metadata(discovered->path, scanner->root_path,
+                                                  &legacy_input, scratch, sizeof(scratch))) {
+                uint64_t audio_fp = 0u;
+                (void)library_compute_audio_fingerprint(discovered->path,
+                                                        legacy_input.audio_start_offset,
+                                                        legacy_input.audio_payload_bytes,
+                                                        &audio_fp);
+
+                int64_t target_id = discovered->matched_track_id;
+                bool was_modified_in_place = (target_id > 0);
+                bool was_moved_and_edited = false;
+                if (target_id == 0) {
+                    target_id = find_missing_by_fingerprint(&state, audio_fp);
+                    was_moved_and_edited = (target_id > 0);
+                }
+
+                struct library_db_track_input db_input;
+                memset(&db_input, 0, sizeof(db_input));
+                db_input.path = discovered->path;
+                db_input.audio_fingerprint = audio_fp;
+                db_input.file_size_bytes = discovered->file_size_bytes;
+                db_input.mtime_seconds = discovered->mtime_seconds;
+                db_input.format_kind = legacy_input.format_kind;
+                db_input.title = legacy_input.title;
+                db_input.artist = legacy_input.artist;
+                db_input.album_artist = legacy_input.album_artist;
+                db_input.album = legacy_input.album;
+                db_input.genre = legacy_input.genre;
+                db_input.year = legacy_input.year;
+                db_input.disc_number = legacy_input.disc_number;
+                db_input.track_number = legacy_input.track_number;
+                db_input.duration_seconds = legacy_input.duration_seconds;
+                db_input.added_at_seconds = legacy_input.added_at_seconds;
+                db_input.cover_source_kind = legacy_input.cover_source_kind;
+                db_input.cover_path = legacy_input.cover_path;
+                db_input.cover_data_offset = legacy_input.cover_data_offset;
+                db_input.cover_data_length = legacy_input.cover_data_length;
+                if (legacy_input.cover_source_kind == LIBRARY_COVER_SIDECAR &&
+                    legacy_input.cover_path != NULL && legacy_input.cover_path[0] != '\0') {
+                    struct stat cover_stat;
+                    if (stat(legacy_input.cover_path, &cover_stat) == 0) {
+                        db_input.cover_source_mtime = (int64_t)cover_stat.st_mtime;
+                        db_input.cover_source_size = (uint64_t)cover_stat.st_size;
+                    }
+                }
+
+                if (library_db_upsert_track(scanner->database, &db_input, target_id, NULL)) {
+                    if (was_modified_in_place) {
+                        telemetry.modified_count++;
+                    } else if (was_moved_and_edited) {
+                        telemetry.moved_edited_count++;
+                    } else {
+                        telemetry.added_count++;
+                    }
+                }
+            }
+            parsed_progress++;
+            atomic_store(&scanner->atomic_scanned_files, parsed_progress);
+        }
+
+        atomic_store(&scanner->atomic_phase, LIB_DB_SCAN_COMMITTING);
+
+        for (uint32_t index = 0u; index < state.cached_count; index++) {
+            if (!state.cached_tracks[index].matched) {
+                if (library_db_delete_track(scanner->database, state.cached_tracks[index].track_id)) {
+                    telemetry.deleted_count++;
+                }
+            }
+        }
+
+        for (uint32_t index = 0u; index < state.discovered_sidecar_count; index++) {
+            struct discovered_sidecar_cover *sidecar = &state.discovered_sidecars[index];
+            (void)library_db_apply_sidecar_cover(scanner->database, sidecar->directory_path,
+                                                 sidecar->cover_path, sidecar->mtime_seconds,
+                                                 sidecar->file_size_bytes);
+        }
+
+        for (uint32_t index = 0u; index < state.discovered_m3u_count; index++) {
+            struct discovered_m3u_file *m3u = &state.discovered_m3u[index];
+            if (m3u->needs_parse) {
+                parse_m3u_into_db(scanner->database, m3u->path);
+                (void)library_db_put_m3u_file(scanner->database, m3u->path, m3u->file_size_bytes,
+                                              m3u->mtime_seconds);
+                telemetry.m3u_parsed_count++;
+            }
+        }
+        for (uint32_t index = 0u; index < state.cached_m3u_count; index++) {
+            if (!state.cached_m3u[index].matched) {
+                (void)library_db_remove_m3u_file(scanner->database, state.cached_m3u[index].path);
+            }
+        }
+
+        uint64_t deleted_albums[DELETED_ALBUM_UNLINK_BATCH];
+        uint32_t deleted_album_count = 0u;
+        (void)library_db_recompute_aggregates(scanner->database, deleted_albums,
+                                              DELETED_ALBUM_UNLINK_BATCH, &deleted_album_count);
+
+        if (library_db_commit(scanner->database)) {
+            telemetry.db_writes = 1u;
+            for (uint32_t index = 0u; index < deleted_album_count; index++) {
+                unlink_sharded_cover_file(scanner->covers_directory, deleted_albums[index]);
+            }
+        } else {
+            library_db_rollback(scanner->database);
+        }
+    }
+
+    struct library_db_counts counts;
+    if (library_db_read_counts(scanner->database, &counts)) {
+        atomic_store(&scanner->atomic_album_count, counts.albums);
+        atomic_store(&scanner->atomic_track_count, counts.tracks);
+    }
+
+    pthread_mutex_lock(&scanner->snapshot_mutex);
+    scanner->telemetry = telemetry;
+    pthread_mutex_unlock(&scanner->snapshot_mutex);
+
+    atomic_store(&scanner->atomic_has_changes, true);
+    atomic_store(&scanner->atomic_phase, LIB_DB_SCAN_READY);
+    atomic_store(&scanner->atomic_ready, true);
+    free_scanner_work_state(&state);
+    return NULL;
+}
+
+void library_db_scanner_initialize(struct library_db_scanner *scanner) {
+    if (scanner == NULL) {
+        return;
+    }
+    memset(scanner, 0, sizeof(*scanner));
+    pthread_mutex_init(&scanner->snapshot_mutex, NULL);
+    atomic_store(&scanner->atomic_phase, LIB_DB_SCAN_IDLE);
+}
+
+void library_db_scanner_cancel(struct library_db_scanner *scanner) {
+    if (scanner == NULL) {
+        return;
+    }
+    if (scanner->worker_running) {
+        atomic_store(&scanner->cancel_requested, true);
+        (void)pthread_join(scanner->worker_thread, NULL);
+        scanner->worker_running = false;
+    }
+}
+
+void library_db_scanner_destroy(struct library_db_scanner *scanner) {
+    if (scanner == NULL) {
+        return;
+    }
+    library_db_scanner_cancel(scanner);
+    pthread_mutex_destroy(&scanner->snapshot_mutex);
+    memset(scanner, 0, sizeof(*scanner));
+}
+
+bool library_db_scanner_start(struct library_db_scanner *scanner, struct library_db *database,
+                              const char *music_root, const char *covers_directory) {
+    if (scanner == NULL || database == NULL || music_root == NULL) {
+        return false;
+    }
+    library_db_scanner_cancel(scanner);
+    scanner->database = database;
+    copy_string_bounded(scanner->root_path, sizeof(scanner->root_path), music_root,
+                        sizeof(scanner->root_path) - 1u);
+    copy_string_bounded(scanner->covers_directory, sizeof(scanner->covers_directory),
+                        (covers_directory != NULL) ? covers_directory : "",
+                        sizeof(scanner->covers_directory) - 1u);
+
+    pthread_mutex_lock(&scanner->snapshot_mutex);
+    memset(&scanner->telemetry, 0, sizeof(scanner->telemetry));
+    pthread_mutex_unlock(&scanner->snapshot_mutex);
+
+    atomic_store(&scanner->atomic_phase, LIB_DB_SCAN_DISCOVERING);
+    atomic_store(&scanner->atomic_discovered_files, 0u);
+    atomic_store(&scanner->atomic_delta_files, 0u);
+    atomic_store(&scanner->atomic_scanned_files, 0u);
+    atomic_store(&scanner->atomic_album_count, 0u);
+    atomic_store(&scanner->atomic_track_count, 0u);
+    atomic_store(&scanner->atomic_music_root_exists, true);
+    atomic_store(&scanner->atomic_ready, false);
+    atomic_store(&scanner->atomic_has_changes, false);
+    atomic_store(&scanner->cancel_requested, false);
+
+    if (pthread_create(&scanner->worker_thread, NULL, db_scanner_worker_main, scanner) == 0) {
+        scanner->worker_running = true;
+        return true;
+    }
+    atomic_store(&scanner->atomic_phase, LIB_DB_SCAN_IDLE);
+    return false;
+}
+
+bool library_db_scanner_wait(struct library_db_scanner *scanner) {
+    if (scanner == NULL) {
+        return false;
+    }
+    if (scanner->worker_running) {
+        (void)pthread_join(scanner->worker_thread, NULL);
+        scanner->worker_running = false;
+    }
+    return atomic_load(&scanner->atomic_ready);
+}
+
+void library_db_scanner_poll(struct library_db_scanner *scanner,
+                             struct library_db_scan_snapshot *snapshot_out) {
+    if (scanner == NULL || snapshot_out == NULL) {
+        return;
+    }
+    memset(snapshot_out, 0, sizeof(*snapshot_out));
+    snapshot_out->phase = (enum library_db_scan_phase)atomic_load(&scanner->atomic_phase);
+    snapshot_out->discovered_files = atomic_load(&scanner->atomic_discovered_files);
+    snapshot_out->delta_files = atomic_load(&scanner->atomic_delta_files);
+    snapshot_out->scanned_files = atomic_load(&scanner->atomic_scanned_files);
+    snapshot_out->album_count = atomic_load(&scanner->atomic_album_count);
+    snapshot_out->track_count = atomic_load(&scanner->atomic_track_count);
+    snapshot_out->music_root_exists = atomic_load(&scanner->atomic_music_root_exists);
+    snapshot_out->ready = atomic_load(&scanner->atomic_ready);
+    snapshot_out->has_changes = atomic_load(&scanner->atomic_has_changes);
+    pthread_mutex_lock(&scanner->snapshot_mutex);
+    snapshot_out->telemetry = scanner->telemetry;
+    pthread_mutex_unlock(&scanner->snapshot_mutex);
 }
