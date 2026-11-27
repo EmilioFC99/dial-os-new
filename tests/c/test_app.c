@@ -944,6 +944,90 @@ static void test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker(vo
     (void)system(remove_command);
 }
 
+static void test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts(void) {
+    char base_directory[256];
+    char music_directory[300];
+    char dialos_directory[300];
+    char temp_directory[300];
+    snprintf(base_directory, sizeof(base_directory), "/tmp/dialos_app_delta_%d", (int)getpid());
+    char remove_command[320];
+    snprintf(remove_command, sizeof(remove_command), "rm -rf \"%s\"", base_directory);
+    (void)system(remove_command);
+    mkdir(base_directory, 0755);
+    snprintf(music_directory, sizeof(music_directory), "%s/sdcard", base_directory);
+    snprintf(dialos_directory, sizeof(dialos_directory), "%s/sdcard/.dial-os", base_directory);
+    snprintf(temp_directory, sizeof(temp_directory), "%s/tmp", base_directory);
+    mkdir(music_directory, 0755);
+    mkdir(dialos_directory, 0755);
+    mkdir(temp_directory, 0755);
+
+    char artist_directory[340], album_directory[380], wav_one[420], wav_two[420];
+    snprintf(artist_directory, sizeof(artist_directory), "%s/Test Artist", music_directory);
+    snprintf(album_directory, sizeof(album_directory), "%s/Test Album", artist_directory);
+    snprintf(wav_one, sizeof(wav_one), "%s/01 - First.wav", album_directory);
+    snprintf(wav_two, sizeof(wav_two), "%s/02 - Second.wav", album_directory);
+    mkdir(artist_directory, 0755);
+    mkdir(album_directory, 0755);
+    uint8_t wav_header[44] = {'R','I','F','F',36,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,
+                              0x44,0xAC,0,0,0x88,0x58,1,0,2,0,16,0,'d','a','t','a',0,0,0,0};
+    FILE *file_one = fopen(wav_one, "wb");
+    TEST_ASSERT_TRUE(file_one != NULL);
+    fwrite(wav_header, 1u, 44u, file_one);
+    fclose(file_one);
+
+    /* Boot 1 (cold): builds library.idx */
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+    struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10000u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.track_count);
+    app_destroy(&runtime);
+
+    /* Boot 2 (warm, unchanged SD): delta check runs during boot, Home stays idle & populated */
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+    app_initialize(&runtime, &operations);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10900u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.track_count);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
+    TEST_ASSERT_FALSE(library_scanner_is_busy(&runtime.library_scanner));
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT delta_ok") != NULL);
+    app_destroy(&runtime);
+
+    /* Boot 3 (warm, 2nd track added): delta_changed re-scans during boot, Home opens with 2 */
+    FILE *file_two = fopen(wav_two, "wb");
+    TEST_ASSERT_TRUE(file_two != NULL);
+    fwrite(wav_header, 1u, 44u, file_two);
+    fclose(file_two);
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+    app_initialize(&runtime, &operations);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10900u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(2u, runtime.home.telemetry.track_count);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT delta_changed") != NULL);
+    app_destroy(&runtime);
+
+    (void)system(remove_command);
+}
+
 void run_app_tests(void) {
     printf("Suite: app\n");
     RUN_TEST(test_crash_formatting_and_count_parsing);
@@ -959,4 +1043,5 @@ void run_app_tests(void) {
     RUN_TEST(test_persistent_event_and_performance_logging);
     RUN_TEST(test_library_boot_scan_playback_and_sd_hotswap);
     RUN_TEST(test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker);
+    RUN_TEST(test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts);
 }

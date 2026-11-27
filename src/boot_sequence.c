@@ -187,9 +187,16 @@ static const char *resolve_buffer_status_label(struct boot_controller *controlle
                          (unsigned)controller->library_discovered_files);
                 return controller->dynamic_status_label;
             }
-            snprintf(controller->dynamic_status_label, sizeof(controller->dynamic_status_label),
-                     "INDEX // %u ALBUMS", (unsigned)controller->library_album_count);
-            return controller->dynamic_status_label;
+            if (controller->library_scan_phase == 7u || controller->library_scan_phase == 8u) {
+                if (controller->sweep_progress >= BOOT_BUFFER_WAIT_BAND_START) {
+                    return "SYNC // VERIFYING LIB";
+                }
+            } else {
+                snprintf(controller->dynamic_status_label,
+                         sizeof(controller->dynamic_status_label), "INDEX // %u ALBUMS",
+                         (unsigned)controller->library_album_count);
+                return controller->dynamic_status_label;
+            }
         }
         if (controller->audio_ready) {
             if (controller->sweep_progress >= BOOT_SWEEP_READY_BAND_START ||

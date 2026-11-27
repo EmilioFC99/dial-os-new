@@ -513,6 +513,14 @@ static void begin_library_mount_sync(struct app_runtime *runtime, bool try_cache
                                   : 0ull;
     runtime->library_scan_started = library_scanner_start(
         &runtime->library_scanner, resolve_music_root(runtime), dialos_directory, try_cache_first);
+    if (runtime->state == UI_STATE_BOOT_ANIMATION || runtime->state == UI_STATE_WARNING) {
+        boot_controller_update_library_scan(
+            &runtime->boot, (uint32_t)runtime->library_scanner.phase,
+            runtime->library_scanner.discovered_files, runtime->library_scanner.scanned_files,
+            runtime->library_catalog.album_count, runtime->library_catalog.track_count,
+            runtime->library_scanner.music_root_exists,
+            library_scanner_is_ready(&runtime->library_scanner));
+    }
 }
 
 static void finish_library_scan_step(struct app_runtime *runtime) {
@@ -1015,32 +1023,57 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
             }
             runtime->last_boot_tick_ns = now_ns;
             if (runtime->hardware.sd_mounted && library_scanner_is_busy(&runtime->library_scanner)) {
+                enum library_scan_phase previous_phase = runtime->library_scanner.phase;
                 (void)library_scanner_step(&runtime->library_scanner, now_ns,
                                            LIBRARY_SCAN_DEFAULT_BUDGET_NS);
                 if (library_scanner_is_ready(&runtime->library_scanner)) {
-                    finish_library_scan_step(runtime);
-                    uint64_t scan_end_ns =
-                        runtime->platform->monotonic_ns(runtime->platform->context);
-                    logger_log_line(
-                        &runtime->logger, runtime_uptime_ms(runtime, scan_end_ns), "BOOT",
-                        "scan_done ms=%llu cached=%u tracks=%u albums=%u artists=%u genres=%u "
-                        "playlists=%u",
-                        (unsigned long long)elapsed_ms_since(scan_end_ns,
-                                                            runtime->library_scan_start_ns),
-                        runtime->library_scanner.loaded_from_cache ? 1u : 0u,
-                        (unsigned)runtime->library_catalog.track_count,
-                        (unsigned)runtime->library_catalog.album_count,
-                        (unsigned)runtime->library_catalog.artist_count,
-                        (unsigned)runtime->library_catalog.genre_count,
-                        (unsigned)runtime->library_catalog.playlist_count);
+                    if (previous_phase == LIB_SCAN_TRY_CACHE &&
+                        runtime->library_scanner.loaded_from_cache &&
+                        !runtime->library_delta_pending) {
+                        runtime->library_delta_pending = true;
+                        (void)library_scanner_start_delta_check(&runtime->library_scanner);
+                    } else if ((previous_phase == LIB_SCAN_DELTA_DISCOVERING ||
+                                previous_phase == LIB_SCAN_DELTA_CHECKING) &&
+                               runtime->library_scanner.delta_changed) {
+                        logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns),
+                                        "BOOT", "delta_changed rescanning");
+                        begin_library_mount_sync(runtime, false);
+                    } else {
+                        finish_library_scan_step(runtime);
+                        uint64_t scan_end_ns =
+                            runtime->platform->monotonic_ns(runtime->platform->context);
+                        if (previous_phase == LIB_SCAN_DELTA_DISCOVERING ||
+                            previous_phase == LIB_SCAN_DELTA_CHECKING) {
+                            logger_log_line(&runtime->logger,
+                                            runtime_uptime_ms(runtime, scan_end_ns), "BOOT",
+                                            "delta_ok tracks=%u albums=%u",
+                                            (unsigned)runtime->library_catalog.track_count,
+                                            (unsigned)runtime->library_catalog.album_count);
+                        }
+                        logger_log_line(
+                            &runtime->logger, runtime_uptime_ms(runtime, scan_end_ns), "BOOT",
+                            "scan_done ms=%llu cached=%u tracks=%u albums=%u artists=%u genres=%u "
+                            "playlists=%u",
+                            (unsigned long long)elapsed_ms_since(scan_end_ns,
+                                                                runtime->library_scan_start_ns),
+                            runtime->library_scanner.loaded_from_cache ? 1u : 0u,
+                            (unsigned)runtime->library_catalog.track_count,
+                            (unsigned)runtime->library_catalog.album_count,
+                            (unsigned)runtime->library_catalog.artist_count,
+                            (unsigned)runtime->library_catalog.genre_count,
+                            (unsigned)runtime->library_catalog.playlist_count);
+                    }
                 }
+                bool scan_verified_ready =
+                    library_scanner_is_ready(&runtime->library_scanner) &&
+                    (!runtime->library_scanner.loaded_from_cache ||
+                     runtime->library_delta_pending);
                 boot_controller_update_library_scan(
                     &runtime->boot, (uint32_t)runtime->library_scanner.phase,
                     runtime->library_scanner.discovered_files,
                     runtime->library_scanner.scanned_files, runtime->library_catalog.album_count,
                     runtime->library_catalog.track_count,
-                    runtime->library_scanner.music_root_exists,
-                    library_scanner_is_ready(&runtime->library_scanner));
+                    runtime->library_scanner.music_root_exists, scan_verified_ready);
             }
             if (runtime->boot.phase == BOOT_PHASE_BUFFER && runtime->aa24_received) {
                 if (!runtime->hardware.sd_mounted) {
@@ -1246,29 +1279,23 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
             }
             runtime->last_home_tick_ns = now_ns;
             uint32_t scan_ms = 0u;
-            if (runtime->hardware.sd_mounted) {
-                if (runtime->library_scanner.loaded_from_cache && !runtime->library_delta_pending &&
-                    library_scanner_is_ready(&runtime->library_scanner)) {
-                    runtime->library_delta_pending = true;
-                    (void)library_scanner_start_delta_check(&runtime->library_scanner);
-                }
-                if (library_scanner_is_busy(&runtime->library_scanner)) {
-                    uint64_t scan_t0 = runtime->platform->monotonic_ns(runtime->platform->context);
-                    enum library_scan_phase prev_phase = runtime->library_scanner.phase;
-                    (void)library_scanner_step(&runtime->library_scanner, now_ns,
-                                               LIBRARY_SCAN_DELTA_BUDGET_NS);
-                    if (library_scanner_is_ready(&runtime->library_scanner)) {
-                        if ((prev_phase == LIB_SCAN_DELTA_DISCOVERING ||
-                             prev_phase == LIB_SCAN_DELTA_CHECKING) &&
-                            runtime->library_scanner.delta_changed) {
-                            begin_library_mount_sync(runtime, false);
-                        } else {
-                            finish_library_scan_step(runtime);
-                        }
+            if (runtime->hardware.sd_mounted &&
+                library_scanner_is_busy(&runtime->library_scanner)) {
+                uint64_t scan_t0 = runtime->platform->monotonic_ns(runtime->platform->context);
+                enum library_scan_phase prev_phase = runtime->library_scanner.phase;
+                (void)library_scanner_step(&runtime->library_scanner, now_ns,
+                                           LIBRARY_SCAN_DELTA_BUDGET_NS);
+                if (library_scanner_is_ready(&runtime->library_scanner)) {
+                    if ((prev_phase == LIB_SCAN_DELTA_DISCOVERING ||
+                         prev_phase == LIB_SCAN_DELTA_CHECKING) &&
+                        runtime->library_scanner.delta_changed) {
+                        begin_library_mount_sync(runtime, false);
+                    } else {
+                        finish_library_scan_step(runtime);
                     }
-                    scan_ms = (uint32_t)elapsed_ms_since(
-                        runtime->platform->monotonic_ns(runtime->platform->context), scan_t0);
                 }
+                scan_ms = (uint32_t)elapsed_ms_since(
+                    runtime->platform->monotonic_ns(runtime->platform->context), scan_t0);
             }
             if (runtime->home.launch_target >= 1.0f &&
                 runtime->home.launched_app_id == HOME_APP_LIBRARY &&
