@@ -17,7 +17,8 @@ struct boot_config_snapshot {
 enum ipc_playback_state {
     IPC_PLAYBACK_IDLE = 0,
     IPC_PLAYBACK_PLAYING = 1,
-    IPC_PLAYBACK_PAUSED = 2
+    IPC_PLAYBACK_PAUSED = 2,
+    IPC_PLAYBACK_STOPPED = 3
 };
 
 struct playback_status_update {
@@ -25,9 +26,19 @@ struct playback_status_update {
     enum ipc_playback_state state;
     bool has_track_metadata;
     char track_title[TRACK_TITLE_CAPACITY];
+    char artist_name[TRACK_METADATA_TEXT_CAPACITY];
+    char album_name[TRACK_METADATA_TEXT_CAPACITY];
+    char genre_name[TRACK_METADATA_TEXT_CAPACITY];
     bool has_track_path;
     char track_path[TRACK_PATH_CAPACITY];
     uint32_t duration_ms;
+    bool has_audio_specs;
+    uint32_t sample_rate_hz;
+    uint16_t bit_depth;
+    uint32_t bitrate_kbps;
+    uint16_t channels;
+    uint16_t track_number;
+    bool is_dsd;
 };
 
 enum inbound_ipc_kind {
@@ -68,7 +79,10 @@ enum physical_button_action {
     BUTTON_ACTION_POWER_SHORT,
     BUTTON_ACTION_POWER_LONG,
     BUTTON_ACTION_VOLUME_UP,
-    BUTTON_ACTION_VOLUME_DOWN
+    BUTTON_ACTION_VOLUME_DOWN,
+    BUTTON_ACTION_PLAY_PAUSE,
+    BUTTON_ACTION_NEXT_TRACK,
+    BUTTON_ACTION_PREV_TRACK
 };
 
 enum touch_event_kind {
@@ -101,6 +115,12 @@ size_t protocol_format_set_volume(uint8_t volume_level, char *output_buffer, siz
 size_t protocol_format_play_m3u(const char *disk_m3u_path, char *output_buffer,
                                 size_t buffer_capacity);
 size_t protocol_format_play_pause_toggle(char *output_buffer, size_t buffer_capacity);
+size_t protocol_format_stop(char *output_buffer, size_t buffer_capacity);
+size_t protocol_format_seek_ms(uint32_t target_ms, char *output_buffer, size_t buffer_capacity);
+size_t protocol_format_set_play_mode(uint8_t play_mode, char *output_buffer, size_t buffer_capacity);
+size_t protocol_format_set_max_volume(uint8_t max_volume, char *output_buffer,
+                                    size_t buffer_capacity);
+size_t protocol_format_set_gapless(bool enabled, char *output_buffer, size_t buffer_capacity);
 enum physical_button_action protocol_decode_input_event(const struct kernel_input_event *event);
 void protocol_touch_decoder_initialize(struct touch_event_decoder *decoder);
 enum touch_event_kind protocol_touch_decoder_feed(struct touch_event_decoder *decoder,

@@ -379,6 +379,33 @@ static void parse_a202_song_json(const char *song_json, size_t song_length,
                 index = next_offset;
                 continue;
             }
+            if (key_length == 16u && memcmp(song_json + key_start, "song_artist_name", 16u) == 0 &&
+                song_json[value_start] == '"') {
+                size_t next_offset = value_start;
+                extract_unescaped_json_string(song_json, song_length, value_start,
+                                              status->artist_name, TRACK_METADATA_TEXT_CAPACITY,
+                                              &next_offset);
+                index = next_offset;
+                continue;
+            }
+            if (key_length == 15u && memcmp(song_json + key_start, "song_album_name", 15u) == 0 &&
+                song_json[value_start] == '"') {
+                size_t next_offset = value_start;
+                extract_unescaped_json_string(song_json, song_length, value_start,
+                                              status->album_name, TRACK_METADATA_TEXT_CAPACITY,
+                                              &next_offset);
+                index = next_offset;
+                continue;
+            }
+            if (key_length == 15u && memcmp(song_json + key_start, "song_style_name", 15u) == 0 &&
+                song_json[value_start] == '"') {
+                size_t next_offset = value_start;
+                extract_unescaped_json_string(song_json, song_length, value_start,
+                                              status->genre_name, TRACK_METADATA_TEXT_CAPACITY,
+                                              &next_offset);
+                index = next_offset;
+                continue;
+            }
             if (key_length == 14u && memcmp(song_json + key_start, "song_file_path", 14u) == 0 &&
                 song_json[value_start] == '"') {
                 size_t next_offset = value_start;
@@ -397,6 +424,70 @@ static void parse_a202_song_json(const char *song_json, size_t song_length,
                                             &next_cursor)) {
                     status->duration_ms = duration_ms;
                     index = next_cursor;
+                    continue;
+                }
+            }
+            if (key_length == 16u &&
+                memcmp(song_json + key_start, "song_sample_rate", 16u) == 0) {
+                uint32_t sample_rate_hz = 0u;
+                size_t next_cursor = value_start;
+                if (parse_json_uint32_token(song_json, song_length, value_start, &sample_rate_hz,
+                                            &next_cursor)) {
+                    status->sample_rate_hz = sample_rate_hz;
+                    status->has_audio_specs = true;
+                    index = next_cursor;
+                    continue;
+                }
+            }
+            if (key_length == 18u &&
+                memcmp(song_json + key_start, "song_encoding_rate", 18u) == 0) {
+                uint32_t bit_depth = 0u;
+                size_t next_cursor = value_start;
+                if (parse_json_uint32_token(song_json, song_length, value_start, &bit_depth,
+                                            &next_cursor)) {
+                    status->bit_depth = (uint16_t)bit_depth;
+                    status->has_audio_specs = true;
+                    index = next_cursor;
+                    continue;
+                }
+            }
+            if (key_length == 13u &&
+                memcmp(song_json + key_start, "song_bit_rate", 13u) == 0) {
+                uint32_t bitrate_kbps = 0u;
+                size_t next_cursor = value_start;
+                if (parse_json_uint32_token(song_json, song_length, value_start, &bitrate_kbps,
+                                            &next_cursor)) {
+                    status->bitrate_kbps = bitrate_kbps;
+                    status->has_audio_specs = true;
+                    index = next_cursor;
+                    continue;
+                }
+            }
+            if (key_length == 10u && memcmp(song_json + key_start, "song_track", 10u) == 0) {
+                uint32_t track_number = 0u;
+                size_t next_cursor = value_start;
+                if (parse_json_uint32_token(song_json, song_length, value_start, &track_number,
+                                            &next_cursor)) {
+                    status->track_number = (uint16_t)track_number;
+                    index = next_cursor;
+                    continue;
+                }
+            }
+            if (key_length == 12u && memcmp(song_json + key_start, "song_channel", 12u) == 0) {
+                uint32_t channels = 0u;
+                size_t next_cursor = value_start;
+                if (parse_json_uint32_token(song_json, song_length, value_start, &channels,
+                                            &next_cursor)) {
+                    status->channels = (uint16_t)channels;
+                    index = next_cursor;
+                    continue;
+                }
+            }
+            if (key_length == 6u && memcmp(song_json + key_start, "is_dsd", 6u) == 0) {
+                if (value_start + 4u <= song_length &&
+                    memcmp(song_json + value_start, "true", 4u) == 0) {
+                    status->is_dsd = true;
+                    index = value_start + 4u;
                     continue;
                 }
             }
@@ -423,6 +514,7 @@ static void parse_a202_json_payload(const char *payload, size_t payload_length,
     bool inside_string = false;
     bool escaped = false;
     bool expecting_key = false;
+    uint32_t raw_state = 0u;
     size_t index = 0u;
 
     while (index < payload_length) {
@@ -484,18 +576,10 @@ static void parse_a202_json_payload(const char *payload, size_t payload_length,
                 break;
             }
             if (key_length == 5u && memcmp(payload + key_start, "state", 5u) == 0) {
-                uint32_t raw_state = 0u;
                 size_t next_cursor = value_start;
                 if (parse_json_uint32_token(payload, payload_length, value_start, &raw_state,
                                             &next_cursor)) {
                     status->has_state = true;
-                    if (raw_state == 1u) {
-                        status->state = IPC_PLAYBACK_PAUSED;
-                    } else if (raw_state == 0u || raw_state == 2u) {
-                        status->state = IPC_PLAYBACK_PLAYING;
-                    } else {
-                        status->state = IPC_PLAYBACK_IDLE;
-                    }
                     index = next_cursor;
                     continue;
                 }
@@ -523,6 +607,21 @@ static void parse_a202_json_payload(const char *payload, size_t payload_length,
             expecting_key = false;
         }
         index++;
+    }
+
+    /* Stock V2.57 emits state=2 with "song" when starting a track, and state=2 without "song" on EOF. */
+    if (status->has_state) {
+        if (raw_state == 0u) {
+            status->state = IPC_PLAYBACK_PLAYING;
+        } else if (raw_state == 1u) {
+            status->state = IPC_PLAYBACK_PAUSED;
+        } else if (raw_state == 2u) {
+            status->state = (status->has_track_path || status->has_track_metadata)
+                                ? IPC_PLAYBACK_PLAYING
+                                : IPC_PLAYBACK_STOPPED;
+        } else {
+            status->state = IPC_PLAYBACK_IDLE;
+        }
     }
 }
 
@@ -681,6 +780,61 @@ size_t protocol_format_play_pause_toggle(char *output_buffer, size_t buffer_capa
     return IPC_ENVELOPE_HEADER_BYTES;
 }
 
+size_t protocol_format_stop(char *output_buffer, size_t buffer_capacity) {
+    if (output_buffer == NULL || buffer_capacity < IPC_COMMAND_BUFFER_BYTES) {
+        return 0u;
+    }
+    memcpy(output_buffer, "0202000C0000", IPC_COMMAND_BUFFER_BYTES);
+    return IPC_ENVELOPE_HEADER_BYTES;
+}
+
+size_t protocol_format_seek_ms(uint32_t target_ms, char *output_buffer, size_t buffer_capacity) {
+    if (output_buffer == NULL || buffer_capacity < IPC_SEEK_COMMAND_BUFFER_BYTES) {
+        return 0u;
+    }
+    int written = snprintf(output_buffer, buffer_capacity, "01030010%08X", (unsigned)target_ms);
+    if (written != (int)IPC_SEEK_COMMAND_BYTES) {
+        return 0u;
+    }
+    return IPC_SEEK_COMMAND_BYTES;
+}
+
+size_t protocol_format_set_play_mode(uint8_t play_mode, char *output_buffer, size_t buffer_capacity) {
+    if (output_buffer == NULL || buffer_capacity < IPC_COMMAND_BUFFER_BYTES) {
+        return 0u;
+    }
+    int written = snprintf(output_buffer, buffer_capacity, "0654000C%04X", (unsigned)play_mode);
+    if (written != (int)IPC_ENVELOPE_HEADER_BYTES) {
+        return 0u;
+    }
+    return IPC_ENVELOPE_HEADER_BYTES;
+}
+
+size_t protocol_format_set_max_volume(uint8_t max_volume, char *output_buffer,
+                                    size_t buffer_capacity) {
+    if (output_buffer == NULL || buffer_capacity < IPC_COMMAND_BUFFER_BYTES) {
+        return 0u;
+    }
+    uint8_t clamped = clamp_u32_to_u8((uint32_t)max_volume, 1u, VOLUME_HARD_MAX);
+    int written = snprintf(output_buffer, buffer_capacity, "0711000C%04X", (unsigned)clamped);
+    if (written != (int)IPC_ENVELOPE_HEADER_BYTES) {
+        return 0u;
+    }
+    return IPC_ENVELOPE_HEADER_BYTES;
+}
+
+size_t protocol_format_set_gapless(bool enabled, char *output_buffer, size_t buffer_capacity) {
+    if (output_buffer == NULL || buffer_capacity < IPC_COMMAND_BUFFER_BYTES) {
+        return 0u;
+    }
+    int written =
+        snprintf(output_buffer, buffer_capacity, "0647000C%04X", enabled ? 1u : 0u);
+    if (written != (int)IPC_ENVELOPE_HEADER_BYTES) {
+        return 0u;
+    }
+    return IPC_ENVELOPE_HEADER_BYTES;
+}
+
 enum physical_button_action protocol_decode_input_event(const struct kernel_input_event *event) {
     if (event == NULL || event->type != INPUT_EVENT_TYPE_KEY ||
         event->value != INPUT_EVENT_VALUE_PRESS) {
@@ -688,14 +842,18 @@ enum physical_button_action protocol_decode_input_event(const struct kernel_inpu
     }
 
     switch (event->code) {
+        case KEYCODE_PLAY_PAUSE:
+            return BUTTON_ACTION_PLAY_PAUSE;
         case KEYCODE_VOLUME_UP_PRIMARY:
-        case KEYCODE_VOLUME_UP_ALT_A:
         case KEYCODE_VOLUME_UP_ALT_B:
             return BUTTON_ACTION_VOLUME_UP;
         case KEYCODE_VOLUME_DOWN_PRIMARY:
-        case KEYCODE_VOLUME_DOWN_ALT_A:
         case KEYCODE_VOLUME_DOWN_ALT_B:
             return BUTTON_ACTION_VOLUME_DOWN;
+        case KEYCODE_NEXT_TRACK:
+            return BUTTON_ACTION_NEXT_TRACK;
+        case KEYCODE_PREV_TRACK:
+            return BUTTON_ACTION_PREV_TRACK;
         case KEYCODE_POWER_SHORT_PRIMARY:
         case KEYCODE_POWER_SHORT_ALT:
             return BUTTON_ACTION_POWER_SHORT;
