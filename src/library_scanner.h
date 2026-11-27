@@ -62,6 +62,7 @@ struct library_db_scan_telemetry {
     uint32_t m3u_parsed_count;
     uint32_t sidecars_updated_count;
     int32_t kernel_tz_minutes_west;
+    int32_t kernel_tz_end_minutes_west;
 };
 
 struct library_db_scan_snapshot {

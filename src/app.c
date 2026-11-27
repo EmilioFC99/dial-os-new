@@ -1067,7 +1067,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                     logger_log_line(
                         &runtime->logger, runtime_uptime_ms(runtime, scan_end_ns), "BOOT",
                         "scan_done ms=%llu tracks=%u albums=%u artists=%u genres=%u playlists=%u "
-                        "added=%u updated=%u moved=%u removed=%u tz_min=%d",
+                        "added=%u updated=%u moved=%u removed=%u tz_start=%d tz_end=%d",
                         (unsigned long long)elapsed_ms_since(scan_end_ns,
                                                              runtime->library_scan_start_ns),
                         (unsigned)counts.tracks, (unsigned)counts.albums,
@@ -1077,7 +1077,8 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                         (unsigned)(scan_snap.telemetry.moved_count +
                                    scan_snap.telemetry.moved_edited_count),
                         (unsigned)scan_snap.telemetry.deleted_count,
-                        (int)scan_snap.telemetry.kernel_tz_minutes_west);
+                        (int)scan_snap.telemetry.kernel_tz_minutes_west,
+                        (int)scan_snap.telemetry.kernel_tz_end_minutes_west);
                 }
                 boot_controller_update_library_scan(
                     &runtime->boot, (uint32_t)scan_snap.phase, scan_snap.discovered_files,

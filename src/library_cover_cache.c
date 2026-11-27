@@ -252,7 +252,7 @@ static const uint16_t *try_load_rgb565_from_disk(struct library_cover_cache *cac
         (uint64_t)file_stat.st_size != (uint64_t)LIBRARY_COVER_BYTE_SIZE) {
         return NULL;
     }
-    FILE *file = fopen(cache_path, "rb");
+    FILE *file = library_fopen_readonly_noatime(cache_path);
     if (file == NULL) {
         return NULL;
     }
@@ -394,7 +394,7 @@ static bool decode_request_to_pixels(const struct library_cover_request *request
         return true;
     }
 
-    FILE *file = fopen(request->source_path, "rb");
+    FILE *file = library_fopen_readonly_noatime(request->source_path);
     if (file == NULL) {
         *fail_reason_out = LIBRARY_COVER_FAIL_OPEN;
         return false;

@@ -1,8 +1,35 @@
 #include "jpeg_fast_thumb.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+static FILE *open_readonly_noatime(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return NULL;
+    }
+    int descriptor = -1;
+#if defined(O_NOATIME)
+    descriptor = open(path, O_RDONLY | O_NOATIME);
+    if (descriptor < 0 && (errno == EPERM || errno == EINVAL)) {
+        descriptor = open(path, O_RDONLY);
+    }
+#else
+    descriptor = open(path, O_RDONLY);
+#endif
+    if (descriptor < 0) {
+        return NULL;
+    }
+    FILE *stream = fdopen(descriptor, "rb");
+    if (stream == NULL) {
+        (void)close(descriptor);
+        return NULL;
+    }
+    return stream;
+}
 
 #define JPEG_STREAM_BUFFER_BYTES 8192u
 #define JPEG_MAX_COMPONENTS 3u
@@ -326,7 +353,7 @@ bool jpeg_fast_thumb_decode_file(const char *file_path, uint32_t data_offset,
         return false;
     }
 
-    FILE *file = fopen(file_path, "rb");
+    FILE *file = open_readonly_noatime(file_path);
     if (file == NULL) {
         return false;
     }

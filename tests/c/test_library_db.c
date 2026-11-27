@@ -108,6 +108,17 @@ static void test_open_creates_schema(void) {
     TEST_ASSERT_EQ_U32(0u, counts.tracks);
     TEST_ASSERT_EQ_U32(0u, counts.albums);
     library_db_close(&database);
+
+    /* Verify O_NOATIME read-only helper opens existing files and rejects invalid inputs. */
+    char db_file[256];
+    snprintf(db_file, sizeof(db_file), "%s/library.db", work_directory);
+    FILE *opened = library_fopen_readonly_noatime(db_file);
+    TEST_ASSERT_TRUE(opened != NULL);
+    fclose(opened);
+    TEST_ASSERT_TRUE(library_fopen_readonly_noatime(NULL) == NULL);
+    TEST_ASSERT_TRUE(library_fopen_readonly_noatime("") == NULL);
+    TEST_ASSERT_TRUE(library_fopen_readonly_noatime("/nonexistent/dialos_missing_file") == NULL);
+
     remove_tree(work_directory);
 }
 

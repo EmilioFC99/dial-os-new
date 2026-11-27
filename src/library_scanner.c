@@ -882,7 +882,7 @@ bool library_parse_audio_file_metadata(const char *file_path, const char *root_p
     memset(&fields, 0, sizeof(fields));
     uint8_t format_kind = classify_audio_extension(file_path);
 
-    FILE *file = fopen(file_path, "rb");
+    FILE *file = library_fopen_readonly_noatime(file_path);
     if (file != NULL) {
         if (format_kind == LIBRARY_FORMAT_FLAC) {
             parse_flac_file(file, (uint64_t)file_stat.st_size, &fields);
@@ -986,7 +986,7 @@ bool library_compute_audio_fingerprint(const char *file_path, uint64_t audio_sta
     if (file_path == NULL || fingerprint_out == NULL) {
         return false;
     }
-    FILE *file = fopen(file_path, "rb");
+    FILE *file = library_fopen_readonly_noatime(file_path);
     if (file == NULL) {
         return false;
     }
@@ -1376,7 +1376,7 @@ static void walk_music_directory(struct scanner_work_state *state, const char *d
 }
 
 static void parse_m3u_into_db(struct library_db *database, const char *m3u_path) {
-    FILE *file = fopen(m3u_path, "r");
+    FILE *file = library_fopen_readonly_noatime(m3u_path);
     if (file == NULL) {
         return;
     }
@@ -1651,6 +1651,7 @@ static void *db_scanner_worker_main(void *argument) {
             atomic_store(&scanner->atomic_track_count, counts.tracks);
         }
         pthread_mutex_lock(&scanner->snapshot_mutex);
+        telemetry.kernel_tz_end_minutes_west = read_kernel_tz_minutes_west();
         scanner->telemetry = telemetry;
         pthread_mutex_unlock(&scanner->snapshot_mutex);
         atomic_store(&scanner->atomic_has_changes, false);
@@ -1717,7 +1718,7 @@ static void *db_scanner_worker_main(void *argument) {
                 db_input.disc_number = legacy_input.disc_number;
                 db_input.track_number = legacy_input.track_number;
                 db_input.duration_seconds = legacy_input.duration_seconds;
-                db_input.added_at_seconds = legacy_input.added_at_seconds;
+                db_input.added_at_seconds = discovered->mtime_seconds;
                 db_input.cover_source_kind = legacy_input.cover_source_kind;
                 db_input.cover_path = legacy_input.cover_path;
                 db_input.cover_data_offset = legacy_input.cover_data_offset;
@@ -1799,6 +1800,7 @@ static void *db_scanner_worker_main(void *argument) {
     }
 
     pthread_mutex_lock(&scanner->snapshot_mutex);
+    telemetry.kernel_tz_end_minutes_west = read_kernel_tz_minutes_west();
     scanner->telemetry = telemetry;
     pthread_mutex_unlock(&scanner->snapshot_mutex);
 

@@ -261,4 +261,7 @@ bool library_db_apply_sidecar_cover(struct library_db *database, const char *dir
                                     const char *cover_path, int64_t mtime_seconds,
                                     uint64_t file_size_bytes);
 
+/* Opens a read-only stream with O_NOATIME when supported so FAT32 atime never dirties inodes. */
+FILE *library_fopen_readonly_noatime(const char *path);
+
 #endif
