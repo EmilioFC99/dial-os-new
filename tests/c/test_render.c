@@ -589,6 +589,30 @@ static void test_library_screens_dark_and_light_with_custom_stride(void) {
     free(pixels);
 }
 
+static void test_span_optimized_rect_and_circle_parity(void) {
+    const uint32_t stride_pixels = 384u;
+    size_t buffer_pixels = (size_t)stride_pixels * SCREEN_HEIGHT;
+    uint32_t *pixels = malloc(buffer_pixels * sizeof(uint32_t));
+    TEST_ASSERT_TRUE(pixels != NULL);
+    struct framebuffer_surface surface = {pixels, stride_pixels};
+
+    render_fill_canvas(&surface, 0xFF000000u);
+    render_draw_filled_rect_alpha(&surface, 100.0f, 100.0f, 80.0f, 60.0f, 0xFFFFFFFFu, 0.5f);
+    uint32_t center_pixel =
+        pixels[render_map_coordinate_180(130u) * stride_pixels + render_map_coordinate_180(140u)];
+    TEST_ASSERT_TRUE((center_pixel & 0xFFu) >= 126u && (center_pixel & 0xFFu) <= 130u);
+
+    render_fill_canvas(&surface, 0xFF000000u);
+    render_draw_filled_circle_aa(&surface, 180.0f, 180.0f, 40.0f, 0xFFFFFFFFu, 1.0f);
+    uint32_t circle_center =
+        pixels[render_map_coordinate_180(180u) * stride_pixels + render_map_coordinate_180(180u)];
+    uint32_t circle_outside =
+        pixels[render_map_coordinate_180(180u) * stride_pixels + render_map_coordinate_180(135u)];
+    TEST_ASSERT_EQ_U32(0xFFFFFFFFu, circle_center);
+    TEST_ASSERT_EQ_U32(0xFF000000u, circle_outside);
+    free(pixels);
+}
+
 void run_render_tests(void) {
     printf("Suite: render\n");
     RUN_TEST(test_coordinate_mapping_and_circles);
@@ -598,4 +622,5 @@ void run_render_tests(void) {
     RUN_TEST(test_home_screens_dark_and_light_with_custom_stride);
     RUN_TEST(test_library_2d_primitives_and_blits);
     RUN_TEST(test_library_screens_dark_and_light_with_custom_stride);
+    RUN_TEST(test_span_optimized_rect_and_circle_parity);
 }

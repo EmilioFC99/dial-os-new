@@ -7,6 +7,10 @@
 
 #define MAX_CONVEX_POLYGON_VERTICES 8u
 
+static void blend_horizontal_span(const struct framebuffer_surface *surface, int32_t logical_y,
+                                  int32_t start_x, int32_t end_x, uint32_t color,
+                                  uint8_t alpha_u8);
+
 float render_clamp_f32(float value, float minimum, float maximum) {
     if (value < minimum) {
         return minimum;
@@ -461,20 +465,69 @@ void render_draw_filled_circle_aa(const struct framebuffer_surface *surface, flo
         return;
     }
 
-    float margin = radius + 1.5f;
-    int32_t min_x = clamp_pixel_x(center_x - margin);
-    int32_t max_x = clamp_pixel_x(center_x + margin);
-    int32_t min_y = clamp_pixel_y(center_y - margin);
-    int32_t max_y = clamp_pixel_y(center_y + margin);
+    float outer_reach = radius + 0.5f;
+    float outer_sq = outer_reach * outer_reach;
+    float inner_reach = radius - 0.5f;
+    float inner_sq = inner_reach > 0.0f ? (inner_reach * inner_reach) : 0.0f;
+    uint8_t alpha_u8 = alpha_to_u8(alpha);
+
+    int32_t min_y = clamp_pixel_y(center_y - outer_reach - 1.0f);
+    int32_t max_y = clamp_pixel_y(center_y + outer_reach + 1.0f);
 
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
         float offset_y = (float)pixel_y - center_y;
-        for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
-            float offset_x = (float)pixel_x - center_x;
-            float dist = sqrtf(offset_x * offset_x + offset_y * offset_y);
-            float coverage = render_clamp_f32(radius + 0.5f - dist, 0.0f, 1.0f);
-            if (coverage > 0.0f) {
-                render_blend_pixel(surface, pixel_x, pixel_y, color, alpha_to_u8(alpha * coverage));
+        float rem_outer = outer_sq - offset_y * offset_y;
+        if (rem_outer <= 0.0f) {
+            continue;
+        }
+        float outer_dx = sqrtf(rem_outer);
+        int32_t row_min_x = clamp_pixel_x(center_x - outer_dx - 0.5f);
+        int32_t row_max_x = clamp_pixel_x(center_x + outer_dx + 0.5f);
+
+        int32_t solid_min_x = row_max_x + 1;
+        int32_t solid_max_x = row_min_x - 1;
+        float rem_inner = inner_sq - offset_y * offset_y;
+        if (inner_reach > 0.0f && rem_inner > 0.0f) {
+            float inner_dx = sqrtf(rem_inner);
+            solid_min_x = (int32_t)ceilf(center_x - inner_dx);
+            solid_max_x = (int32_t)floorf(center_x + inner_dx);
+            if (solid_min_x < row_min_x) {
+                solid_min_x = row_min_x;
+            }
+            if (solid_max_x > row_max_x) {
+                solid_max_x = row_max_x;
+            }
+        }
+
+        if (solid_min_x <= solid_max_x) {
+            for (int32_t pixel_x = row_min_x; pixel_x < solid_min_x; pixel_x++) {
+                float offset_x = (float)pixel_x - center_x;
+                float dist = sqrtf(offset_x * offset_x + offset_y * offset_y);
+                float coverage = render_clamp_f32(outer_reach - dist, 0.0f, 1.0f);
+                if (coverage > 0.0f) {
+                    render_blend_pixel(surface, pixel_x, pixel_y, color,
+                                       alpha_to_u8(alpha * coverage));
+                }
+            }
+            blend_horizontal_span(surface, pixel_y, solid_min_x, solid_max_x, color, alpha_u8);
+            for (int32_t pixel_x = solid_max_x + 1; pixel_x <= row_max_x; pixel_x++) {
+                float offset_x = (float)pixel_x - center_x;
+                float dist = sqrtf(offset_x * offset_x + offset_y * offset_y);
+                float coverage = render_clamp_f32(outer_reach - dist, 0.0f, 1.0f);
+                if (coverage > 0.0f) {
+                    render_blend_pixel(surface, pixel_x, pixel_y, color,
+                                       alpha_to_u8(alpha * coverage));
+                }
+            }
+        } else {
+            for (int32_t pixel_x = row_min_x; pixel_x <= row_max_x; pixel_x++) {
+                float offset_x = (float)pixel_x - center_x;
+                float dist = sqrtf(offset_x * offset_x + offset_y * offset_y);
+                float coverage = render_clamp_f32(outer_reach - dist, 0.0f, 1.0f);
+                if (coverage > 0.0f) {
+                    render_blend_pixel(surface, pixel_x, pixel_y, color,
+                                       alpha_to_u8(alpha * coverage));
+                }
             }
         }
     }
@@ -495,18 +548,52 @@ void render_draw_filled_rect_alpha(const struct framebuffer_surface *surface, fl
     int32_t min_y = clamp_pixel_y(top_y - 1.0f);
     int32_t max_y = clamp_pixel_y(bottom_y + 1.0f);
 
+    int32_t full_min_x = (int32_t)ceilf(left_x + 0.5f);
+    int32_t full_max_x = (int32_t)floorf(right_x - 0.5f);
+    if (full_min_x < min_x) {
+        full_min_x = min_x;
+    }
+    if (full_max_x > max_x) {
+        full_max_x = max_x;
+    }
+
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
         float cov_y = render_clamp_f32((float)pixel_y - top_y + 0.5f, 0.0f, 1.0f) *
                       render_clamp_f32(bottom_y - (float)pixel_y + 0.5f, 0.0f, 1.0f);
         if (cov_y <= 0.0f) {
             continue;
         }
-        for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
-            float cov_x = render_clamp_f32((float)pixel_x - left_x + 0.5f, 0.0f, 1.0f) *
-                          render_clamp_f32(right_x - (float)pixel_x + 0.5f, 0.0f, 1.0f);
-            float coverage = cov_x * cov_y;
-            if (coverage > 0.0f) {
-                render_blend_pixel(surface, pixel_x, pixel_y, color, alpha_to_u8(alpha * coverage));
+        uint8_t row_alpha_u8 = alpha_to_u8(alpha * cov_y);
+        if (row_alpha_u8 == 0u) {
+            continue;
+        }
+        if (full_min_x <= full_max_x) {
+            for (int32_t pixel_x = min_x; pixel_x < full_min_x; pixel_x++) {
+                float cov_x = render_clamp_f32((float)pixel_x - left_x + 0.5f, 0.0f, 1.0f) *
+                              render_clamp_f32(right_x - (float)pixel_x + 0.5f, 0.0f, 1.0f);
+                if (cov_x > 0.0f) {
+                    render_blend_pixel(surface, pixel_x, pixel_y, color,
+                                       alpha_to_u8(alpha * cov_y * cov_x));
+                }
+            }
+            blend_horizontal_span(surface, pixel_y, full_min_x, full_max_x, color, row_alpha_u8);
+            for (int32_t pixel_x = full_max_x + 1; pixel_x <= max_x; pixel_x++) {
+                float cov_x = render_clamp_f32((float)pixel_x - left_x + 0.5f, 0.0f, 1.0f) *
+                              render_clamp_f32(right_x - (float)pixel_x + 0.5f, 0.0f, 1.0f);
+                if (cov_x > 0.0f) {
+                    render_blend_pixel(surface, pixel_x, pixel_y, color,
+                                       alpha_to_u8(alpha * cov_y * cov_x));
+                }
+            }
+        } else {
+            for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
+                float cov_x = render_clamp_f32((float)pixel_x - left_x + 0.5f, 0.0f, 1.0f) *
+                              render_clamp_f32(right_x - (float)pixel_x + 0.5f, 0.0f, 1.0f);
+                float coverage = cov_x * cov_y;
+                if (coverage > 0.0f) {
+                    render_blend_pixel(surface, pixel_x, pixel_y, color,
+                                       alpha_to_u8(alpha * coverage));
+                }
             }
         }
     }
@@ -1248,6 +1335,7 @@ void render_draw_text_clipped_alpha(const struct framebuffer_surface *surface,
     int32_t baseline_y = (baseline == TEXT_BASELINE_MIDDLE)
                              ? (int32_t)lroundf(anchor_y + (float)font->cap_height_px * 0.5f)
                              : (int32_t)lroundf(anchor_y + (float)font->ascent_px);
+    uint8_t alpha_u8 = alpha_to_u8(alpha);
 
     size_t byte_offset = 0u;
     while (text[byte_offset] != '\0') {
@@ -1274,7 +1362,9 @@ void render_draw_text_clipped_alpha(const struct framebuffer_surface *surface,
                         continue;
                     }
                     uint8_t blended_alpha =
-                        (uint8_t)lroundf(((float)coverage_u8 / 255.0f) * alpha * 255.0f);
+                        (alpha_u8 == 255u)
+                            ? coverage_u8
+                            : (uint8_t)div_255_fast((uint32_t)coverage_u8 * (uint32_t)alpha_u8);
                     render_blend_pixel(surface, pixel_x, draw_y + (int32_t)row_index, color,
                                        blended_alpha);
                 }
@@ -1737,6 +1827,7 @@ void render_draw_text_rect_clipped_alpha(const struct framebuffer_surface *surfa
     int32_t baseline_y = (baseline == TEXT_BASELINE_MIDDLE)
                              ? (int32_t)lroundf(anchor_y + (float)font->cap_height_px * 0.5f)
                              : (int32_t)lroundf(anchor_y + (float)font->ascent_px);
+    uint8_t alpha_u8 = alpha_to_u8(alpha);
 
     size_t byte_offset = 0u;
     while (text[byte_offset] != '\0') {
@@ -1768,7 +1859,9 @@ void render_draw_text_rect_clipped_alpha(const struct framebuffer_surface *surfa
                         continue;
                     }
                     uint8_t blended_alpha =
-                        (uint8_t)lroundf(((float)coverage_u8 / 255.0f) * alpha * 255.0f);
+                        (alpha_u8 == 255u)
+                            ? coverage_u8
+                            : (uint8_t)div_255_fast((uint32_t)coverage_u8 * (uint32_t)alpha_u8);
                     render_blend_pixel(surface, pixel_x, pixel_y, color, blended_alpha);
                 }
             }
@@ -1974,51 +2067,50 @@ void render_blit_rgb565_scaled_clipped(const struct framebuffer_surface *surface
     int32_t start_u_fp =
         (int32_t)((((double)min_x + 0.5 - (double)dest_x) * (double)source_width * 65536.0) /
                   (double)dest_width);
+    int32_t v_fp =
+        (int32_t)((((double)min_y + 0.5 - (double)dest_y) * (double)source_height * 65536.0) /
+                  (double)dest_height);
+    uint32_t physical_start_x = render_map_coordinate_180((uint32_t)min_x);
 
     for (int32_t pixel_y = min_y; pixel_y <= max_y; pixel_y++) {
-        int32_t v_fp =
-            (int32_t)((((double)pixel_y + 0.5 - (double)dest_y) * (double)source_height * 65536.0) /
-                      (double)dest_height);
-        uint32_t src_y = (uint32_t)(v_fp >> 16);
+        uint32_t src_y = (v_fp < 0) ? 0u : (uint32_t)(v_fp >> 16);
         if (src_y >= source_height) {
             src_y = source_height - 1u;
         }
         const uint16_t *src_row = source_pixels + (size_t)src_y * source_width;
         uint32_t physical_y = render_map_coordinate_180((uint32_t)pixel_y);
-        uint32_t *dst_row = surface->pixels + physical_y * surface->stride_pixels;
+        uint32_t *dst_ptr = surface->pixels + physical_y * surface->stride_pixels + physical_start_x;
         int32_t u_fp = start_u_fp;
 
         if (alpha_u8 == 255u) {
             for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
-                uint32_t src_x = (uint32_t)(u_fp >> 16);
+                uint32_t src_x = (u_fp < 0) ? 0u : (uint32_t)(u_fp >> 16);
                 if (src_x >= source_width) {
                     src_x = source_width - 1u;
                 }
-                uint32_t physical_x = render_map_coordinate_180((uint32_t)pixel_x);
-                dst_row[physical_x] = rgb565_to_xrgb8888(src_row[src_x]);
+                *dst_ptr-- = rgb565_to_xrgb8888(src_row[src_x]);
                 u_fp += step_u_fp;
             }
         } else {
             uint32_t inv_alpha = 255u - (uint32_t)alpha_u8;
             for (int32_t pixel_x = min_x; pixel_x <= max_x; pixel_x++) {
-                uint32_t src_x = (uint32_t)(u_fp >> 16);
+                uint32_t src_x = (u_fp < 0) ? 0u : (uint32_t)(u_fp >> 16);
                 if (src_x >= source_width) {
                     src_x = source_width - 1u;
                 }
                 uint32_t src_color = rgb565_to_xrgb8888(src_row[src_x]);
-                uint32_t physical_x = render_map_coordinate_180((uint32_t)pixel_x);
-                uint32_t dst_color = dst_row[physical_x];
+                uint32_t dst_color = *dst_ptr;
                 uint32_t out_r = div_255_fast(((src_color >> 16u) & 0xFFu) * alpha_u8 +
                                               ((dst_color >> 16u) & 0xFFu) * inv_alpha);
                 uint32_t out_g = div_255_fast(((src_color >> 8u) & 0xFFu) * alpha_u8 +
                                               ((dst_color >> 8u) & 0xFFu) * inv_alpha);
                 uint32_t out_b =
                     div_255_fast((src_color & 0xFFu) * alpha_u8 + (dst_color & 0xFFu) * inv_alpha);
-                dst_row[physical_x] = 0xFF000000u | (out_r << 16u) | (out_g << 8u) | out_b;
+                *dst_ptr-- = 0xFF000000u | (out_r << 16u) | (out_g << 8u) | out_b;
                 u_fp += step_u_fp;
             }
         }
-        (void)step_v_fp;
+        v_fp += step_v_fp;
     }
 }
 
