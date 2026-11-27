@@ -550,16 +550,19 @@ static void maybe_restore_playback_state(struct app_runtime *runtime, uint64_t n
     sync_home_telemetry(runtime);
     sync_playback_to_ui(runtime);
     if (runtime->playback.has_active_track) {
+        (void)library_cover_cache_lookup_or_load_disk(
+            &runtime->library_covers, runtime->playback.active_track.album_uid);
         now_playing_media_request_active(&runtime->now_playing_media,
                                          runtime->playback.active_track.album_id,
                                          runtime->playback.active_track.album_uid,
                                          runtime->playback.active_track.path);
     }
     logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "BOOT",
-                    "restore vol=%u shuf=%u rep=%u track=%u elapsed=%u",
+                    "restore vol=%u shuf=%u rep=%u track=%u album=%lld elapsed=%u",
                     (unsigned)runtime->volume_level, runtime->playback.shuffle_enabled ? 1u : 0u,
                     (unsigned)runtime->playback.repeat_mode,
                     runtime->playback.has_active_track ? 1u : 0u,
+                    (long long)runtime->playback.active_track.album_id,
                     (unsigned)runtime->playback.elapsed_ms);
 }
 
@@ -805,6 +808,18 @@ static void finish_library_scan_step(struct app_runtime *runtime) {
         if (became_ephemeral) {
             runtime->playback.ephemeral_active = true;
         }
+        struct library_db_track_details refreshed_track;
+        if (library_db_get_queue_track(&runtime->library_db, runtime->playback.current_slot,
+                                       &refreshed_track)) {
+            runtime->playback.active_track = refreshed_track;
+        }
+        sync_playback_to_ui(runtime);
+        (void)library_cover_cache_lookup_or_load_disk(
+            &runtime->library_covers, runtime->playback.active_track.album_uid);
+        now_playing_media_request_active(&runtime->now_playing_media,
+                                         runtime->playback.active_track.album_id,
+                                         runtime->playback.active_track.album_uid,
+                                         runtime->playback.active_track.path);
     }
     library_controller_refresh_catalog_views(&runtime->library);
     sync_library_counts_to_home(runtime);
@@ -1043,7 +1058,10 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
             break;
 
         case IPC_INBOUND_PLAYBACK_ELAPSED:
-            playback_engine_handle_ipc_elapsed(&runtime->playback, message->elapsed_ms);
+            if (playback_engine_handle_ipc_elapsed(&runtime->playback, message->elapsed_ms)) {
+                now_playing_controller_on_ipc_elapsed(&runtime->now_playing,
+                                                      runtime->playback.elapsed_ms);
+            }
             runtime->home.telemetry.elapsed_ms = message->elapsed_ms;
             runtime->home.elapsed_fractional_ms = 0.0f;
             break;
@@ -1275,8 +1293,10 @@ void app_handle_touch_event(struct app_runtime *runtime, const struct touch_even
             enum now_playing_action_kind np_action = NP_ACTION_NONE;
             now_playing_controller_handle_touch(&runtime->now_playing, event, &effects,
                                                 &volume_changed, &np_action);
-            execute_playback_effects(runtime, &effects, now_ns);
             if (volume_changed) {
+                if (runtime->now_playing.volume_level > runtime->max_volume) {
+                    runtime->now_playing.volume_level = runtime->max_volume;
+                }
                 runtime->volume_level = runtime->now_playing.volume_level;
                 sync_home_telemetry(runtime);
                 mark_playback_persistence_dirty(runtime, now_ns);
@@ -1288,6 +1308,7 @@ void app_handle_touch_event(struct app_runtime *runtime, const struct touch_even
                                                              length);
                 }
             }
+            execute_playback_effects(runtime, &effects, now_ns);
             if (np_action != NP_ACTION_NONE) {
                 handle_now_playing_action(runtime, np_action);
             }
@@ -1665,12 +1686,22 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                 enum now_playing_action_kind np_action = NP_ACTION_NONE;
                 now_playing_controller_step(&runtime->now_playing, delta_seconds, &effects,
                                             &volume_changed, &np_action);
-                execute_playback_effects(runtime, &effects, now_ns);
                 if (volume_changed) {
+                    if (runtime->now_playing.volume_level > runtime->max_volume) {
+                        runtime->now_playing.volume_level = runtime->max_volume;
+                    }
                     runtime->volume_level = runtime->now_playing.volume_level;
                     sync_home_telemetry(runtime);
                     mark_playback_persistence_dirty(runtime, now_ns);
+                    char command[IPC_COMMAND_BUFFER_BYTES];
+                    size_t length =
+                        protocol_format_set_volume(runtime->volume_level, command, sizeof(command));
+                    if (length > 0u) {
+                        (void)runtime->platform->ipc_send_player(runtime->platform->context,
+                                                                 command, length);
+                    }
                 }
+                execute_playback_effects(runtime, &effects, now_ns);
                 if (np_action != NP_ACTION_NONE) {
                     handle_now_playing_action(runtime, np_action);
                 }

@@ -1244,6 +1244,8 @@ static void test_now_playing_persistence_across_reboot_and_resume_seek(void) {
     TEST_ASSERT_TRUE(runtime.playback.has_active_track);
     TEST_ASSERT_FALSE(runtime.playback.is_playing);
     TEST_ASSERT_EQ_U32(42000u, runtime.playback.elapsed_ms);
+    TEST_ASSERT_TRUE(runtime.library.has_active_track);
+    TEST_ASSERT_TRUE(runtime.library.active_album_uid != 0ull);
 
     bool restored_vol_ipc = false;
     for (uint32_t idx = 0u; idx < fake.ipc_count; idx++) {
@@ -1276,6 +1278,69 @@ static void test_now_playing_persistence_across_reboot_and_resume_seek(void) {
     (void)system(remove_command);
 }
 
+static void test_now_playing_bezel_volume_swipe_updates_runtime_and_ipc(void) {
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+    runtime.state = UI_STATE_HOME;
+    runtime.home.active_screen = ACTIVE_SCREEN_NOW_PLAYING_SHELL;
+    runtime.playback.has_active_track = true;
+    runtime.volume_level = 30u;
+    runtime.max_volume = 120u;
+    now_playing_controller_enter(&runtime.now_playing, NP_RETURN_HOME, NP_OPEN_FROM_HOME, true,
+                                 0.0f, 30u);
+
+    uint32_t ipc_before = fake.ipc_count;
+    struct touch_event down_up = {TOUCH_EVENT_DOWN, 336, 220, 100ull};
+    struct touch_event move_up1 = {TOUCH_EVENT_MOVE, 336, 170, 130ull};
+    struct touch_event move_up2 = {TOUCH_EVENT_MOVE, 330, 125, 160ull};
+    struct touch_event up_up = {TOUCH_EVENT_UP, 330, 125, 190ull};
+    app_handle_touch_event(&runtime, &down_up);
+    app_handle_touch_event(&runtime, &move_up1);
+    app_handle_touch_event(&runtime, &move_up2);
+    app_handle_touch_event(&runtime, &up_up);
+
+    TEST_ASSERT_TRUE(runtime.volume_level > 30u);
+    TEST_ASSERT_EQ_U32(runtime.volume_level, runtime.now_playing.volume_level);
+    TEST_ASSERT_TRUE(runtime.now_playing.volume_hud_active);
+
+    char expected_ipc[16];
+    snprintf(expected_ipc, sizeof(expected_ipc), "0715000C%04X",
+             (unsigned)runtime.volume_level);
+    bool found_volume_ipc = false;
+    for (uint32_t idx = ipc_before; idx < fake.ipc_count; idx++) {
+        if (strcmp(fake.ipc_messages[idx], expected_ipc) == 0) {
+            found_volume_ipc = true;
+        }
+    }
+    TEST_ASSERT_TRUE(found_volume_ipc);
+
+    uint8_t peak_volume = runtime.volume_level;
+    struct touch_event down_dn = {TOUCH_EVENT_DOWN, 330, 125, 220ull};
+    struct touch_event move_dn1 = {TOUCH_EVENT_MOVE, 336, 180, 250ull};
+    struct touch_event move_dn2 = {TOUCH_EVENT_MOVE, 336, 235, 280ull};
+    struct touch_event up_dn = {TOUCH_EVENT_UP, 336, 235, 310ull};
+    app_handle_touch_event(&runtime, &down_dn);
+    app_handle_touch_event(&runtime, &move_dn1);
+    app_handle_touch_event(&runtime, &move_dn2);
+    app_handle_touch_event(&runtime, &up_dn);
+    TEST_ASSERT_TRUE(runtime.volume_level < peak_volume);
+
+    runtime.max_volume = 60u;
+    runtime.volume_level = 58u;
+    runtime.now_playing.volume_level = 58u;
+    app_handle_touch_event(&runtime, &down_up);
+    app_handle_touch_event(&runtime, &move_up1);
+    app_handle_touch_event(&runtime, &move_up2);
+    app_handle_touch_event(&runtime, &up_up);
+    TEST_ASSERT_TRUE(runtime.volume_level <= 60u);
+
+    app_destroy(&runtime);
+}
+
 void run_app_tests(void) {
     printf("Suite: app\n");
     RUN_TEST(test_crash_formatting_and_count_parsing);
@@ -1294,4 +1359,5 @@ void run_app_tests(void) {
     RUN_TEST(test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts);
     RUN_TEST(test_now_playing_global_buttons_locked_and_volume_hud);
     RUN_TEST(test_now_playing_persistence_across_reboot_and_resume_seek);
+    RUN_TEST(test_now_playing_bezel_volume_swipe_updates_runtime_and_ipc);
 }
