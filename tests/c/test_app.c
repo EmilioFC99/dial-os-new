@@ -911,7 +911,13 @@ static void test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker(vo
     /* Step 600 ms while unmounted, then restore SD mount -> 500 ms probe recovers */
     advance_runtime_ticks(&runtime, &fake, 600u);
     fake.hardware.sd_mounted = true;
-    advance_runtime_ticks(&runtime, &fake, 9000u);
+    advance_runtime_ticks(&runtime, &fake, 1000u);
+    for (uint32_t spin = 0u;
+         spin < 500u && library_cover_cache_is_boot_precaching(&runtime.library_covers); spin++) {
+        usleep(1000u);
+        advance_runtime_ticks(&runtime, &fake, 20u);
+    }
+    advance_runtime_ticks(&runtime, &fake, 8000u);
 
     TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
     TEST_ASSERT_EQ_U32(1u, runtime.library_covers.precache_decoded);

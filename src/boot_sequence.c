@@ -39,14 +39,6 @@ static void update_buffer_sweep_progress(struct boot_controller *controller, flo
         controller->cover_precache_active) {
         float scan_cap = 0.92f;
         float paced_target = buffer_time_ratio * scan_cap;
-        if (controller->cover_precache_active && controller->cover_precache_total > 0u) {
-            float cover_ratio =
-                (float)controller->cover_precache_done / (float)controller->cover_precache_total;
-            float cover_target = 0.78f + clamp_f32(cover_ratio, 0.0f, 1.0f) * (scan_cap - 0.78f);
-            if (cover_target > paced_target) {
-                paced_target = cover_target;
-            }
-        }
         if (paced_target > controller->sweep_progress) {
             controller->sweep_progress = paced_target;
         }
@@ -176,7 +168,8 @@ static void advance_handoff_phase(struct boot_controller *controller, float rema
 }
 
 static const char *resolve_buffer_status_label(struct boot_controller *controller) {
-    if (controller->cover_precache_active) {
+    if (controller->cover_precache_active &&
+        controller->sweep_progress >= BOOT_BUFFER_WAIT_BAND_START) {
         snprintf(controller->dynamic_status_label, sizeof(controller->dynamic_status_label),
                  "COVERS // %u / %u", (unsigned)controller->cover_precache_done,
                  (unsigned)controller->cover_precache_total);

@@ -63,13 +63,11 @@ struct app_runtime {
     bool library_prev_sd_mounted;
     bool library_hub_reset_on_dive;
     bool boot_cover_precache_started;
-    bool boot_precache_announced_frame;
     uint64_t library_scan_start_ns;
     uint64_t cover_precache_start_ns;
     uint64_t boot_last_sd_probe_ns;
     uint64_t boot_sd_missing_since_ns;
     uint64_t boot_last_precache_log_ns;
-    uint32_t boot_logged_cover_failures;
     uint32_t m3u_sequence;
     uint64_t last_boot_tick_ns;
     uint64_t last_home_tick_ns;

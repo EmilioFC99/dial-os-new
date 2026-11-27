@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #define LIBRARY_SCAN_DEFAULT_BUDGET_NS 4000000ull
-#define LIBRARY_SCAN_DELTA_BUDGET_NS 2000000ull
+#define LIBRARY_SCAN_DELTA_BUDGET_NS 1000000ull
 #define LIBRARY_SCAN_MAX_DEPTH 16u
 
 enum library_scan_phase {

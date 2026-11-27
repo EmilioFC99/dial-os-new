@@ -176,6 +176,19 @@ static void test_boot_library_scan_hold_and_summary_lines(void) {
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
     TEST_ASSERT_EQ_STR("SCAN // 2 / 5", snapshot.status_label);
 
+    /* Early Act 02 (< 0.60 sweep) preserves INIT status and does not jump sweep_progress */
+    struct boot_controller ramp_ctrl;
+    boot_controller_initialize(&ramp_ctrl);
+    boot_controller_mark_audio_ready(&ramp_ctrl, true);
+    boot_controller_update_sd_mounted(&ramp_ctrl, true);
+    boot_controller_update_library_scan(&ramp_ctrl, 6u, 5u, 5u, 2u, 5u, true, true);
+    boot_controller_update_cover_precache(&ramp_ctrl, true, 1u, 4u);
+    step_in_increments(&ramp_ctrl, 1.2f, 1.0f / 60.0f);
+    boot_controller_get_snapshot(&ramp_ctrl, &snapshot);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
+    TEST_ASSERT_TRUE(snapshot.sweep_progress < 0.25f);
+    TEST_ASSERT_TRUE(strcmp(snapshot.status_label, "COVERS // 1 / 4") != 0);
+
     /* Complete scan -> holds on cover precache if active, then advances */
     boot_controller_update_library_scan(&controller, 6u, 5u, 5u, 2u, 5u, true, true);
     boot_controller_update_cover_precache(&controller, true, 1u, 4u);

@@ -1082,38 +1082,39 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                             runtime->boot_cover_precache_started = true;
                             runtime->cover_precache_start_ns = now_ns;
                             runtime->boot_last_precache_log_ns = now_ns;
-                            runtime->boot_logged_cover_failures = 0u;
                             library_cover_cache_begin_boot_precache(&runtime->library_covers,
                                                                     &runtime->library_catalog);
                             if (library_cover_cache_is_boot_precaching(&runtime->library_covers)) {
                                 boot_controller_update_cover_precache(
                                     &runtime->boot, true, 0u,
                                     runtime->library_covers.precache_total);
-                                runtime->boot_precache_announced_frame = true;
                                 logger_log_line(&runtime->logger,
                                                 runtime_uptime_ms(runtime, now_ns), "BOOT",
                                                 "precache_start albums_with_cover=%u",
                                                 (unsigned)runtime->library_covers.precache_total);
                                 flush_runtime_logs(runtime, false);
                             }
-                        } else if (runtime->boot_precache_announced_frame) {
-                            runtime->boot_precache_announced_frame = false;
                         } else if (library_cover_cache_is_boot_precaching(
                                        &runtime->library_covers)) {
-                            uint32_t previous_failed = runtime->library_covers.precache_failed;
                             (void)library_cover_cache_step_boot_precache(
                                 &runtime->library_covers, &runtime->library_catalog,
                                 runtime->platform->monotonic_ns, runtime->platform->context,
                                 LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
-                            if (runtime->library_covers.precache_failed > previous_failed &&
-                                runtime->boot_logged_cover_failures < 8u) {
-                                runtime->boot_logged_cover_failures++;
+                            uint32_t avail_fail_logs =
+                                atomic_load(&runtime->library_covers.precache_fail_log_count);
+                            while (runtime->library_covers.precache_fail_log_read_cursor <
+                                       avail_fail_logs &&
+                                   runtime->library_covers.precache_fail_log_read_cursor <
+                                       LIBRARY_COVER_MAX_FAIL_LOGS) {
+                                uint32_t slot_idx =
+                                    runtime->library_covers.precache_fail_log_read_cursor++;
+                                const struct library_cover_fail_entry *entry =
+                                    &runtime->library_covers.precache_fail_logs[slot_idx];
                                 logger_log_line(&runtime->logger,
                                                 runtime_uptime_ms(runtime, now_ns), "BOOT",
                                                 "cover_fail done=%u reason=%u path=%s",
-                                                (unsigned)runtime->library_covers.precache_done,
-                                                (unsigned)runtime->library_covers.last_fail_reason,
-                                                runtime->library_covers.last_fail_path);
+                                                (unsigned)entry->done_index,
+                                                (unsigned)entry->reason, entry->path);
                             }
                             bool still_precaching =
                                 library_cover_cache_is_boot_precaching(&runtime->library_covers);

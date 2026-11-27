@@ -1107,6 +1107,9 @@ static void step_discovery_batch(struct library_scanner *scanner, bool collect_f
             frame->dir_handle = NULL;
             frame->dir_path = NULL;
             scanner->dir_depth--;
+            if (budget_ns > 0u && (monotonic_clock_ns() - start_ns) >= budget_ns) {
+                break;
+            }
             continue;
         }
         if (should_skip_directory_name(entry->d_name)) {
