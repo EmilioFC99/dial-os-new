@@ -728,6 +728,7 @@ void playback_engine_handle_ipc_status(struct playback_engine *engine,
             engine->current_slot = expected_next_slot;
             engine->active_track = expected_next;
             engine->is_playing = true;
+            engine->audio_started = !status->is_loading_state;
             engine->elapsed_ms = 0u;
             engine->duration_ms = status->duration_ms > 0u
                                       ? status->duration_ms
@@ -779,9 +780,12 @@ void playback_engine_handle_ipc_status(struct playback_engine *engine,
     }
 }
 
-void playback_engine_handle_ipc_elapsed(struct playback_engine *engine, uint32_t elapsed_ms) {
+bool playback_engine_handle_ipc_elapsed(struct playback_engine *engine, uint32_t elapsed_ms) {
     if (engine == NULL || !engine->has_active_track || engine->awaiting_slice_load) {
-        return;
+        return false;
+    }
+    if (!engine->audio_started && !engine->has_pending_resume_seek && elapsed_ms > 5000u) {
+        return false;
     }
     if (engine->duration_ms > 0u && elapsed_ms > engine->duration_ms) {
         elapsed_ms = engine->duration_ms;
@@ -790,6 +794,7 @@ void playback_engine_handle_ipc_elapsed(struct playback_engine *engine, uint32_t
         engine->audio_started = true;
     }
     engine->elapsed_ms = elapsed_ms;
+    return true;
 }
 
 void playback_engine_handle_ipc_stop(struct playback_engine *engine,

@@ -260,6 +260,10 @@ void now_playing_controller_enter(struct now_playing_controller *controller,
     controller->pointer_active = false;
     if (controller->engine != NULL) {
         controller->interpolated_elapsed_ms = (float)controller->engine->elapsed_ms;
+        controller->elapsed_anchor_ms = (float)controller->engine->elapsed_ms;
+        controller->elapsed_since_anchor_seconds = 0.0f;
+        controller->has_elapsed_anchor = false;
+        controller->last_audio_started = controller->engine->audio_started;
     }
 }
 
@@ -315,8 +319,14 @@ void now_playing_controller_apply_effects(struct now_playing_controller *control
     if (effects->has_toast) {
         now_playing_controller_show_toast(controller, effects->toast_text);
     }
-    if (effects->track_changed && controller->engine != NULL) {
+    if ((effects->track_changed || effects->send_seek) && controller->engine != NULL) {
         controller->interpolated_elapsed_ms = (float)controller->engine->elapsed_ms;
+        controller->elapsed_anchor_ms = (float)controller->engine->elapsed_ms;
+        controller->elapsed_since_anchor_seconds = 0.0f;
+        controller->has_elapsed_anchor = false;
+        controller->last_audio_started = controller->engine->audio_started;
+    }
+    if (effects->track_changed && controller->engine != NULL) {
         controller->lyrics_last_cue_index = -1;
         controller->lyrics_prev_cue_index = -1;
         controller->lyrics_prev_cue_text[0] = '\0';
@@ -324,6 +334,21 @@ void now_playing_controller_apply_effects(struct now_playing_controller *control
         if (!controller->engine->is_playing) {
             controller->vinyl_nudge_radians = 0.0f;
         }
+    }
+}
+
+void now_playing_controller_on_ipc_elapsed(struct now_playing_controller *controller,
+                                           uint32_t elapsed_ms) {
+    if (controller == NULL) {
+        return;
+    }
+    controller->elapsed_anchor_ms = (float)elapsed_ms;
+    controller->elapsed_since_anchor_seconds = 0.0f;
+    controller->has_elapsed_anchor = true;
+    controller->last_audio_started = true;
+    if (!controller->is_seeking &&
+        fabsf(controller->interpolated_elapsed_ms - (float)elapsed_ms) > 250.0f) {
+        controller->interpolated_elapsed_ms = (float)elapsed_ms;
     }
 }
 
@@ -431,18 +456,32 @@ void now_playing_controller_step(struct now_playing_controller *controller, floa
     if (controller->engine != NULL && controller->engine->has_active_track) {
         if (controller->is_seeking) {
             controller->interpolated_elapsed_ms = (float)controller->seek_preview_ms;
+            controller->has_elapsed_anchor = false;
         } else if (controller->engine->is_playing) {
             if (!controller->engine->audio_started) {
                 controller->interpolated_elapsed_ms = (float)controller->engine->elapsed_ms;
+                controller->elapsed_anchor_ms = (float)controller->engine->elapsed_ms;
+                controller->elapsed_since_anchor_seconds = 0.0f;
+                controller->has_elapsed_anchor = false;
+                controller->last_audio_started = false;
             } else {
+                if (!controller->last_audio_started) {
+                    controller->last_audio_started = true;
+                    if (!controller->has_elapsed_anchor) {
+                        controller->elapsed_anchor_ms = (float)controller->engine->elapsed_ms;
+                        controller->elapsed_since_anchor_seconds = 0.0f;
+                    }
+                }
+                controller->elapsed_since_anchor_seconds += delta_seconds;
                 controller->interpolated_elapsed_ms += delta_seconds * 1000.0f;
-                float diff =
-                    (float)controller->engine->elapsed_ms - controller->interpolated_elapsed_ms;
-                if (fabsf(diff) > 1200.0f) {
-                    controller->interpolated_elapsed_ms = (float)controller->engine->elapsed_ms;
-                } else if (diff > 0.0f) {
+                float target_ms = controller->elapsed_anchor_ms +
+                                  controller->elapsed_since_anchor_seconds * 1000.0f;
+                float diff = target_ms - controller->interpolated_elapsed_ms;
+                if (fabsf(diff) > 350.0f) {
+                    controller->interpolated_elapsed_ms = target_ms;
+                } else {
                     controller->interpolated_elapsed_ms +=
-                        diff * clamp_f32(delta_seconds * 6.0f, 0.0f, 1.0f);
+                        diff * clamp_f32(delta_seconds * 8.0f, 0.0f, 1.0f);
                 }
             }
             if (controller->engine->duration_ms > 0u &&
@@ -451,6 +490,9 @@ void now_playing_controller_step(struct now_playing_controller *controller, floa
             }
         } else {
             controller->interpolated_elapsed_ms = (float)controller->engine->elapsed_ms;
+            controller->elapsed_anchor_ms = (float)controller->engine->elapsed_ms;
+            controller->elapsed_since_anchor_seconds = 0.0f;
+            controller->has_elapsed_anchor = false;
         }
     }
 

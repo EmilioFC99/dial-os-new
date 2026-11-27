@@ -32,7 +32,7 @@
 #define NP_BANNER_IN_SECONDS 0.24f
 #define NP_BANNER_HOLD_SECONDS 2.0f
 #define NP_BANNER_OUT_SECONDS 0.42f
-#define NP_LYRICS_TRANSITION_SECONDS 0.44f
+#define NP_LYRICS_TRANSITION_SECONDS 0.22f
 #define NP_QUEUE_WINDOW_SIZE 64u
 #define NP_QUEUE_PREFETCH_MARGIN 16u
 #define NP_PICKER_VISIBLE_ROWS 4u
@@ -84,6 +84,10 @@ struct now_playing_controller {
     float exit_transition_progress;
     float elapsed_seconds;
     float interpolated_elapsed_ms;
+    float elapsed_anchor_ms;
+    float elapsed_since_anchor_seconds;
+    bool has_elapsed_anchor;
+    bool last_audio_started;
     uint8_t volume_level;
 
     /* Vinyl spin & inertia */
@@ -205,6 +209,8 @@ bool now_playing_controller_step_back(struct now_playing_controller *controller,
                                       enum now_playing_action_kind *action_out);
 void now_playing_controller_apply_effects(struct now_playing_controller *controller,
                                           const struct playback_engine_effects *effects);
+void now_playing_controller_on_ipc_elapsed(struct now_playing_controller *controller,
+                                           uint32_t elapsed_ms);
 void now_playing_controller_show_volume_hud(struct now_playing_controller *controller,
                                             uint8_t volume_level);
 void now_playing_controller_trigger_play_pulse(struct now_playing_controller *controller,

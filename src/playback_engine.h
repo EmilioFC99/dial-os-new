@@ -99,7 +99,7 @@ void playback_engine_on_favorites_mutated(struct playback_engine *engine,
 void playback_engine_handle_ipc_status(struct playback_engine *engine,
                                        const struct playback_status_update *status,
                                        struct playback_engine_effects *effects_out);
-void playback_engine_handle_ipc_elapsed(struct playback_engine *engine, uint32_t elapsed_ms);
+bool playback_engine_handle_ipc_elapsed(struct playback_engine *engine, uint32_t elapsed_ms);
 void playback_engine_handle_ipc_stop(struct playback_engine *engine,
                                      struct playback_engine_effects *effects_out);
 void playback_engine_peek_skip(const struct playback_engine *engine, int32_t direction,

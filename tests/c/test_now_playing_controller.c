@@ -194,6 +194,25 @@ static void test_bezel_volume_swipe_and_audio_started_clock_sync(void) {
     TEST_ASSERT_TRUE(ctrl.volume_level < prev_vol);
     now_playing_controller_handle_touch(&ctrl, &bez2_up, &effects, &vol_changed, &action);
 
+    /* Anchored elapsed clock does not snap back to 0 if 1.3s passes before first a103,
+     * and snaps/tracks accurately when behind by 500ms on a103 */
+    engine.has_active_track = true;
+    engine.is_playing = true;
+    engine.audio_started = true;
+    engine.elapsed_ms = 0u;
+    engine.duration_ms = 180000u;
+    now_playing_controller_enter(&ctrl, NP_RETURN_HOME, NP_OPEN_FROM_HOME, true, 0.0f, 50u);
+    for (uint32_t tick = 0u; tick < 26u; tick++) {
+        now_playing_controller_step(&ctrl, 0.05f, &effects, &vol_changed, &action);
+    }
+    TEST_ASSERT_TRUE(ctrl.interpolated_elapsed_ms >= 1250.0f);
+
+    ctrl.interpolated_elapsed_ms = 500.0f;
+    now_playing_controller_on_ipc_elapsed(&ctrl, 1000u);
+    TEST_ASSERT_TRUE(ctrl.interpolated_elapsed_ms >= 990.0f);
+    now_playing_controller_step(&ctrl, 0.05f, &effects, &vol_changed, &action);
+    TEST_ASSERT_TRUE(ctrl.interpolated_elapsed_ms >= 1040.0f);
+
     library_db_close(&database);
     cleanup_ctrl_temp_dir(dir_path);
 }

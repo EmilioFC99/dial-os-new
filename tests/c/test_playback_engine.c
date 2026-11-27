@@ -143,6 +143,28 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
     }, &effects);
     TEST_ASSERT_FALSE(engine.is_playing);
 
+    /* Stale a103 elapsed (>5s) is ignored while !audio_started */
+    engine.audio_started = false;
+    engine.has_pending_resume_seek = false;
+    engine.elapsed_ms = 0u;
+    TEST_ASSERT_FALSE(playback_engine_handle_ipc_elapsed(&engine, 120000u));
+    TEST_ASSERT_EQ_U32(0u, engine.elapsed_ms);
+
+    /* Gapless auto-advance with is_loading_state=true resets audio_started=false */
+    TEST_ASSERT_TRUE(playback_engine_toggle_play_pause(&engine, &effects));
+    playback_engine_handle_ipc_status(&engine, &(struct playback_status_update){
+        .has_state = true, .state = IPC_PLAYBACK_PLAYING,
+        .is_loading_state = false,
+        .has_track_path = true, .track_path = "/m/a/1.flac"
+    }, &effects);
+    TEST_ASSERT_TRUE(engine.audio_started);
+    playback_engine_handle_ipc_status(&engine, &(struct playback_status_update){
+        .has_state = true, .state = IPC_PLAYBACK_PLAYING,
+        .is_loading_state = true,
+        .has_track_path = true, .track_path = "/m/a/2.flac"
+    }, &effects);
+    TEST_ASSERT_FALSE(engine.audio_started);
+
     library_db_close(&db);
     cleanup_temp_dir(dir_path);
 }
