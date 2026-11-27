@@ -24,13 +24,6 @@ static void remove_tree(const char *path) {
     (void)system(command);
 }
 
-static void touch_file(const char *path) {
-    FILE *file = fopen(path, "wb");
-    TEST_ASSERT_TRUE(file != NULL);
-    fputs("x", file);
-    fclose(file);
-}
-
 static bool file_exists(const char *path) {
     struct stat file_stat;
     return stat(path, &file_stat) == 0;
@@ -95,22 +88,9 @@ static void seed_small_library(struct library_db *database) {
     TEST_ASSERT_TRUE(library_db_recompute_aggregates(database, NULL, 0u, NULL));
 }
 
-static void test_open_creates_schema_and_cleans_legacy_files(void) {
+static void test_open_creates_schema(void) {
     char work_directory[128];
     make_work_directory(work_directory, sizeof(work_directory));
-    char path[256];
-    snprintf(path, sizeof(path), "%s/library.idx", work_directory);
-    touch_file(path);
-    snprintf(path, sizeof(path), "%s/library_state.json", work_directory);
-    touch_file(path);
-    snprintf(path, sizeof(path), "%s/covers", work_directory);
-    mkdir(path, 0755);
-    snprintf(path, sizeof(path), "%s/covers/flat.rgb565", work_directory);
-    touch_file(path);
-    snprintf(path, sizeof(path), "%s/covers/ab", work_directory);
-    mkdir(path, 0755);
-    snprintf(path, sizeof(path), "%s/covers/ab/keep.rgb565", work_directory);
-    touch_file(path);
 
     struct library_db database;
     TEST_ASSERT_TRUE(library_db_open(&database, work_directory));
@@ -123,21 +103,10 @@ static void test_open_creates_schema_and_cleans_legacy_files(void) {
                sizeof(text));
     TEST_ASSERT_EQ_STR("1", text);
 
-    snprintf(path, sizeof(path), "%s/library.idx", work_directory);
-    TEST_ASSERT_FALSE(file_exists(path));
-    snprintf(path, sizeof(path), "%s/library_state.json", work_directory);
-    TEST_ASSERT_FALSE(file_exists(path));
-    snprintf(path, sizeof(path), "%s/covers/flat.rgb565", work_directory);
-    TEST_ASSERT_FALSE(file_exists(path));
-    snprintf(path, sizeof(path), "%s/covers/ab/keep.rgb565", work_directory);
-    TEST_ASSERT_TRUE(file_exists(path));
-    library_db_close(&database);
-
-    /* Cleanup runs once: a legacy-named file created later must survive a reopen. */
-    snprintf(path, sizeof(path), "%s/library.idx", work_directory);
-    touch_file(path);
-    TEST_ASSERT_TRUE(library_db_open(&database, work_directory));
-    TEST_ASSERT_TRUE(file_exists(path));
+    struct library_db_counts counts;
+    TEST_ASSERT_TRUE(library_db_read_counts(&database, &counts));
+    TEST_ASSERT_EQ_U32(0u, counts.tracks);
+    TEST_ASSERT_EQ_U32(0u, counts.albums);
     library_db_close(&database);
     remove_tree(work_directory);
 }
@@ -683,7 +652,7 @@ static void test_scale_has_no_track_cap_and_windows_stay_fast(void) {
 
 void run_library_db_tests(void) {
     printf("Library DB tests...\n");
-    RUN_TEST(test_open_creates_schema_and_cleans_legacy_files);
+    RUN_TEST(test_open_creates_schema);
     RUN_TEST(test_upsert_counts_multi_genre_and_motifs);
     RUN_TEST(test_favorites_and_sort_modes_persist);
     RUN_TEST(test_album_sort_modes_and_track_scopes);

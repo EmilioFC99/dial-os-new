@@ -3,7 +3,6 @@
 #include "sqlite3.h"
 
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -330,51 +329,7 @@ static bool set_meta_value(sqlite3 *handle, const char *key, const char *value) 
     return ok;
 }
 
-static bool has_rgb565_suffix(const char *filename) {
-    size_t length = strlen(filename);
-    return length >= 7u && strcmp(filename + length - 7u, ".rgb565") == 0;
-}
-
-static void run_legacy_cleanup_once(sqlite3 *handle, const char *directory_path) {
-    char done_flag[16];
-    if (get_meta_value(handle, "legacy_cleanup_done", done_flag, sizeof(done_flag)) &&
-        strcmp(done_flag, "1") == 0) {
-        return;
-    }
-
-    char legacy_path[LIBRARY_DB_PATH_BYTES + 64u];
-    snprintf(legacy_path, sizeof(legacy_path), "%s/library.idx", directory_path);
-    (void)unlink(legacy_path);
-    snprintf(legacy_path, sizeof(legacy_path), "%s/.library.idx.tmp", directory_path);
-    (void)unlink(legacy_path);
-    snprintf(legacy_path, sizeof(legacy_path), "%s/library_state.json", directory_path);
-    (void)unlink(legacy_path);
-    snprintf(legacy_path, sizeof(legacy_path), "%s/.library_state.json.tmp", directory_path);
-    (void)unlink(legacy_path);
-
-    char covers_directory[LIBRARY_DB_PATH_BYTES + 16u];
-    snprintf(covers_directory, sizeof(covers_directory), "%s/covers", directory_path);
-    DIR *covers_handle = opendir(covers_directory);
-    if (covers_handle != NULL) {
-        struct dirent *entry = NULL;
-        while ((entry = readdir(covers_handle)) != NULL) {
-            if (entry->d_name[0] == '.' || !has_rgb565_suffix(entry->d_name)) {
-                continue;
-            }
-            char entry_path[LIBRARY_DB_PATH_BYTES + 280u];
-            snprintf(entry_path, sizeof(entry_path), "%s/%s", covers_directory, entry->d_name);
-            struct stat entry_stat;
-            if (stat(entry_path, &entry_stat) == 0 && S_ISREG(entry_stat.st_mode)) {
-                (void)unlink(entry_path);
-            }
-        }
-        closedir(covers_handle);
-    }
-
-    (void)set_meta_value(handle, "legacy_cleanup_done", "1");
-}
-
-static sqlite3 *open_and_init_handle(const char *database_path, const char *directory_path) {
+static sqlite3 *open_and_init_handle(const char *database_path) {
     sqlite3 *handle = NULL;
     int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
     if (sqlite3_open_v2(database_path, &handle, flags, NULL) != SQLITE_OK) {
@@ -387,7 +342,6 @@ static sqlite3 *open_and_init_handle(const char *database_path, const char *dire
         sqlite3_close(handle);
         return NULL;
     }
-    run_legacy_cleanup_once(handle, directory_path);
     return handle;
 }
 
@@ -411,14 +365,14 @@ bool library_db_open(struct library_db *database, const char *directory_path) {
 
     char database_path[LIBRARY_DB_PATH_BYTES + 32u];
     snprintf(database_path, sizeof(database_path), "%s/%s", directory_path, LIBRARY_DB_FILE_NAME);
-    sqlite3 *handle = open_and_init_handle(database_path, directory_path);
+    sqlite3 *handle = open_and_init_handle(database_path);
     if (handle == NULL) {
         /* Corrupt or unreadable DB: quarantine so user never gets stuck on boot. */
         char corrupt_path[LIBRARY_DB_PATH_BYTES + 32u];
         snprintf(corrupt_path, sizeof(corrupt_path), "%s/%s", directory_path,
                  LIBRARY_DB_CORRUPT_FILE_NAME);
         (void)rename(database_path, corrupt_path);
-        handle = open_and_init_handle(database_path, directory_path);
+        handle = open_and_init_handle(database_path);
     }
     if (handle == NULL) {
         pthread_mutex_destroy(&database->mutex);
