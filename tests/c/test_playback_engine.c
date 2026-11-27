@@ -83,12 +83,14 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
     TEST_ASSERT_TRUE(playback_engine_skip(&engine, -1, &effects));
     TEST_ASSERT_TRUE(effects.send_seek);
     TEST_ASSERT_EQ_U32(0u, effects.seek_ms);
+    TEST_ASSERT_TRUE(effects.vinyl_nudge_radians == 0.0f);
     TEST_ASSERT_EQ_I32(t1, engine.active_track.track_id);
 
     /* <=3000ms at slot 0 under Repeat OFF bounces with START OF ALL SONGS */
     playback_engine_handle_ipc_elapsed(&engine, 2500u);
     TEST_ASSERT_TRUE(playback_engine_skip(&engine, -1, &effects));
     TEST_ASSERT_TRUE(effects.boundary_bounce);
+    TEST_ASSERT_TRUE(effects.vinyl_nudge_radians == 0.0f);
     TEST_ASSERT_EQ_STR("START OF ALL SONGS", effects.toast_text);
 
     /* Re-selecting already loaded track preserves elapsed time */
@@ -98,9 +100,10 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
     TEST_ASSERT_FALSE(effects.launch_slice);
     TEST_ASSERT_EQ_U32(42000u, engine.elapsed_ms);
 
-    /* Next to t2 (same album -> banner) then t3 (different album -> cross-album slide) */
+    /* Next to t2 (same album -> banner, no twist) then t3 (different album -> cross-album slide) */
     TEST_ASSERT_TRUE(playback_engine_skip(&engine, 1, &effects));
     TEST_ASSERT_TRUE(effects.show_same_album_banner);
+    TEST_ASSERT_TRUE(effects.vinyl_nudge_radians == 0.0f);
     TEST_ASSERT_EQ_I32(t2, engine.active_track.track_id);
 
     struct playback_skip_preview preview;
@@ -111,6 +114,7 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
 
     TEST_ASSERT_TRUE(playback_engine_skip(&engine, 1, &effects));
     TEST_ASSERT_TRUE(effects.start_cross_album_slide);
+    TEST_ASSERT_TRUE(effects.vinyl_nudge_radians != 0.0f);
     TEST_ASSERT_EQ_I32(t3, engine.active_track.track_id);
 
     /* Repeat ONE allows manual skip (bounces at end) while looping on natural EOF */
@@ -121,6 +125,7 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
     TEST_ASSERT_FALSE(effects.send_play_mode);
     TEST_ASSERT_TRUE(playback_engine_skip(&engine, 1, &effects));
     TEST_ASSERT_TRUE(effects.boundary_bounce);
+    TEST_ASSERT_TRUE(effects.vinyl_nudge_radians == 0.0f);
     TEST_ASSERT_EQ_STR("END OF ALL SONGS", effects.toast_text);
 
     /* Repeat OFF natural EOF at last track resets to slot 0 paused */

@@ -128,7 +128,6 @@ static void load_slot_track(struct playback_engine *engine, uint32_t slot, bool 
         effects_out->track_changed = true;
         if (had_previous && previous_album_id == next_track.album_id) {
             effects_out->show_same_album_banner = true;
-            effects_out->vinyl_nudge_radians = direction > 0 ? 0.14f : -0.14f;
         } else if (had_previous) {
             effects_out->start_cross_album_slide = true;
             effects_out->slide_direction = direction;
@@ -368,7 +367,6 @@ bool playback_engine_skip(struct playback_engine *engine, int32_t direction,
                 effects_out->send_seek = true;
                 effects_out->seek_ms = 0u;
             }
-            effects_out->vinyl_nudge_radians = -0.14f;
         }
         return true;
     }
@@ -412,7 +410,6 @@ bool playback_engine_skip(struct playback_engine *engine, int32_t direction,
         if (effects_out != NULL) {
             effects_out->boundary_bounce = true;
             effects_out->bounce_direction = 1;
-            effects_out->vinyl_nudge_radians = -0.14f;
             char toast[64];
             snprintf(toast, sizeof(toast), "END OF %s",
                      playback_engine_context_badge(engine->context.kind));
@@ -434,7 +431,6 @@ bool playback_engine_skip(struct playback_engine *engine, int32_t direction,
     if (effects_out != NULL) {
         effects_out->boundary_bounce = true;
         effects_out->bounce_direction = -1;
-        effects_out->vinyl_nudge_radians = 0.14f;
         char toast[64];
         snprintf(toast, sizeof(toast), "START OF %s",
                  playback_engine_context_badge(engine->context.kind));
@@ -470,9 +466,6 @@ bool playback_engine_jump_to_slot(struct playback_engine *engine, uint32_t targe
         }
     }
     load_slot_track(engine, target_slot, true, effects_out);
-    if (effects_out != NULL) {
-        effects_out->vinyl_nudge_radians = 0.36f;
-    }
     return true;
 }
 
@@ -738,7 +731,6 @@ void playback_engine_handle_ipc_status(struct playback_engine *engine,
                 effects_out->track_changed = true;
                 if (prev_album == expected_next.album_id) {
                     effects_out->show_same_album_banner = true;
-                    effects_out->vinyl_nudge_radians = 0.14f;
                 } else {
                     effects_out->start_cross_album_slide = true;
                     effects_out->slide_direction = 1;

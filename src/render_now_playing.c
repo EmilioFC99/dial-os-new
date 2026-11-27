@@ -1123,14 +1123,9 @@ void render_draw_now_playing_frame(const struct framebuffer_surface *surface,
                                                   backdrop_tint, palette, is_dark);
                 }
             } else {
-                float twist_scale = (controller->skip_peek_valid &&
-                                     controller->skip_peek_cache.action == PLAYBACK_SKIP_BLOCKED)
-                                        ? 0.0011f
-                                        : 0.0022f;
-                draw_vinyl_or_fallback_shaded(
-                    surface, active_cover, active_size, 180.0f, 180.0f, 180.0f,
-                    base_angle + controller->skip_drag_offset_x * twist_scale, 1.0f,
-                    cover_shade_256, backdrop_tint, palette, is_dark);
+                draw_vinyl_or_fallback_shaded(surface, active_cover, active_size, 180.0f, 180.0f,
+                                              180.0f, base_angle, 1.0f, cover_shade_256,
+                                              backdrop_tint, palette, is_dark);
             }
         } else {
             draw_vinyl_or_fallback_shaded(surface, active_cover, active_size, 180.0f, 180.0f,
