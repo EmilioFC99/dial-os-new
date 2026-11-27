@@ -223,25 +223,20 @@ int32_t library_resolve_sort_wheel_hovered_mode(float anchor_x, float anchor_y, 
 
 enum library_sort_mode library_controller_effective_sort_mode(
     const struct library_controller *controller, const struct library_view_frame *view) {
-    if (controller == NULL || controller->state_store == NULL || view == NULL) {
+    if (controller == NULL || view == NULL) {
         return LIBRARY_SORT_ALPHABETICAL;
     }
     if (view->kind == LIB_VIEW_ARTISTS) {
-        return controller->state_store->artist_sort_mode;
+        return controller->artist_sort_mode;
     }
     if (view->kind == LIB_VIEW_ALBUMS) {
-        enum library_sort_mode sort_mode = controller->state_store->album_sort_mode;
+        enum library_sort_mode sort_mode = controller->album_sort_mode;
         if (view->is_favorites_detail && sort_mode == LIBRARY_SORT_LIKED_FIRST) {
             return LIBRARY_SORT_ALPHABETICAL;
         }
         return sort_mode;
     }
     return LIBRARY_SORT_ALPHABETICAL;
-}
-
-static void free_view_frame(struct library_view_frame *frame) {
-    free(frame->item_indices);
-    memset(frame, 0, sizeof(*frame));
 }
 
 static uint32_t view_max_scroll(const struct library_view_frame *view) {
@@ -263,283 +258,295 @@ static uint32_t view_max_scroll(const struct library_view_frame *view) {
     return 0u;
 }
 
-static void populate_albums_view(struct library_controller *controller,
-                                 struct library_view_frame *view) {
-    free(view->item_indices);
-    view->item_indices = NULL;
-    view->item_count = 0u;
-    const struct library_catalog *catalog = controller->catalog;
-    if (catalog == NULL || catalog->album_count == 0u) {
+static uint32_t compute_window_start_for_scroll(uint32_t item_count, float scroll_position) {
+    if (item_count <= LIBRARY_VIEWPORT_WINDOW_SIZE) {
+        return 0u;
+    }
+    int32_t center = (int32_t)lroundf(scroll_position);
+    if (center < 0) {
+        center = 0;
+    }
+    int32_t half_window = (int32_t)(LIBRARY_VIEWPORT_WINDOW_SIZE / 2u);
+    int32_t start = center - half_window;
+    int32_t max_start = (int32_t)(item_count - LIBRARY_VIEWPORT_WINDOW_SIZE);
+    if (start < 0) {
+        start = 0;
+    }
+    if (start > max_start) {
+        start = max_start;
+    }
+    return (uint32_t)start;
+}
+
+static void *prefetch_worker_main(void *argument) {
+    struct library_controller *controller = (struct library_controller *)argument;
+    for (;;) {
+        pthread_mutex_lock(&controller->prefetch_mutex);
+        while (!controller->prefetch_stop && !controller->prefetch_has_request) {
+            pthread_cond_wait(&controller->prefetch_cond, &controller->prefetch_mutex);
+        }
+        if (controller->prefetch_stop) {
+            pthread_mutex_unlock(&controller->prefetch_mutex);
+            break;
+        }
+        struct library_db_collection req_collection = controller->prefetch_req_collection;
+        enum library_sort_mode req_sort_mode = controller->prefetch_req_sort_mode;
+        uint32_t req_start = controller->prefetch_req_start;
+        uint64_t req_generation = controller->prefetch_req_generation;
+        controller->prefetch_has_request = false;
+        pthread_mutex_unlock(&controller->prefetch_mutex);
+
+        struct library_db_row local_rows[LIBRARY_VIEWPORT_WINDOW_SIZE];
+        uint32_t fetched = 0u;
+        if (controller->database != NULL) {
+            fetched = library_db_fetch_window(controller->database, &req_collection, req_sort_mode,
+                                              req_start, LIBRARY_VIEWPORT_WINDOW_SIZE, local_rows);
+        }
+
+        pthread_mutex_lock(&controller->prefetch_mutex);
+        if (!controller->prefetch_stop && req_generation == controller->viewport_generation) {
+            memcpy(controller->prefetch_ready_rows, local_rows,
+                   (size_t)fetched * sizeof(struct library_db_row));
+            controller->prefetch_ready_start = req_start;
+            controller->prefetch_ready_count = fetched;
+            controller->prefetch_ready_generation = req_generation;
+            controller->prefetch_ready = true;
+        }
+        pthread_cond_broadcast(&controller->prefetch_cond);
+        pthread_mutex_unlock(&controller->prefetch_mutex);
+    }
+    return NULL;
+}
+
+static void start_prefetch_thread_if_needed(struct library_controller *controller) {
+    if (controller->prefetch_running || controller->database == NULL) {
+        return;
+    }
+    controller->prefetch_stop = false;
+    if (pthread_create(&controller->prefetch_thread, NULL, prefetch_worker_main, controller) == 0) {
+        controller->prefetch_running = true;
+    }
+}
+
+void library_controller_stop_prefetch(struct library_controller *controller) {
+    if (controller == NULL || !controller->prefetch_running) {
+        return;
+    }
+    pthread_mutex_lock(&controller->prefetch_mutex);
+    controller->prefetch_stop = true;
+    pthread_cond_broadcast(&controller->prefetch_cond);
+    pthread_mutex_unlock(&controller->prefetch_mutex);
+    (void)pthread_join(controller->prefetch_thread, NULL);
+    controller->prefetch_running = false;
+}
+
+static void swap_ready_prefetch_window(struct library_controller *controller) {
+    if (!controller->prefetch_running) {
+        return;
+    }
+    pthread_mutex_lock(&controller->prefetch_mutex);
+    if (controller->prefetch_ready &&
+        controller->prefetch_ready_generation == controller->viewport_generation) {
+        memcpy(controller->viewport_rows, controller->prefetch_ready_rows,
+               (size_t)controller->prefetch_ready_count * sizeof(struct library_db_row));
+        controller->viewport_start = controller->prefetch_ready_start;
+        controller->viewport_count = controller->prefetch_ready_count;
+        controller->prefetch_ready = false;
+    }
+    pthread_mutex_unlock(&controller->prefetch_mutex);
+}
+
+static void maybe_schedule_viewport_prefetch(struct library_controller *controller,
+                                             const struct library_view_frame *view) {
+    if (controller == NULL || controller->database == NULL || view == NULL ||
+        view->kind == LIB_VIEW_HUB || view->kind == LIB_VIEW_EMPTY || view->item_count == 0u) {
+        return;
+    }
+    int32_t center_idx = (int32_t)lroundf(view->scroll_position);
+    if (center_idx < 0) {
+        center_idx = 0;
+    }
+    if ((uint32_t)center_idx >= view->item_count) {
+        center_idx = (int32_t)(view->item_count - 1u);
+    }
+
+    uint32_t window_end = controller->viewport_start + controller->viewport_count;
+    bool near_start = (controller->viewport_start > 0u) &&
+                      ((uint32_t)center_idx <
+                       controller->viewport_start + LIBRARY_VIEWPORT_PREFETCH_MARGIN);
+    bool near_end = (window_end < view->item_count) &&
+                    ((uint32_t)center_idx + LIBRARY_VIEWPORT_PREFETCH_MARGIN >= window_end);
+    bool out_of_window = ((uint32_t)center_idx < controller->viewport_start) ||
+                         ((uint32_t)center_idx >= window_end);
+    if (!near_start && !near_end && !out_of_window) {
         return;
     }
 
-    uint32_t *buffer = malloc((size_t)catalog->album_count * sizeof(uint32_t));
-    if (buffer == NULL) {
+    uint32_t target_start = compute_window_start_for_scroll(view->item_count, view->scroll_position);
+    if (target_start == controller->viewport_start && controller->viewport_count > 0u) {
         return;
     }
-    uint32_t count = 0u;
-    if (view->is_artist_detail) {
-        int32_t artist_idx = library_catalog_find_artist_by_id(catalog, view->context_id);
-        if (artist_idx >= 0) {
-            const struct library_artist *artist = &catalog->artists[artist_idx];
-            for (uint32_t idx = 0u; idx < artist->album_count; idx++) {
-                buffer[count++] = catalog->artist_album_indices[artist->album_start_offset + idx];
-            }
-        }
-    } else if (view->is_favorites_detail) {
-        for (uint32_t idx = 0u; idx < catalog->album_count; idx++) {
-            if (catalog->albums[idx].is_favorite) {
-                buffer[count++] = idx;
-            }
-        }
-    } else {
-        for (uint32_t idx = 0u; idx < catalog->album_count; idx++) {
-            buffer[count++] = idx;
-        }
-    }
 
+    start_prefetch_thread_if_needed(controller);
+    if (!controller->prefetch_running) {
+        return;
+    }
     enum library_sort_mode sort_mode = library_controller_effective_sort_mode(controller, view);
-    library_catalog_sort_album_indices(catalog, sort_mode, buffer, count);
-    view->item_indices = buffer;
-    view->item_count = count;
-    uint32_t max_scroll = view_max_scroll(view);
-    if (view->scroll_position > (float)max_scroll) {
-        view->scroll_position = (float)max_scroll;
-        view->target_index = (int32_t)max_scroll;
-    }
-    if (!view->is_artist_detail && !view->is_favorites_detail) {
-        snprintf(view->subtitle, sizeof(view->subtitle), "VINYL CRATE \xC2\xB7 %02u / %02u",
-                 count > 0u ? (unsigned)(view->target_index + 1) : 0u, (unsigned)count);
-    }
+    pthread_mutex_lock(&controller->prefetch_mutex);
+    controller->prefetch_req_collection = view->collection;
+    controller->prefetch_req_sort_mode = sort_mode;
+    controller->prefetch_req_start = target_start;
+    controller->prefetch_req_generation = controller->viewport_generation;
+    controller->prefetch_has_request = true;
+    pthread_cond_signal(&controller->prefetch_cond);
+    pthread_mutex_unlock(&controller->prefetch_mutex);
 }
 
-static void populate_artists_view(struct library_controller *controller,
+void library_controller_flush_prefetch(struct library_controller *controller) {
+    if (controller == NULL || !controller->prefetch_running) {
+        return;
+    }
+    pthread_mutex_lock(&controller->prefetch_mutex);
+    while (controller->prefetch_has_request) {
+        pthread_cond_wait(&controller->prefetch_cond, &controller->prefetch_mutex);
+    }
+    pthread_mutex_unlock(&controller->prefetch_mutex);
+    swap_ready_prefetch_window(controller);
+}
+
+static void load_initial_viewport_sync(struct library_controller *controller,
+                                       const struct library_view_frame *view) {
+    controller->viewport_generation++;
+    controller->viewport_start = 0u;
+    controller->viewport_count = 0u;
+    pthread_mutex_lock(&controller->prefetch_mutex);
+    controller->prefetch_has_request = false;
+    controller->prefetch_ready = false;
+    pthread_mutex_unlock(&controller->prefetch_mutex);
+
+    if (controller->database == NULL || view == NULL || view->kind == LIB_VIEW_HUB ||
+        view->kind == LIB_VIEW_EMPTY || view->item_count == 0u) {
+        return;
+    }
+    uint32_t start = compute_window_start_for_scroll(view->item_count, view->scroll_position);
+    enum library_sort_mode sort_mode = library_controller_effective_sort_mode(controller, view);
+    controller->viewport_start = start;
+    controller->viewport_count =
+        library_db_fetch_window(controller->database, &view->collection, sort_mode, start,
+                                LIBRARY_VIEWPORT_WINDOW_SIZE, controller->viewport_rows);
+}
+
+const struct library_db_row *library_controller_get_row(const struct library_controller *controller,
+                                                        uint32_t item_index) {
+    if (controller == NULL || item_index < controller->viewport_start) {
+        return NULL;
+    }
+    uint32_t local_index = item_index - controller->viewport_start;
+    if (local_index >= controller->viewport_count) {
+        return NULL;
+    }
+    return &controller->viewport_rows[local_index];
+}
+
+static void populate_view_from_db(struct library_controller *controller,
                                   struct library_view_frame *view) {
-    free(view->item_indices);
-    view->item_indices = NULL;
-    view->item_count = 0u;
-    const struct library_catalog *catalog = controller->catalog;
-    if (catalog == NULL || catalog->artist_count == 0u) {
-        return;
-    }
-    uint32_t *buffer = malloc((size_t)catalog->artist_count * sizeof(uint32_t));
-    if (buffer == NULL) {
-        return;
-    }
-    for (uint32_t idx = 0u; idx < catalog->artist_count; idx++) {
-        buffer[idx] = idx;
-    }
-    enum library_sort_mode sort_mode =
-        controller->state_store != NULL ? controller->state_store->artist_sort_mode
-                                        : LIBRARY_SORT_ALPHABETICAL;
-    library_catalog_sort_artist_indices(catalog, sort_mode, buffer, catalog->artist_count);
-    view->item_indices = buffer;
-    view->item_count = catalog->artist_count;
-    snprintf(view->subtitle, sizeof(view->subtitle), "%u ARTISTS", (unsigned)catalog->artist_count);
-}
-
-static const struct library_catalog *g_ctrl_sort_catalog = NULL;
-static int compare_genre_name(const void *first_ptr, const void *second_ptr) {
-    uint32_t a = *(const uint32_t *)first_ptr;
-    uint32_t b = *(const uint32_t *)second_ptr;
-    return library_compare_ascii_casefold(
-        library_catalog_get_string(g_ctrl_sort_catalog, g_ctrl_sort_catalog->genres[a].name_offset),
-        library_catalog_get_string(g_ctrl_sort_catalog, g_ctrl_sort_catalog->genres[b].name_offset));
-}
-
-static int compare_playlist_name(const void *first_ptr, const void *second_ptr) {
-    uint32_t a = *(const uint32_t *)first_ptr;
-    uint32_t b = *(const uint32_t *)second_ptr;
-    return library_compare_ascii_casefold(
-        library_catalog_get_string(g_ctrl_sort_catalog,
-                                   g_ctrl_sort_catalog->playlists[a].name_offset),
-        library_catalog_get_string(g_ctrl_sort_catalog,
-                                   g_ctrl_sort_catalog->playlists[b].name_offset));
-}
-
-static void populate_genres_view(struct library_controller *controller,
-                                 struct library_view_frame *view) {
-    free(view->item_indices);
-    view->item_indices = NULL;
-    view->item_count = 0u;
-    const struct library_catalog *catalog = controller->catalog;
-    if (catalog == NULL || catalog->genre_count == 0u) {
-        return;
-    }
-    uint32_t *buffer = malloc((size_t)catalog->genre_count * sizeof(uint32_t));
-    if (buffer == NULL) {
-        return;
-    }
-    for (uint32_t idx = 0u; idx < catalog->genre_count; idx++) {
-        buffer[idx] = idx;
-    }
-    g_ctrl_sort_catalog = catalog;
-    qsort(buffer, catalog->genre_count, sizeof(uint32_t), compare_genre_name);
-    view->item_indices = buffer;
-    view->item_count = catalog->genre_count;
-    snprintf(view->subtitle, sizeof(view->subtitle), "%u GENRES", (unsigned)catalog->genre_count);
-}
-
-static void populate_playlists_view(struct library_controller *controller,
-                                    struct library_view_frame *view) {
-    free(view->item_indices);
-    view->item_indices = NULL;
-    view->item_count = 0u;
-    const struct library_catalog *catalog = controller->catalog;
-    if (catalog == NULL || catalog->playlist_count == 0u) {
-        return;
-    }
-    uint32_t *buffer = malloc((size_t)catalog->playlist_count * sizeof(uint32_t));
-    if (buffer == NULL) {
-        return;
-    }
-    for (uint32_t idx = 0u; idx < catalog->playlist_count; idx++) {
-        buffer[idx] = idx;
-    }
-    g_ctrl_sort_catalog = catalog;
-    qsort(buffer, catalog->playlist_count, sizeof(uint32_t), compare_playlist_name);
-    view->item_indices = buffer;
-    view->item_count = catalog->playlist_count;
-    snprintf(view->subtitle, sizeof(view->subtitle), "%u MIXES \xC2\xB7 HOLD ROW TO MANAGE",
-             (unsigned)catalog->playlist_count);
-}
-
-static void populate_tracks_view(struct library_controller *controller,
-                                 struct library_view_frame *view) {
-    free(view->item_indices);
-    view->item_indices = NULL;
-    view->item_count = 0u;
-    const struct library_catalog *catalog = controller->catalog;
-    if (catalog == NULL || catalog->track_count == 0u) {
-        return;
-    }
-    uint32_t *buffer = malloc((size_t)catalog->track_count * sizeof(uint32_t));
-    if (buffer == NULL) {
-        return;
-    }
-    uint32_t count = 0u;
-
-    if (view->source_type == LIB_TRACKS_ALL) {
-        for (uint32_t idx = 0u; idx < catalog->track_count; idx++) {
-            buffer[count++] = catalog->all_track_indices[idx];
+    if (controller == NULL || controller->database == NULL || view == NULL) {
+        if (view != NULL) {
+            view->item_count = 0u;
         }
-        snprintf(view->subtitle, sizeof(view->subtitle), "%u TRACKS \xC2\xB7 A\xE2\x80\x93Z",
-                 (unsigned)count);
-    } else if (view->source_type == LIB_TRACKS_FAVORITES) {
-        for (uint32_t idx = 0u; idx < catalog->track_count; idx++) {
-            uint32_t track_idx = catalog->all_track_indices[idx];
-            if (catalog->tracks[track_idx].is_favorite) {
-                buffer[count++] = track_idx;
-            }
-        }
-    } else if (view->source_type == LIB_TRACKS_ALBUM) {
-        int32_t album_idx = library_catalog_find_album_by_id(catalog, view->context_id);
-        if (album_idx >= 0) {
-            const struct library_album *album = &catalog->albums[album_idx];
-            for (uint32_t idx = 0u; idx < album->track_count; idx++) {
-                buffer[count++] = catalog->album_track_indices[album->track_start_offset + idx];
-            }
-        }
-        snprintf(view->subtitle, sizeof(view->subtitle), "%u TRACKS \xC2\xB7 ALBUM",
-                 (unsigned)count);
-    } else if (view->source_type == LIB_TRACKS_ARTIST) {
-        int32_t artist_idx = library_catalog_find_artist_by_id(catalog, view->context_id);
-        if (artist_idx >= 0) {
-            const struct library_artist *artist = &catalog->artists[artist_idx];
-            for (uint32_t idx = 0u; idx < artist->track_count; idx++) {
-                buffer[count++] = catalog->artist_track_indices[artist->track_start_offset + idx];
-            }
-        }
-    } else if (view->source_type == LIB_TRACKS_GENRE) {
-        for (uint32_t g_idx = 0u; g_idx < catalog->genre_count; g_idx++) {
-            if (catalog->genres[g_idx].genre_id == view->context_id) {
-                const struct library_genre *genre = &catalog->genres[g_idx];
-                for (uint32_t idx = 0u; idx < genre->track_count; idx++) {
-                    buffer[count++] = catalog->genre_track_indices[genre->track_start_offset + idx];
-                }
-                break;
-            }
-        }
-        snprintf(view->subtitle, sizeof(view->subtitle), "%u TRACKS", (unsigned)count);
-    } else if (view->source_type == LIB_TRACKS_PLAYLIST) {
-        for (uint32_t p_idx = 0u; p_idx < catalog->playlist_count; p_idx++) {
-            if (catalog->playlists[p_idx].playlist_id == view->context_id) {
-                const struct library_playlist *playlist = &catalog->playlists[p_idx];
-                for (uint32_t idx = 0u; idx < playlist->track_count; idx++) {
-                    buffer[count++] =
-                        catalog->playlist_track_indices[playlist->track_start_offset + idx];
-                }
-                break;
-            }
-        }
-        snprintf(view->subtitle, sizeof(view->subtitle), "%u TRACKS \xC2\xB7 MIX", (unsigned)count);
-    }
-
-    view->item_indices = buffer;
-    view->item_count = count;
-    uint32_t max_scroll = view_max_scroll(view);
-    if (view->scroll_position > (float)max_scroll) {
-        view->scroll_position = (float)max_scroll;
-        view->target_index = (int32_t)max_scroll;
-    }
-}
-
-static void refresh_view_items(struct library_controller *controller,
-                               struct library_view_frame *view) {
-    if (view == NULL) {
         return;
     }
+
     switch (view->kind) {
         case LIB_VIEW_ALBUMS:
-            populate_albums_view(controller, view);
+            if (view->is_artist_detail) {
+                view->collection.kind = LIBRARY_DB_COLLECTION_ALBUMS_ARTIST;
+                view->collection.context_id = view->context_id;
+            } else if (view->is_favorites_detail) {
+                view->collection.kind = LIBRARY_DB_COLLECTION_ALBUMS_FAVORITES;
+                view->collection.context_id = 0;
+            } else {
+                view->collection.kind = LIBRARY_DB_COLLECTION_ALBUMS;
+                view->collection.context_id = 0;
+            }
+            view->item_count = library_db_count(controller->database, &view->collection);
             break;
         case LIB_VIEW_ARTISTS:
-            populate_artists_view(controller, view);
+            view->collection.kind = LIBRARY_DB_COLLECTION_ARTISTS;
+            view->collection.context_id = 0;
+            view->item_count = library_db_count(controller->database, &view->collection);
+            snprintf(view->subtitle, sizeof(view->subtitle), "%u ARTISTS",
+                     (unsigned)view->item_count);
             break;
         case LIB_VIEW_GENRES:
-            populate_genres_view(controller, view);
+            view->collection.kind = LIBRARY_DB_COLLECTION_GENRES;
+            view->collection.context_id = 0;
+            view->item_count = library_db_count(controller->database, &view->collection);
+            snprintf(view->subtitle, sizeof(view->subtitle), "%u GENRES",
+                     (unsigned)view->item_count);
             break;
         case LIB_VIEW_PLAYLISTS:
-            populate_playlists_view(controller, view);
+            view->collection.kind = LIBRARY_DB_COLLECTION_PLAYLISTS;
+            view->collection.context_id = 0;
+            view->item_count = library_db_count(controller->database, &view->collection);
+            snprintf(view->subtitle, sizeof(view->subtitle),
+                     "%u MIXES \xC2\xB7 HOLD ROW TO MANAGE", (unsigned)view->item_count);
             break;
         case LIB_VIEW_TRACKS:
-            populate_tracks_view(controller, view);
+            if (view->source_type == LIB_TRACKS_ALL) {
+                view->collection.kind = LIBRARY_DB_COLLECTION_TRACKS_ALL;
+                view->collection.context_id = 0;
+            } else if (view->source_type == LIB_TRACKS_FAVORITES) {
+                view->collection.kind = LIBRARY_DB_COLLECTION_TRACKS_FAVORITES;
+                view->collection.context_id = 0;
+            } else if (view->source_type == LIB_TRACKS_ALBUM) {
+                view->collection.kind = LIBRARY_DB_COLLECTION_TRACKS_ALBUM;
+                view->collection.context_id = view->context_id;
+            } else if (view->source_type == LIB_TRACKS_ARTIST) {
+                view->collection.kind = LIBRARY_DB_COLLECTION_TRACKS_ARTIST;
+                view->collection.context_id = view->context_id;
+            } else if (view->source_type == LIB_TRACKS_GENRE) {
+                view->collection.kind = LIBRARY_DB_COLLECTION_TRACKS_GENRE;
+                view->collection.context_id = view->context_id;
+            } else {
+                view->collection.kind = LIBRARY_DB_COLLECTION_TRACKS_PLAYLIST;
+                view->collection.context_id = view->context_id;
+            }
+            view->item_count = library_db_count(controller->database, &view->collection);
+            if (view->source_type == LIB_TRACKS_ALL) {
+                snprintf(view->subtitle, sizeof(view->subtitle), "%u TRACKS \xC2\xB7 A\xE2\x80\x93Z",
+                         (unsigned)view->item_count);
+            } else if (view->source_type == LIB_TRACKS_ALBUM) {
+                snprintf(view->subtitle, sizeof(view->subtitle), "%u TRACKS \xC2\xB7 ALBUM",
+                         (unsigned)view->item_count);
+            } else if (view->source_type == LIB_TRACKS_GENRE) {
+                snprintf(view->subtitle, sizeof(view->subtitle), "%u TRACKS",
+                         (unsigned)view->item_count);
+            } else if (view->source_type == LIB_TRACKS_PLAYLIST) {
+                snprintf(view->subtitle, sizeof(view->subtitle), "%u TRACKS \xC2\xB7 MIX",
+                         (unsigned)view->item_count);
+            }
             break;
         case LIB_VIEW_HUB:
         case LIB_VIEW_EMPTY:
         default:
-            break;
+            return;
     }
-}
 
-static const char *seek_anchor_item_getter(const struct library_catalog *catalog, uint32_t item_index,
-                                           void *user_context, int64_t *added_at_out,
-                                           bool *is_favorite_out) {
-    const struct library_view_frame *view = (const struct library_view_frame *)user_context;
-    *added_at_out = 0;
-    *is_favorite_out = false;
-    if (view == NULL || item_index >= view->item_count) {
-        return "";
+    uint32_t max_scroll = view_max_scroll(view);
+    if (view->scroll_position > (float)max_scroll) {
+        view->scroll_position = (float)max_scroll;
+        view->target_index = (int32_t)max_scroll;
     }
-    uint32_t mapped_idx = view->item_indices[item_index];
-    switch (view->kind) {
-        case LIB_VIEW_ALBUMS:
-            *added_at_out = catalog->albums[mapped_idx].added_at_seconds;
-            *is_favorite_out = catalog->albums[mapped_idx].is_favorite;
-            return library_catalog_get_string(catalog, catalog->albums[mapped_idx].title_offset);
-        case LIB_VIEW_ARTISTS:
-            *added_at_out = catalog->artists[mapped_idx].added_at_seconds;
-            *is_favorite_out = catalog->artists[mapped_idx].is_favorite;
-            return library_catalog_get_string(catalog, catalog->artists[mapped_idx].name_offset);
-        case LIB_VIEW_GENRES:
-            return library_catalog_get_string(catalog, catalog->genres[mapped_idx].name_offset);
-        case LIB_VIEW_PLAYLISTS:
-            return library_catalog_get_string(catalog, catalog->playlists[mapped_idx].name_offset);
-        case LIB_VIEW_TRACKS:
-            *is_favorite_out = catalog->tracks[mapped_idx].is_favorite;
-            return library_catalog_get_string(catalog, catalog->tracks[mapped_idx].title_offset);
-        default:
-            return "";
+    if (view->kind == LIB_VIEW_ALBUMS && !view->is_artist_detail && !view->is_favorites_detail) {
+        snprintf(view->subtitle, sizeof(view->subtitle), "VINYL CRATE \xC2\xB7 %02u / %02u",
+                 view->item_count > 0u ? (unsigned)(view->target_index + 1) : 0u,
+                 (unsigned)view->item_count);
+    }
+
+    const struct library_view_frame *active_view = library_controller_current_view(controller);
+    if (active_view == view) {
+        load_initial_viewport_sync(controller, view);
     }
 }
 
@@ -561,15 +568,13 @@ static void rebuild_seek_anchors_for_current_view(struct library_controller *con
     controller->seek_anchor_count = 0u;
     controller->seek_anchor_index = 0;
     const struct library_view_frame *view = library_controller_current_view(controller);
-    if (!current_view_supports_quick_seek(view) || controller->catalog == NULL) {
+    if (!current_view_supports_quick_seek(view) || controller->database == NULL) {
         return;
     }
     enum library_sort_mode sort_mode = library_controller_effective_sort_mode(controller, view);
-    bool supports_date = (view->kind == LIB_VIEW_ALBUMS || view->kind == LIB_VIEW_ARTISTS) &&
-                         controller->state_store != NULL;
-    controller->seek_anchor_count = library_build_seek_anchors(
-        controller->catalog, sort_mode, supports_date, view->item_count, seek_anchor_item_getter,
-        (void *)view, controller->seek_anchors, LIBRARY_MAX_SEEK_ANCHORS);
+    controller->seek_anchor_count = library_db_build_seek_anchors(
+        controller->database, &view->collection, sort_mode, controller->seek_anchors,
+        LIBRARY_MAX_SEEK_ANCHORS);
 }
 
 static struct library_view_frame *push_new_view(struct library_controller *controller) {
@@ -598,16 +603,30 @@ static void push_empty_view(struct library_controller *controller, enum library_
     controller->transition_progress = 0.0f;
 }
 
+static void sync_cached_db_metadata(struct library_controller *controller) {
+    if (controller->database == NULL) {
+        memset(&controller->counts, 0, sizeof(controller->counts));
+        controller->album_sort_mode = LIBRARY_SORT_ALPHABETICAL;
+        controller->artist_sort_mode = LIBRARY_SORT_ALPHABETICAL;
+        return;
+    }
+    (void)library_db_read_counts(controller->database, &controller->counts);
+    controller->album_sort_mode =
+        library_db_get_sort_mode(controller->database, LIBRARY_DB_SORT_SCOPE_ALBUMS);
+    controller->artist_sort_mode =
+        library_db_get_sort_mode(controller->database, LIBRARY_DB_SORT_SCOPE_ARTISTS);
+}
+
 void library_controller_initialize(struct library_controller *controller,
-                                   struct library_catalog *catalog,
-                                   struct library_state_store *state_store,
+                                   struct library_db *database,
                                    struct library_cover_cache *cover_cache) {
     if (controller == NULL) {
         return;
     }
     memset(controller, 0, sizeof(*controller));
-    controller->catalog = catalog;
-    controller->state_store = state_store;
+    pthread_mutex_init(&controller->prefetch_mutex, NULL);
+    pthread_cond_init(&controller->prefetch_cond, NULL);
+    controller->database = database;
     controller->cover_cache = cover_cache;
     controller->preferred_artist_tab = LIB_TAB_ALBUMS;
     controller->preferred_favorites_tab = LIB_TAB_ALBUMS;
@@ -621,6 +640,7 @@ void library_controller_initialize(struct library_controller *controller,
     controller->sort_wheel_hovered_slot = -1;
     controller->playlist_sheet_pressed_button = -1;
 
+    sync_cached_db_metadata(controller);
     library_controller_reset_to_hub(controller, true);
 }
 
@@ -628,10 +648,9 @@ void library_controller_destroy(struct library_controller *controller) {
     if (controller == NULL) {
         return;
     }
-    for (uint32_t idx = 0u; idx < controller->stack_depth; idx++) {
-        free_view_frame(&controller->view_stack[idx]);
-    }
-    free(controller->action_track_buffer);
+    library_controller_stop_prefetch(controller);
+    pthread_cond_destroy(&controller->prefetch_cond);
+    pthread_mutex_destroy(&controller->prefetch_mutex);
     memset(controller, 0, sizeof(*controller));
 }
 
@@ -645,9 +664,6 @@ void library_controller_reset_to_hub(struct library_controller *controller, bool
         saved_hub_scroll = controller->view_stack[0].scroll_position;
         saved_hub_target = controller->view_stack[0].target_index;
     }
-    for (uint32_t idx = 0u; idx < controller->stack_depth; idx++) {
-        free_view_frame(&controller->view_stack[idx]);
-    }
     controller->stack_depth = 1u;
     struct library_view_frame *hub = &controller->view_stack[0];
     memset(hub, 0, sizeof(*hub));
@@ -655,6 +671,9 @@ void library_controller_reset_to_hub(struct library_controller *controller, bool
     snprintf(hub->title, sizeof(hub->title), "Library");
     hub->scroll_position = saved_hub_scroll;
     hub->target_index = saved_hub_target;
+    controller->viewport_generation++;
+    controller->viewport_start = 0u;
+    controller->viewport_count = 0u;
     controller->transition_progress = 1.0f;
     controller->bloom_direction = LIB_BLOOM_NONE;
     controller->bloom_progress = 1.0f;
@@ -672,8 +691,9 @@ void library_controller_refresh_catalog_views(struct library_controller *control
     if (controller == NULL) {
         return;
     }
-    for (uint32_t idx = 0u; idx < controller->stack_depth; idx++) {
-        refresh_view_items(controller, &controller->view_stack[idx]);
+    sync_cached_db_metadata(controller);
+    for (uint32_t index = 0u; index < controller->stack_depth; index++) {
+        populate_view_from_db(controller, &controller->view_stack[index]);
     }
 }
 
@@ -683,25 +703,28 @@ void library_controller_set_active_playback(struct library_controller *controlle
         return;
     }
     controller->is_playing = is_playing;
-    if (track_path == NULL || track_path[0] == '\0' || controller->catalog == NULL) {
+    if (track_path == NULL || track_path[0] == '\0' || controller->database == NULL) {
         controller->has_active_track = false;
-        controller->active_track_id = 0ull;
-        controller->active_album_id = 0ull;
+        controller->active_track_id = 0;
+        controller->active_album_id = 0;
+        controller->active_album_uid = 0ull;
         return;
     }
-    int32_t track_idx = library_catalog_find_track_by_path(controller->catalog, track_path);
-    if (track_idx < 0) {
+    int64_t track_id = 0;
+    int64_t album_id = 0;
+    uint64_t album_uid = 0ull;
+    if (!library_db_find_track_by_path(controller->database, track_path, &track_id, &album_id,
+                                       &album_uid)) {
         controller->has_active_track = false;
-        controller->active_track_id = 0ull;
-        controller->active_album_id = 0ull;
+        controller->active_track_id = 0;
+        controller->active_album_id = 0;
+        controller->active_album_uid = 0ull;
         return;
     }
-    const struct library_track *track = &controller->catalog->tracks[track_idx];
     controller->has_active_track = true;
-    controller->active_track_id = track->track_id;
-    controller->active_album_id = (track->album_index < controller->catalog->album_count)
-                                      ? controller->catalog->albums[track->album_index].album_id
-                                      : 0ull;
+    controller->active_track_id = track_id;
+    controller->active_album_id = album_id;
+    controller->active_album_uid = album_uid;
 }
 
 const struct library_view_frame *library_controller_current_view(
@@ -743,22 +766,24 @@ static void apply_sort_mode_for_current_view(struct library_controller *controll
                                              struct library_controller_action *action_out) {
     struct library_view_frame *view =
         controller->stack_depth > 0u ? &controller->view_stack[controller->stack_depth - 1u] : NULL;
-    if (view == NULL || controller->state_store == NULL) {
+    if (view == NULL || controller->database == NULL) {
         return;
     }
     if (view->kind == LIB_VIEW_ALBUMS) {
         if (view->is_favorites_detail && mode == LIBRARY_SORT_LIKED_FIRST) {
             mode = LIBRARY_SORT_ALPHABETICAL;
         }
-        controller->state_store->album_sort_mode = mode;
+        controller->album_sort_mode = mode;
+        (void)library_db_set_sort_mode(controller->database, LIBRARY_DB_SORT_SCOPE_ALBUMS, mode);
     } else if (view->kind == LIB_VIEW_ARTISTS) {
-        controller->state_store->artist_sort_mode = mode;
+        controller->artist_sort_mode = mode;
+        (void)library_db_set_sort_mode(controller->database, LIBRARY_DB_SORT_SCOPE_ARTISTS, mode);
     } else {
         return;
     }
     view->scroll_position = 0.0f;
     view->target_index = 0;
-    refresh_view_items(controller, view);
+    populate_view_from_db(controller, view);
     show_sort_toast(controller, mode);
     if (action_out != NULL) {
         action_out->state_dirty = true;
@@ -783,7 +808,7 @@ static bool step_back_internal(struct library_controller *controller,
     if (controller->stack_depth > 1u) {
         struct library_view_frame *popped = &controller->view_stack[controller->stack_depth - 1u];
         bool was_hub_albums = (popped->kind == LIB_VIEW_ALBUMS && popped->opened_from_hub_albums);
-        free_view_frame(popped);
+        memset(popped, 0, sizeof(*popped));
         controller->stack_depth--;
         if (controller->stack_depth == 1u) {
             if (was_hub_albums) {
@@ -799,7 +824,7 @@ static bool step_back_internal(struct library_controller *controller,
             controller->transition_direction = -1;
             controller->transition_progress = 0.0f;
         }
-        refresh_view_items(controller, &controller->view_stack[controller->stack_depth - 1u]);
+        populate_view_from_db(controller, &controller->view_stack[controller->stack_depth - 1u]);
         return true;
     }
     if (action_out != NULL) {
@@ -808,48 +833,40 @@ static bool step_back_internal(struct library_controller *controller,
     return true;
 }
 
-static void emit_play_tracks(struct library_controller *controller, const uint32_t *track_indices,
-                             uint32_t track_count, uint32_t start_offset, bool shuffle,
-                             struct library_controller_action *action_out) {
-    if (track_indices == NULL || track_count == 0u || action_out == NULL) {
+static void emit_play_collection(struct library_controller *controller,
+                                 struct library_db_collection collection, uint32_t start_offset,
+                                 bool shuffle, struct library_controller_action *action_out) {
+    if (controller == NULL || controller->database == NULL || action_out == NULL) {
         return;
     }
-    if (track_count > controller->action_track_capacity) {
-        uint32_t *grown = realloc(controller->action_track_buffer,
-                                  (size_t)track_count * sizeof(uint32_t));
-        if (grown == NULL) {
-            return;
-        }
-        controller->action_track_buffer = grown;
-        controller->action_track_capacity = track_count;
-    }
-    uint32_t written = 0u;
-    for (uint32_t idx = start_offset; idx < track_count; idx++) {
-        controller->action_track_buffer[written++] = track_indices[idx];
-    }
-    if (shuffle && written > 1u) {
-        uint32_t seed = (uint32_t)(controller->elapsed_seconds * 1000.0f) ^ written ^ 0x9E3779B9u;
-        for (uint32_t idx = written - 1u; idx > 0u; idx--) {
-            seed = seed * 1664525u + 1013904223u;
-            uint32_t swap_idx = seed % (idx + 1u);
-            uint32_t temp = controller->action_track_buffer[idx];
-            controller->action_track_buffer[idx] = controller->action_track_buffer[swap_idx];
-            controller->action_track_buffer[swap_idx] = temp;
-        }
+    struct library_db_row first_row;
+    if (library_db_fetch_window(controller->database, &collection, LIBRARY_SORT_ALPHABETICAL,
+                                start_offset, 1u, &first_row) == 0u) {
+        return;
     }
     action_out->kind = LIBRARY_ACTION_PLAY_TRACKS;
-    action_out->play_track_indices = controller->action_track_buffer;
-    action_out->play_track_count = written;
+    action_out->play_collection = collection;
+    action_out->play_start_offset = start_offset;
+    action_out->play_shuffle = shuffle;
+    action_out->play_first_track_id = first_row.id;
+    action_out->play_first_album_id = first_row.album_id;
+    action_out->play_first_album_uid = first_row.uid;
+    snprintf(action_out->play_first_track_title, sizeof(action_out->play_first_track_title), "%s",
+             first_row.title);
+    (void)library_db_get_track_path(controller->database, first_row.id,
+                                    action_out->play_first_track_path,
+                                    sizeof(action_out->play_first_track_path));
 }
 
 static void handle_hub_tile_tap(struct library_controller *controller, uint32_t tile_index) {
-    const struct library_catalog *catalog = controller->catalog;
-    if (catalog == NULL) {
+    if (controller->database == NULL) {
         return;
     }
+    sync_cached_db_metadata(controller);
     switch ((enum library_hub_section_id)tile_index) {
         case LIB_HUB_FAVORITES: {
-            uint32_t total_favs = catalog->favorite_track_count + catalog->favorite_album_count;
+            uint32_t total_favs =
+                controller->counts.favorite_tracks + controller->counts.favorite_albums;
             if (total_favs == 0u) {
                 push_empty_view(controller, LIB_HUB_FAVORITES, "Favorites", "0 FAVORITES",
                                 "No Favorites Yet", "HOLD A SONG OR ALBUM TO LIKE");
@@ -862,28 +879,27 @@ static void handle_hub_tile_tap(struct library_controller *controller, uint32_t 
             view->is_favorites_detail = true;
             snprintf(view->title, sizeof(view->title), "Favorites");
             enum library_tab_mode initial_tab = controller->preferred_favorites_tab;
-            if (initial_tab == LIB_TAB_ALBUMS && catalog->favorite_album_count == 0u &&
-                catalog->favorite_track_count > 0u) {
+            if (initial_tab == LIB_TAB_ALBUMS && controller->counts.favorite_albums == 0u &&
+                controller->counts.favorite_tracks > 0u) {
                 initial_tab = LIB_TAB_SONGS;
-            } else if (initial_tab == LIB_TAB_SONGS && catalog->favorite_track_count == 0u &&
-                       catalog->favorite_album_count > 0u) {
+            } else if (initial_tab == LIB_TAB_SONGS && controller->counts.favorite_tracks == 0u &&
+                       controller->counts.favorite_albums > 0u) {
                 initial_tab = LIB_TAB_ALBUMS;
             }
             controller->favorites_mode_blend = (initial_tab == LIB_TAB_SONGS) ? 1.0f : 0.0f;
             if (initial_tab == LIB_TAB_ALBUMS) {
                 view->kind = LIB_VIEW_ALBUMS;
-                populate_albums_view(controller, view);
             } else {
                 view->kind = LIB_VIEW_TRACKS;
                 view->source_type = LIB_TRACKS_FAVORITES;
-                populate_tracks_view(controller, view);
             }
+            populate_view_from_db(controller, view);
             controller->transition_direction = 1;
             controller->transition_progress = 0.0f;
             break;
         }
         case LIB_HUB_PLAYLISTS:
-            if (catalog->playlist_count == 0u) {
+            if (controller->counts.playlists == 0u) {
                 push_empty_view(controller, LIB_HUB_PLAYLISTS, "Playlists", "0 MIXES",
                                 "No Playlists Yet", "ADD SONGS TO BUILD A MIX");
                 return;
@@ -895,13 +911,13 @@ static void handle_hub_tile_tap(struct library_controller *controller, uint32_t 
                 }
                 view->kind = LIB_VIEW_PLAYLISTS;
                 snprintf(view->title, sizeof(view->title), "Playlists");
-                populate_playlists_view(controller, view);
+                populate_view_from_db(controller, view);
                 controller->transition_direction = 1;
                 controller->transition_progress = 0.0f;
             }
             break;
         case LIB_HUB_ARTISTS:
-            if (catalog->artist_count == 0u) {
+            if (controller->counts.artists == 0u) {
                 push_empty_view(controller, LIB_HUB_ARTISTS, "Artists", "0 ARTISTS",
                                 "No Artists Found", "SYNC MUSIC VIA USB STORAGE");
                 return;
@@ -913,13 +929,13 @@ static void handle_hub_tile_tap(struct library_controller *controller, uint32_t 
                 }
                 view->kind = LIB_VIEW_ARTISTS;
                 snprintf(view->title, sizeof(view->title), "Artists");
-                populate_artists_view(controller, view);
+                populate_view_from_db(controller, view);
                 controller->transition_direction = 1;
                 controller->transition_progress = 0.0f;
             }
             break;
         case LIB_HUB_ALBUMS:
-            if (catalog->album_count == 0u) {
+            if (controller->counts.albums == 0u) {
                 push_empty_view(controller, LIB_HUB_ALBUMS, "Albums", "0 ALBUMS", "No Albums Found",
                                 "SYNC MUSIC VIA USB STORAGE");
                 return;
@@ -932,13 +948,13 @@ static void handle_hub_tile_tap(struct library_controller *controller, uint32_t 
                 view->kind = LIB_VIEW_ALBUMS;
                 view->opened_from_hub_albums = true;
                 snprintf(view->title, sizeof(view->title), "Albums");
-                populate_albums_view(controller, view);
+                populate_view_from_db(controller, view);
                 controller->bloom_direction = LIB_BLOOM_HUB_TO_ALBUMS;
                 controller->bloom_progress = 0.0f;
             }
             break;
         case LIB_HUB_GENRES:
-            if (catalog->genre_count == 0u) {
+            if (controller->counts.genres == 0u) {
                 push_empty_view(controller, LIB_HUB_GENRES, "Genres", "0 GENRES", "No Genres Found",
                                 "RESCAN LIBRARY IN SETTINGS");
                 return;
@@ -950,14 +966,14 @@ static void handle_hub_tile_tap(struct library_controller *controller, uint32_t 
                 }
                 view->kind = LIB_VIEW_GENRES;
                 snprintf(view->title, sizeof(view->title), "Genres");
-                populate_genres_view(controller, view);
+                populate_view_from_db(controller, view);
                 controller->transition_direction = 1;
                 controller->transition_progress = 0.0f;
             }
             break;
         case LIB_HUB_ALL_SONGS:
         default:
-            if (catalog->track_count == 0u) {
+            if (controller->counts.tracks == 0u) {
                 push_empty_view(controller, LIB_HUB_ALL_SONGS, "All songs", "0 TRACKS",
                                 "Library Is Empty", "COPY TRACKS TO MICROSD CARD");
                 return;
@@ -970,7 +986,7 @@ static void handle_hub_tile_tap(struct library_controller *controller, uint32_t 
                 view->kind = LIB_VIEW_TRACKS;
                 view->source_type = LIB_TRACKS_ALL;
                 snprintf(view->title, sizeof(view->title), "All songs");
-                populate_tracks_view(controller, view);
+                populate_view_from_db(controller, view);
                 controller->transition_direction = 1;
                 controller->transition_progress = 0.0f;
             }
@@ -995,7 +1011,7 @@ static void handle_segmented_tab_tap(struct library_controller *controller, enum
         view->kind = LIB_VIEW_TRACKS;
         view->source_type = view->is_artist_detail ? LIB_TRACKS_ARTIST : LIB_TRACKS_FAVORITES;
         view->show_album_subtitle = view->is_artist_detail;
-        populate_tracks_view(controller, view);
+        populate_view_from_db(controller, view);
         uint32_t max_s = view_max_scroll(view);
         view->scroll_position = clamp_f32(view->songs_scroll_position, 0.0f, (float)max_s);
         view->target_index = (int32_t)clamp_f32((float)view->songs_target_index, 0.0f, (float)max_s);
@@ -1003,11 +1019,12 @@ static void handle_segmented_tab_tap(struct library_controller *controller, enum
         view->songs_scroll_position = view->scroll_position;
         view->songs_target_index = view->target_index;
         view->kind = LIB_VIEW_ALBUMS;
-        populate_albums_view(controller, view);
+        populate_view_from_db(controller, view);
         uint32_t max_s = view_max_scroll(view);
         view->scroll_position = clamp_f32(view->albums_scroll_position, 0.0f, (float)max_s);
         view->target_index = (int32_t)clamp_f32((float)view->albums_target_index, 0.0f, (float)max_s);
     }
+    load_initial_viewport_sync(controller, view);
 
     if (view->is_artist_detail) {
         controller->preferred_artist_tab = tab;
@@ -1018,80 +1035,88 @@ static void handle_segmented_tab_tap(struct library_controller *controller, enum
     }
 }
 
+static bool resolve_row_for_action(struct library_controller *controller,
+                                   const struct library_view_frame *view, uint32_t row_index,
+                                   struct library_db_row *row_out) {
+    const struct library_db_row *cached = library_controller_get_row(controller, row_index);
+    if (cached != NULL) {
+        *row_out = *cached;
+        return true;
+    }
+    if (controller->database == NULL || view == NULL) {
+        return false;
+    }
+    enum library_sort_mode sort_mode = library_controller_effective_sort_mode(controller, view);
+    return library_db_fetch_window(controller->database, &view->collection, sort_mode, row_index,
+                                   1u, row_out) > 0u;
+}
+
 static void handle_list_row_tap(struct library_controller *controller,
                                 struct library_view_frame *view, uint32_t row_index,
                                 struct library_controller_action *action_out) {
-    if (row_index >= view->item_count || controller->catalog == NULL) {
+    if (row_index >= view->item_count || controller->database == NULL) {
         return;
     }
-    uint32_t mapped_idx = view->item_indices[row_index];
-    const struct library_catalog *catalog = controller->catalog;
+    struct library_db_row row;
+    if (!resolve_row_for_action(controller, view, row_index, &row)) {
+        return;
+    }
 
     if (view->kind == LIB_VIEW_TRACKS) {
-        const struct library_track *track = &catalog->tracks[mapped_idx];
-        if (controller->has_active_track && controller->active_track_id == track->track_id) {
+        if (controller->has_active_track && controller->active_track_id == row.id) {
             action_out->kind = LIBRARY_ACTION_TOGGLE_PLAY_PAUSE;
         } else {
-            emit_play_tracks(controller, view->item_indices, view->item_count, row_index, false,
-                             action_out);
+            emit_play_collection(controller, view->collection, row_index, false, action_out);
         }
         return;
     }
 
     if (view->kind == LIB_VIEW_ARTISTS) {
-        const struct library_artist *artist = &catalog->artists[mapped_idx];
         struct library_view_frame *detail = push_new_view(controller);
         if (detail == NULL) {
             return;
         }
         detail->is_artist_detail = true;
-        detail->context_id = artist->artist_id;
-        detail->context_index = mapped_idx;
-        snprintf(detail->title, sizeof(detail->title), "%s",
-                 library_catalog_get_string(catalog, artist->name_offset));
+        detail->context_id = row.id;
+        snprintf(detail->title, sizeof(detail->title), "%s", row.title);
         if (controller->preferred_artist_tab == LIB_TAB_ALBUMS) {
             detail->kind = LIB_VIEW_ALBUMS;
-            populate_albums_view(controller, detail);
         } else {
             detail->kind = LIB_VIEW_TRACKS;
             detail->source_type = LIB_TRACKS_ARTIST;
             detail->show_album_subtitle = true;
-            populate_tracks_view(controller, detail);
         }
+        populate_view_from_db(controller, detail);
         controller->transition_direction = 1;
         controller->transition_progress = 0.0f;
         return;
     }
 
     if (view->kind == LIB_VIEW_GENRES) {
-        const struct library_genre *genre = &catalog->genres[mapped_idx];
         struct library_view_frame *detail = push_new_view(controller);
         if (detail == NULL) {
             return;
         }
         detail->kind = LIB_VIEW_TRACKS;
         detail->source_type = LIB_TRACKS_GENRE;
-        detail->context_id = genre->genre_id;
-        snprintf(detail->title, sizeof(detail->title), "%s",
-                 library_catalog_get_string(catalog, genre->name_offset));
-        populate_tracks_view(controller, detail);
+        detail->context_id = row.id;
+        snprintf(detail->title, sizeof(detail->title), "%s", row.title);
+        populate_view_from_db(controller, detail);
         controller->transition_direction = 1;
         controller->transition_progress = 0.0f;
         return;
     }
 
     if (view->kind == LIB_VIEW_PLAYLISTS) {
-        const struct library_playlist *playlist = &catalog->playlists[mapped_idx];
         struct library_view_frame *detail = push_new_view(controller);
         if (detail == NULL) {
             return;
         }
         detail->kind = LIB_VIEW_TRACKS;
         detail->source_type = LIB_TRACKS_PLAYLIST;
-        detail->context_id = playlist->playlist_id;
-        snprintf(detail->title, sizeof(detail->title), "%s",
-                 library_catalog_get_string(catalog, playlist->name_offset));
-        populate_tracks_view(controller, detail);
+        detail->context_id = row.id;
+        snprintf(detail->title, sizeof(detail->title), "%s", row.title);
+        populate_view_from_db(controller, detail);
         controller->transition_direction = 1;
         controller->transition_progress = 0.0f;
     }
@@ -1101,6 +1126,8 @@ void library_controller_step(struct library_controller *controller, float delta_
     if (controller == NULL) {
         return;
     }
+    swap_ready_prefetch_window(controller);
+
     float dt = clamp_f32(delta_seconds, 0.0f, 0.05f);
     controller->elapsed_seconds += dt;
 
@@ -1191,7 +1218,8 @@ void library_controller_step(struct library_controller *controller, float delta_
     }
 
     if (controller->delete_completed_flash > 0.0f) {
-        controller->delete_completed_flash = fmaxf(0.0f, controller->delete_completed_flash - 2.8f * dt);
+        controller->delete_completed_flash =
+            fmaxf(0.0f, controller->delete_completed_flash - 2.8f * dt);
     }
 
     /* Long-press timers */
@@ -1218,51 +1246,36 @@ void library_controller_step(struct library_controller *controller, float delta_
             controller->pointer_mode = LIB_PTR_NONE;
             const struct library_view_frame *current_view =
                 library_controller_current_view(controller);
-            if (current_view != NULL && current_view->kind == LIB_VIEW_ALBUMS &&
-                controller->long_press_target_index >= 0 &&
+            if (current_view != NULL && controller->long_press_target_index >= 0 &&
                 (uint32_t)controller->long_press_target_index < current_view->item_count) {
-                uint32_t album_index =
-                    current_view->item_indices[controller->long_press_target_index];
-                controller->quick_actions_open = true;
-                controller->quick_action_kind = LIB_QA_ALBUM;
-                controller->quick_action_target_index = album_index;
-                controller->quick_action_target_id =
-                    controller->catalog->albums[album_index].album_id;
-                controller->quick_action_auto_close_timer = 0.0f;
-            } else if (current_view != NULL && current_view->kind == LIB_VIEW_ARTISTS &&
-                       controller->long_press_target_index >= 0 &&
-                       (uint32_t)controller->long_press_target_index < current_view->item_count) {
-                uint32_t artist_index =
-                    current_view->item_indices[controller->long_press_target_index];
-                controller->quick_actions_open = true;
-                controller->quick_action_kind = LIB_QA_ARTIST;
-                controller->quick_action_target_index = artist_index;
-                controller->quick_action_target_id =
-                    controller->catalog->artists[artist_index].artist_id;
-                controller->quick_action_auto_close_timer = 0.0f;
-            } else if (current_view != NULL && current_view->kind == LIB_VIEW_TRACKS &&
-                       controller->long_press_target_index >= 0 &&
-                       (uint32_t)controller->long_press_target_index < current_view->item_count &&
-                       controller->catalog != NULL) {
-                uint32_t track_index =
-                    current_view->item_indices[controller->long_press_target_index];
-                if (track_index < controller->catalog->track_count) {
-                    controller->quick_actions_open = true;
-                    controller->quick_action_kind = LIB_QA_TRACK;
-                    controller->quick_action_target_index = track_index;
-                    controller->quick_action_target_id =
-                        controller->catalog->tracks[track_index].track_id;
-                    controller->quick_action_auto_close_timer = 0.0f;
+                struct library_db_row target_row;
+                if (resolve_row_for_action(controller, current_view,
+                                           (uint32_t)controller->long_press_target_index,
+                                           &target_row)) {
+                    if (current_view->kind == LIB_VIEW_ALBUMS) {
+                        controller->quick_actions_open = true;
+                        controller->quick_action_kind = LIB_QA_ALBUM;
+                        controller->quick_action_row = target_row;
+                        controller->quick_action_auto_close_timer = 0.0f;
+                    } else if (current_view->kind == LIB_VIEW_ARTISTS) {
+                        controller->quick_actions_open = true;
+                        controller->quick_action_kind = LIB_QA_ARTIST;
+                        controller->quick_action_row = target_row;
+                        controller->quick_action_auto_close_timer = 0.0f;
+                    } else if (current_view->kind == LIB_VIEW_TRACKS) {
+                        controller->quick_actions_open = true;
+                        controller->quick_action_kind = LIB_QA_TRACK;
+                        controller->quick_action_row = target_row;
+                        controller->quick_action_auto_close_timer = 0.0f;
+                    } else if (current_view->kind == LIB_VIEW_PLAYLISTS) {
+                        controller->playlist_sheet_open = true;
+                        controller->playlist_sheet_id = target_row.id;
+                        snprintf(controller->playlist_sheet_name,
+                                 sizeof(controller->playlist_sheet_name), "%s", target_row.title);
+                        controller->playlist_sheet_pressed_button = -1;
+                        controller->delete_hold_progress = 0.0f;
+                    }
                 }
-            } else if (current_view != NULL && current_view->kind == LIB_VIEW_PLAYLISTS &&
-                       controller->long_press_target_index >= 0 &&
-                       (uint32_t)controller->long_press_target_index < current_view->item_count) {
-                uint32_t playlist_index =
-                    current_view->item_indices[controller->long_press_target_index];
-                controller->playlist_sheet_open = true;
-                controller->playlist_sheet_index = playlist_index;
-                controller->playlist_sheet_pressed_button = -1;
-                controller->delete_hold_progress = 0.0f;
             }
         }
     }
@@ -1277,17 +1290,18 @@ void library_controller_step(struct library_controller *controller, float delta_
             controller->pointer_mode = LIB_PTR_NONE;
             controller->pointer_active = false;
             controller->delete_completed_flash = 1.0f;
-            if (controller->state_store != NULL && controller->catalog != NULL) {
-                (void)library_state_delete_playlist(controller->state_store, controller->catalog,
-                                                    controller->playlist_sheet_index);
+            if (controller->database != NULL) {
+                (void)library_db_delete_playlist(controller->database,
+                                                 controller->playlist_sheet_id);
+                sync_cached_db_metadata(controller);
             }
             struct library_view_frame *v =
                 controller->stack_depth > 0u
                     ? &controller->view_stack[controller->stack_depth - 1u]
                     : NULL;
             if (v != NULL && v->kind == LIB_VIEW_PLAYLISTS) {
-                refresh_view_items(controller, v);
-                if (controller->catalog != NULL && controller->catalog->playlist_count == 0u) {
+                populate_view_from_db(controller, v);
+                if (controller->counts.playlists == 0u) {
                     v->kind = LIB_VIEW_EMPTY;
                     v->empty_icon = LIB_HUB_PLAYLISTS;
                     snprintf(v->subtitle, sizeof(v->subtitle), "0 MIXES");
@@ -1298,7 +1312,8 @@ void library_controller_step(struct library_controller *controller, float delta_
             }
         }
     } else if (controller->delete_hold_progress > 0.0f) {
-        controller->delete_hold_progress = fmaxf(0.0f, controller->delete_hold_progress - 3.8f * dt);
+        controller->delete_hold_progress =
+            fmaxf(0.0f, controller->delete_hold_progress - 3.8f * dt);
     }
 
     /* Row press & tap flash */
@@ -1315,7 +1330,8 @@ void library_controller_step(struct library_controller *controller, float delta_
         }
     }
     if (controller->tap_flash_intensity > 0.0f) {
-        controller->tap_flash_intensity = fmaxf(0.0f, controller->tap_flash_intensity - 7.5f * dt);
+        controller->tap_flash_intensity =
+            fmaxf(0.0f, controller->tap_flash_intensity - 7.5f * dt);
         if (controller->tap_flash_intensity <= 0.0f) {
             controller->tap_flash_index = -1;
         }
@@ -1341,7 +1357,8 @@ void library_controller_step(struct library_controller *controller, float delta_
     for (uint32_t slice = 0u; slice < LIBRARY_RIM_SLICE_COUNT; slice++) {
         float target_pull = 0.0f;
         if (controller->pointer_mode == LIB_PTR_LETTER_SEARCH && controller->active_rim_slice >= 0) {
-            uint32_t dist = library_shortest_slice_distance(slice, (uint32_t)controller->active_rim_slice);
+            uint32_t dist =
+                library_shortest_slice_distance(slice, (uint32_t)controller->active_rim_slice);
             if (dist == 0u) {
                 target_pull = 1.0f;
             } else if (dist == 1u) {
@@ -1387,6 +1404,7 @@ void library_controller_step(struct library_controller *controller, float delta_
             snprintf(v->subtitle, sizeof(v->subtitle), "VINYL CRATE \xC2\xB7 %02u / %02u",
                      v->item_count > 0u ? (unsigned)(focused + 1) : 0u, (unsigned)v->item_count);
         }
+        maybe_schedule_viewport_prefetch(controller, v);
     }
 }
 
@@ -1719,6 +1737,7 @@ void library_controller_handle_touch(struct library_controller *controller,
                     view->scroll_position = (float)jump_item;
                 }
             }
+            maybe_schedule_viewport_prefetch(controller, view);
             return;
         }
 
@@ -1756,6 +1775,7 @@ void library_controller_handle_touch(struct library_controller *controller,
         controller->pointer_last_x = event->x;
         controller->pointer_last_y = event->y;
         controller->pointer_last_timestamp_ms = event->timestamp_ms;
+        maybe_schedule_viewport_prefetch(controller, view);
         return;
     }
 
@@ -1800,15 +1820,12 @@ void library_controller_handle_touch(struct library_controller *controller,
                 if (event->x < 68 || event->x > 292 || event->y < 84 || event->y > 282) {
                     controller->playlist_sheet_open = false;
                 } else if (pressed_btn == 0 || pressed_btn == 1) {
-                    uint32_t pl_idx = controller->playlist_sheet_index;
+                    int64_t playlist_id = controller->playlist_sheet_id;
                     controller->playlist_sheet_open = false;
-                    if (controller->catalog != NULL && pl_idx < controller->catalog->playlist_count) {
-                        const struct library_playlist *pl = &controller->catalog->playlists[pl_idx];
-                        emit_play_tracks(controller,
-                                         controller->catalog->playlist_track_indices +
-                                             pl->track_start_offset,
-                                         pl->track_count, 0u, (pressed_btn == 1), action_out);
-                    }
+                    struct library_db_collection pl_collection = {
+                        LIBRARY_DB_COLLECTION_TRACKS_PLAYLIST, playlist_id};
+                    emit_play_collection(controller, pl_collection, 0u, (pressed_btn == 1),
+                                         action_out);
                 }
             }
             return;
@@ -1821,22 +1838,28 @@ void library_controller_handle_touch(struct library_controller *controller,
                                                     LIBRARY_QUICK_ACTION_BTN_HIT_RADIUS_PX);
             controller->quick_action_pressed = false;
             controller->pointer_mode = LIB_PTR_NONE;
-            if (tapped_medallion && controller->state_store != NULL && controller->catalog != NULL) {
+            if (tapped_medallion && controller->database != NULL) {
+                bool next_favorite = controller->quick_action_row.is_favorite;
                 if (controller->quick_action_kind == LIB_QA_ALBUM) {
-                    (void)library_state_toggle_album_favorite(
-                        controller->state_store, controller->catalog,
-                        controller->quick_action_target_id);
+                    (void)library_db_toggle_favorite(controller->database,
+                                                     LIBRARY_DB_FAVORITE_ALBUM,
+                                                     controller->quick_action_row.id,
+                                                     &next_favorite);
                 } else if (controller->quick_action_kind == LIB_QA_ARTIST) {
-                    (void)library_state_toggle_artist_favorite(
-                        controller->state_store, controller->catalog,
-                        controller->quick_action_target_id);
+                    (void)library_db_toggle_favorite(controller->database,
+                                                     LIBRARY_DB_FAVORITE_ARTIST,
+                                                     controller->quick_action_row.id,
+                                                     &next_favorite);
                 } else if (controller->quick_action_kind == LIB_QA_TRACK) {
-                    (void)library_state_toggle_track_favorite(
-                        controller->state_store, controller->catalog,
-                        controller->quick_action_target_id);
+                    (void)library_db_toggle_favorite(controller->database,
+                                                     LIBRARY_DB_FAVORITE_TRACK,
+                                                     controller->quick_action_row.id,
+                                                     &next_favorite);
                 }
+                controller->quick_action_row.is_favorite = next_favorite;
+                sync_cached_db_metadata(controller);
+                populate_view_from_db(controller, view);
                 if (view->is_favorites_detail) {
-                    refresh_view_items(controller, view);
                     rebuild_seek_anchors_for_current_view(controller);
                 }
                 controller->quick_action_auto_close_timer = LIBRARY_QUICK_ACTION_AUTO_CLOSE_SECONDS;
@@ -1855,6 +1878,7 @@ void library_controller_handle_touch(struct library_controller *controller,
             controller->pointer_mode == LIB_PTR_LETTER_SEARCH) {
             controller->pointer_mode = LIB_PTR_NONE;
             controller->active_rim_slice = -1;
+            maybe_schedule_viewport_prefetch(controller, view);
             return;
         }
 
@@ -1873,6 +1897,7 @@ void library_controller_handle_touch(struct library_controller *controller,
                 snapped = (int32_t)max_scroll;
             }
             view->target_index = snapped;
+            maybe_schedule_viewport_prefetch(controller, view);
             return;
         }
 
@@ -1899,7 +1924,7 @@ void library_controller_handle_touch(struct library_controller *controller,
             if (view->item_count > 0u &&
                 point_in_circle(event->x, event->y, LIBRARY_CRATE_SORT_BTN_X,
                                 LIBRARY_CRATE_SORT_BTN_Y, LIBRARY_BOTTOM_BTN_HIT_RADIUS_PX) &&
-                controller->state_store != NULL) {
+                controller->database != NULL) {
                 enum library_sort_mode current_mode =
                     library_controller_effective_sort_mode(controller, view);
                 enum library_sort_mode next_mode =
@@ -1916,21 +1941,22 @@ void library_controller_handle_touch(struct library_controller *controller,
                 point_in_circle(event->x, event->y, (float)SCREEN_CENTER_X, LIBRARY_CRATE_NOTE_BTN_Y,
                                 LIBRARY_BOTTOM_BTN_HIT_RADIUS_PX)) {
                 if (view->target_index >= 0 && (uint32_t)view->target_index < view->item_count) {
-                    uint32_t album_idx = view->item_indices[view->target_index];
-                    const struct library_album *album = &controller->catalog->albums[album_idx];
-                    struct library_view_frame *overlay = push_new_view(controller);
-                    if (overlay != NULL) {
-                        overlay->kind = LIB_VIEW_TRACKS;
-                        overlay->source_type = LIB_TRACKS_ALBUM;
-                        overlay->context_id = album->album_id;
-                        overlay->context_index = album_idx;
-                        overlay->show_track_numbers = true;
-                        snprintf(overlay->title, sizeof(overlay->title), "%s",
-                                 library_catalog_get_string(controller->catalog,
-                                                            album->title_offset));
-                        populate_tracks_view(controller, overlay);
-                        controller->transition_direction = 1;
-                        controller->transition_progress = 0.0f;
+                    struct library_db_row album_row;
+                    if (resolve_row_for_action(controller, view, (uint32_t)view->target_index,
+                                               &album_row)) {
+                        struct library_view_frame *overlay = push_new_view(controller);
+                        if (overlay != NULL) {
+                            overlay->kind = LIB_VIEW_TRACKS;
+                            overlay->source_type = LIB_TRACKS_ALBUM;
+                            overlay->context_id = album_row.id;
+                            overlay->parent_album_row = album_row;
+                            overlay->show_track_numbers = true;
+                            snprintf(overlay->title, sizeof(overlay->title), "%s",
+                                     album_row.title);
+                            populate_view_from_db(controller, overlay);
+                            controller->transition_direction = 1;
+                            controller->transition_progress = 0.0f;
+                        }
                     }
                 }
                 return;
@@ -1938,16 +1964,17 @@ void library_controller_handle_touch(struct library_controller *controller,
             if ((event->x >= 108 && event->x <= 232 && event->y >= 90 && event->y <= 216) ||
                 (event->x >= 224 && event->x <= 272 && event->y >= 96 && event->y <= 212)) {
                 if (view->target_index >= 0 && (uint32_t)view->target_index < view->item_count) {
-                    uint32_t album_idx = view->item_indices[view->target_index];
-                    const struct library_album *album = &controller->catalog->albums[album_idx];
-                    if (controller->has_active_track &&
-                        controller->active_album_id == album->album_id) {
-                        action_out->kind = LIBRARY_ACTION_TOGGLE_PLAY_PAUSE;
-                    } else {
-                        emit_play_tracks(controller,
-                                         controller->catalog->album_track_indices +
-                                             album->track_start_offset,
-                                         album->track_count, 0u, false, action_out);
+                    struct library_db_row album_row;
+                    if (resolve_row_for_action(controller, view, (uint32_t)view->target_index,
+                                               &album_row)) {
+                        if (controller->has_active_track &&
+                            controller->active_album_id == album_row.id) {
+                            action_out->kind = LIBRARY_ACTION_TOGGLE_PLAY_PAUSE;
+                        } else {
+                            struct library_db_collection album_tracks = {
+                                LIBRARY_DB_COLLECTION_TRACKS_ALBUM, album_row.id};
+                            emit_play_collection(controller, album_tracks, 0u, false, action_out);
+                        }
                     }
                 }
                 return;
@@ -1957,15 +1984,16 @@ void library_controller_handle_touch(struct library_controller *controller,
             } else if (event->x > 272 && (uint32_t)(view->target_index + 1) < view->item_count) {
                 view->target_index++;
             }
+            maybe_schedule_viewport_prefetch(controller, view);
             return;
         }
 
         if (view->kind == LIB_VIEW_ARTISTS &&
             point_in_circle(event->x, event->y, LIBRARY_ARTISTS_SORT_BTN_X,
                             LIBRARY_ARTISTS_SORT_BTN_Y, LIBRARY_BOTTOM_BTN_HIT_RADIUS_PX) &&
-            controller->state_store != NULL) {
+            controller->database != NULL) {
             enum library_sort_mode next_mode =
-                (enum library_sort_mode)((controller->state_store->artist_sort_mode + 1u) %
+                (enum library_sort_mode)((controller->artist_sort_mode + 1u) %
                                          LIBRARY_SORT_MODE_COUNT);
             apply_sort_mode_for_current_view(controller, next_mode, action_out);
             return;

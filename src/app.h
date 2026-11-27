@@ -7,11 +7,10 @@
 
 #include "boot_sequence.h"
 #include "home_screen.h"
-#include "library_catalog.h"
 #include "library_controller.h"
 #include "library_cover_cache.h"
+#include "library_db.h"
 #include "library_scanner.h"
-#include "library_state.h"
 #include "logger.h"
 #include "platform.h"
 #include "protocol.h"
@@ -53,13 +52,13 @@ struct app_runtime {
     bool sd_followup_second_pending;
     struct boot_controller boot;
     struct home_controller home;
-    struct library_catalog library_catalog;
-    struct library_scanner library_scanner;
-    struct library_state_store library_state;
+    struct library_db library_db;
+    bool library_db_open_ok;
+    struct library_db_scanner library_scanner;
     struct library_cover_cache library_covers;
     struct library_controller library;
     bool library_scan_started;
-    bool library_delta_pending;
+    bool library_scan_finished_handled;
     bool library_prev_sd_mounted;
     bool library_hub_reset_on_dive;
     bool boot_cover_precache_started;

@@ -723,6 +723,17 @@ static void test_persistent_event_and_performance_logging(void) {
     app_destroy(&runtime);
 }
 
+static void wait_for_library_scan_ready(struct app_runtime *runtime,
+                                        struct fake_platform_context *fake) {
+    for (uint32_t spin = 0u;
+         spin < 500u && runtime->library_scan_started && !runtime->library_scan_finished_handled;
+         spin++) {
+        usleep(1000u);
+        advance_runtime_ticks(runtime, fake, 20u);
+    }
+    TEST_ASSERT_TRUE(runtime->library_scan_finished_handled);
+}
+
 static void test_library_boot_scan_playback_and_sd_hotswap(void) {
     char base_directory[256];
     char music_directory[300];
@@ -765,6 +776,7 @@ static void test_library_boot_scan_playback_and_sd_hotswap(void) {
     app_initialize(&runtime, &operations);
     struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
     app_handle_ipc_message(&runtime, &aa24);
+    wait_for_library_scan_ready(&runtime, &fake);
     advance_runtime_ticks(&runtime, &fake, 10000u);
 
     TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
@@ -821,7 +833,7 @@ static void test_library_boot_scan_playback_and_sd_hotswap(void) {
     sdcard_removed.sdcard_inserted = false;
     app_handle_ipc_message(&runtime, &sdcard_removed);
     TEST_ASSERT_EQ_U32(0u, runtime.home.telemetry.track_count);
-    TEST_ASSERT_EQ_U32(0u, runtime.library_catalog.track_count);
+    TEST_ASSERT_FALSE(runtime.library_db_open_ok);
 
     app_destroy(&runtime);
     (void)system(remove_command);
@@ -903,10 +915,11 @@ static void test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker(vo
     /* Enter Act 02 and deliver aa24 while SD momentarily reports unmounted (remount race) */
     advance_runtime_ticks(&runtime, &fake, 200u);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, runtime.boot.phase);
+    wait_for_library_scan_ready(&runtime, &fake);
     fake.hardware.sd_mounted = false;
     struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
     app_handle_ipc_message(&runtime, &aa24);
-    TEST_ASSERT_TRUE(runtime.library_catalog.album_count == 1u);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
 
     /* Step 600 ms while unmounted, then restore SD mount -> 500 ms probe recovers */
     advance_runtime_ticks(&runtime, &fake, 600u);
@@ -924,9 +937,12 @@ static void test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker(vo
     TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT precache_start") != NULL);
     TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT precache_done") != NULL);
     TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT sd_recovered") != NULL);
-    TEST_ASSERT_TRUE(library_cover_cache_lookup_or_load_disk(
-                         &runtime.library_covers, runtime.library_catalog.albums[0].album_id) !=
-                     NULL);
+    struct library_db_collection albums_col = {LIBRARY_DB_COLLECTION_ALBUMS, 0};
+    struct library_db_row album_row;
+    TEST_ASSERT_EQ_U32(1u, library_db_fetch_window(&runtime.library_db, &albums_col,
+                                                   LIBRARY_SORT_ALPHABETICAL, 0u, 1u, &album_row));
+    TEST_ASSERT_TRUE(library_cover_cache_lookup_or_load_disk(&runtime.library_covers,
+                                                             album_row.uid) != NULL);
     app_destroy(&runtime);
 
     /* Case 2: If SD stays unmounted > 2.5 s after aa24, boot finishes without deadlocking */
@@ -987,27 +1003,29 @@ static void test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts(vo
     app_initialize(&runtime, &operations);
     struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
     app_handle_ipc_message(&runtime, &aa24);
+    wait_for_library_scan_ready(&runtime, &fake);
     advance_runtime_ticks(&runtime, &fake, 10000u);
     TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
     TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.track_count);
     app_destroy(&runtime);
 
-    /* Boot 2 (warm, unchanged SD): delta check runs during boot, Home stays idle & populated */
+    /* Boot 2 (warm, unchanged SD): incremental sync runs during boot, Home stays idle & populated */
     init_fake_platform(&fake, &operations);
     operations.library_music_root = music_directory;
     operations.library_dialos_directory = dialos_directory;
     operations.library_temp_directory = temp_directory;
     app_initialize(&runtime, &operations);
     app_handle_ipc_message(&runtime, &aa24);
+    wait_for_library_scan_ready(&runtime, &fake);
     advance_runtime_ticks(&runtime, &fake, 10900u);
     TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
     TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.track_count);
     TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
-    TEST_ASSERT_FALSE(library_scanner_is_busy(&runtime.library_scanner));
-    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT delta_ok") != NULL);
+    TEST_ASSERT_TRUE(runtime.library_scan_finished_handled);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "added=0 updated=0 moved=0 removed=0") != NULL);
     app_destroy(&runtime);
 
-    /* Boot 3 (warm, 2nd track added): delta_changed re-scans during boot, Home opens with 2 */
+    /* Boot 3 (warm, 2nd track added): incremental sync adds 1 track during boot, Home opens with 2 */
     FILE *file_two = fopen(wav_two, "wb");
     TEST_ASSERT_TRUE(file_two != NULL);
     fwrite(wav_header, 1u, 44u, file_two);
@@ -1018,11 +1036,12 @@ static void test_warm_boot_delta_check_runs_in_boot_and_preserves_home_counts(vo
     operations.library_temp_directory = temp_directory;
     app_initialize(&runtime, &operations);
     app_handle_ipc_message(&runtime, &aa24);
+    wait_for_library_scan_ready(&runtime, &fake);
     advance_runtime_ticks(&runtime, &fake, 10900u);
     TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
     TEST_ASSERT_EQ_U32(2u, runtime.home.telemetry.track_count);
     TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
-    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT delta_changed") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "added=1 updated=0 moved=0 removed=0") != NULL);
     app_destroy(&runtime);
 
     (void)system(remove_command);

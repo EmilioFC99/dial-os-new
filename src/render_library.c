@@ -366,32 +366,28 @@ static void draw_geometric_motif(const struct framebuffer_surface *surface, uint
 
 static void draw_crate_album_sleeve_and_disc(
     const struct framebuffer_surface *surface, struct library_controller *controller,
-    uint32_t album_index, float center_x, float center_y, float sleeve_size, float delta,
-    float focus_weight, float base_alpha, bool draw_peeking_disc,
+    const struct library_db_row *album, float center_x, float center_y, float sleeve_size,
+    float delta, float focus_weight, float base_alpha, bool draw_peeking_disc,
     const struct appearance_palette *palette, bool is_dark) {
-    if (controller == NULL || controller->catalog == NULL ||
-        album_index >= controller->catalog->album_count || base_alpha <= ALPHA_VISIBILITY_THRESHOLD) {
+    if (controller == NULL || album == NULL || base_alpha <= ALPHA_VISIBILITY_THRESHOLD) {
         return;
     }
-    const struct library_album *album = &controller->catalog->albums[album_index];
     float half_s = sleeve_size * 0.5f;
 
     const uint16_t *cover_pixels = NULL;
-    if (controller->cover_cache != NULL && album->cover_source_kind != LIBRARY_COVER_NONE) {
+    if (controller->cover_cache != NULL && album->cover_source_kind != LIBRARY_COVER_NONE &&
+        album->uid != 0ull) {
         cover_pixels =
-            library_cover_cache_lookup_or_load_disk(controller->cover_cache, album->album_id);
-        if (cover_pixels == NULL) {
-            const char *cov_path =
-                library_catalog_get_string(controller->catalog, album->cover_path_offset);
-            (void)library_cover_cache_request(controller->cover_cache, album->album_id,
-                                              album->cover_source_kind, cov_path,
-                                              album->cover_data_offset, album->cover_data_length);
+            library_cover_cache_lookup_or_load_disk(controller->cover_cache, album->uid);
+        if (cover_pixels == NULL && controller->database != NULL) {
+            (void)library_cover_cache_request_from_db(controller->cover_cache,
+                                                      controller->database, album->id, album->uid);
         }
     }
 
     /* Peeking spinning vinyl disc behind sleeve when active album */
     if (draw_peeking_disc && controller->has_active_track &&
-        controller->active_album_id == album->album_id && focus_weight > 0.42f) {
+        controller->active_album_id == album->id && focus_weight > 0.42f) {
         float peek_weight = render_ease_out_cubic(render_normalize_range(focus_weight, 0.42f, 1.0f));
         float disc_x = center_x + render_lerp_f32(half_s * 0.12f, half_s * 0.42f + 22.0f, peek_weight);
         float disc_r = half_s * 0.88f;
@@ -544,16 +540,14 @@ static void draw_hub_tiles(const struct framebuffer_surface *surface,
                            const struct appearance_palette *palette, bool is_dark) {
     static const char *TILE_NAMES[6] = {"Favorites", "Playlists", "Artists",
                                         "Albums",    "Genres",    "All songs"};
-    const struct library_catalog *catalog = controller->catalog;
-    uint32_t counts[6] = {0u, 0u, 0u, 0u, 0u, 0u};
-    if (catalog != NULL) {
-        counts[0] = catalog->favorite_track_count + catalog->favorite_album_count;
-        counts[1] = catalog->playlist_count;
-        counts[2] = catalog->artist_count;
-        counts[3] = catalog->album_count;
-        counts[4] = catalog->genre_count;
-        counts[5] = catalog->track_count;
-    }
+    uint32_t counts[6] = {
+        controller->counts.favorite_tracks + controller->counts.favorite_albums,
+        controller->counts.playlists,
+        controller->counts.artists,
+        controller->counts.albums,
+        controller->counts.genres,
+        controller->counts.tracks,
+    };
 
     struct clip_rect tile_clip = {0, 76, (int32_t)SCREEN_COORDINATE_MAX,
                                   (int32_t)SCREEN_COORDINATE_MAX};
@@ -650,10 +644,6 @@ static void draw_curved_list_body(const struct framebuffer_surface *surface,
     if (view == NULL || view->item_count == 0u || body_alpha <= ALPHA_VISIBILITY_THRESHOLD) {
         return;
     }
-    const struct library_catalog *catalog = controller->catalog;
-    if (catalog == NULL) {
-        return;
-    }
 
     struct clip_rect list_clip = {0, 76, (int32_t)SCREEN_COORDINATE_MAX,
                                   (int32_t)SCREEN_COORDINATE_MAX};
@@ -698,11 +688,14 @@ static void draw_curved_list_body(const struct framebuffer_surface *surface,
                                   palette->hairline, alpha);
         }
 
-        uint32_t mapped_idx = view->item_indices[row];
+        const struct library_db_row *row_data = library_controller_get_row(controller, (uint32_t)row);
+        if (row_data == NULL) {
+            /* Fast fling outran Core 1 prefetch by a frame: draw calm placeholder row. */
+            continue;
+        }
         if (view->kind == LIB_VIEW_TRACKS) {
-            const struct library_track *track = &catalog->tracks[mapped_idx];
             bool is_active =
-                controller->has_active_track && controller->active_track_id == track->track_id;
+                controller->has_active_track && controller->active_track_id == row_data->id;
             float text_origin_x = left + 40.0f;
             if (view->show_track_numbers) {
                 char num_str[8];
@@ -723,17 +716,18 @@ static void draw_curved_list_body(const struct framebuffer_surface *surface,
             if (is_active) {
                 draw_mini_equalizer(surface, right_pad, row_y, controller->elapsed_seconds, palette,
                                     alpha);
-                if (track->is_favorite && row_in_heart_clip) {
+                if (row_data->is_favorite && row_in_heart_clip) {
                     render_draw_heart_filled_aa(surface, right_pad - 24.0f, row_y + 0.5f, 4.5f,
                                                 palette->signal_highlight, alpha);
                     right_reserved = 38.0f;
                 }
             } else {
                 char duration_text[16];
-                format_duration_mmss(track->duration_seconds, duration_text, sizeof(duration_text));
+                format_duration_mmss(row_data->duration_seconds, duration_text,
+                                     sizeof(duration_text));
                 int32_t duration_width =
                     font_atlas_measure_width(font_atlas_get(FONT_STYLE_MONO_10), duration_text);
-                if (track->is_favorite && row_in_heart_clip) {
+                if (row_data->is_favorite && row_in_heart_clip) {
                     render_draw_heart_filled_aa(surface,
                                                 right_pad - (float)duration_width - 10.0f,
                                                 row_y + 0.5f, 4.5f, palette->signal_highlight,
@@ -749,7 +743,7 @@ static void draw_curved_list_body(const struct framebuffer_surface *surface,
             }
 
             float max_text_w = fmaxf(40.0f, (right_pad - right_reserved) - text_origin_x);
-            const char *title = library_catalog_get_string(catalog, track->title_offset);
+            const char *title = row_data->title;
             uint32_t title_col = is_active ? palette->signal_highlight : palette->ink_primary;
             if (layout.is_preview) {
                 render_draw_text_rect_clipped_alpha(surface, FONT_STYLE_DISPLAY_13, title,
@@ -766,33 +760,21 @@ static void draw_curved_list_body(const struct framebuffer_surface *surface,
                     surface, FONT_STYLE_DISPLAY_15, title, text_origin_x + max_text_w * 0.5f,
                     row_y - 8.0f, max_text_w, controller->elapsed_seconds, &list_clip, title_col,
                     alpha);
-                const char *sub = library_catalog_get_string(
-                    catalog, view->show_album_subtitle ? track->album_offset : track->artist_offset);
                 render_draw_marquee_text_rect_clipped(
-                    surface, FONT_STYLE_MONO_9, sub, text_origin_x + max_text_w * 0.5f,
-                    row_y + 9.0f, max_text_w, controller->elapsed_seconds, &list_clip,
-                    palette->ink_secondary, alpha);
+                    surface, FONT_STYLE_MONO_9, row_data->subtitle,
+                    text_origin_x + max_text_w * 0.5f, row_y + 9.0f, max_text_w,
+                    controller->elapsed_seconds, &list_clip, palette->ink_secondary, alpha);
             }
         } else {
             enum library_hub_section_id icon_kind = LIB_HUB_ARTISTS;
-            const char *label = "";
-            uint32_t count_val = 0u;
-            bool is_fav = false;
-            if (view->kind == LIB_VIEW_ARTISTS) {
-                icon_kind = LIB_HUB_ARTISTS;
-                label = library_catalog_get_string(catalog, catalog->artists[mapped_idx].name_offset);
-                count_val = catalog->artists[mapped_idx].album_count;
-                is_fav = catalog->artists[mapped_idx].is_favorite;
-            } else if (view->kind == LIB_VIEW_GENRES) {
+            if (view->kind == LIB_VIEW_GENRES) {
                 icon_kind = LIB_HUB_GENRES;
-                label = library_catalog_get_string(catalog, catalog->genres[mapped_idx].name_offset);
-                count_val = catalog->genres[mapped_idx].track_count;
             } else if (view->kind == LIB_VIEW_PLAYLISTS) {
                 icon_kind = LIB_HUB_PLAYLISTS;
-                label =
-                    library_catalog_get_string(catalog, catalog->playlists[mapped_idx].name_offset);
-                count_val = catalog->playlists[mapped_idx].track_count;
             }
+            const char *label = row_data->title;
+            uint32_t count_val = row_data->count;
+            bool is_fav = (view->kind == LIB_VIEW_ARTISTS) && row_data->is_favorite;
 
             draw_living_icon(surface, icon_kind, left + 22.0f, row_y,
                              layout.is_preview ? 9.0f : 11.0f, controller->elapsed_seconds, false,
@@ -995,16 +977,18 @@ static void draw_albums_crate_body(const struct framebuffer_surface *surface,
             }
         }
 
-        uint32_t album_idx = view->item_indices[idx];
-        const struct library_album *album = &controller->catalog->albums[album_idx];
+        const struct library_db_row *album = library_controller_get_row(controller, idx);
+        if (album == NULL) {
+            continue;
+        }
         if (controller->has_active_track && controller->is_playing &&
-            controller->active_album_id == album->album_id) {
+            controller->active_album_id == album->id) {
             cy += sinf(controller->elapsed_seconds * 1.7f + (float)idx * 1.4f) *
                   render_lerp_f32(0.8f, 2.2f, focus_weight) * crate_factor;
         }
 
-        draw_crate_album_sleeve_and_disc(surface, controller, album_idx, cx, cy, sleeve_size,
-                                         delta, focus_weight, alpha, true, palette, is_dark);
+        draw_crate_album_sleeve_and_disc(surface, controller, album, cx, cy, sleeve_size, delta,
+                                         focus_weight, alpha, true, palette, is_dark);
     }
 
     float bottom_ease = render_ease_out_expo(render_normalize_range(crate_factor, 0.42f, 0.96f));
@@ -1022,19 +1006,19 @@ static void draw_albums_crate_body(const struct framebuffer_surface *surface,
     float text_alpha = bottom_alpha * render_clamp_f32(1.0f - fabsf(offset) * 1.8f, 0.0f, 1.0f);
     float text_dx = -offset * 24.0f;
 
-    const struct library_album *focused_album = &controller->catalog->albums[view->item_indices[focused]];
-    render_draw_marquee_text(surface, FONT_STYLE_DISPLAY_18,
-                             library_catalog_get_string(controller->catalog,
-                                                        focused_album->title_offset),
-                             (float)SCREEN_CENTER_X + text_dx, 246.0f + bottom_dy, 224.0f,
-                             controller->elapsed_seconds, palette->ink_primary, text_alpha);
-    char meta_line[160];
-    snprintf(meta_line, sizeof(meta_line), "%s \xC2\xB7 %u TRACKS",
-             library_catalog_get_string(controller->catalog, focused_album->artist_offset),
-             (unsigned)focused_album->track_count);
-    render_draw_marquee_text(surface, FONT_STYLE_MONO_9, meta_line, (float)SCREEN_CENTER_X + text_dx,
-                             268.0f + bottom_dy, 214.0f, controller->elapsed_seconds,
-                             palette->ink_secondary, text_alpha);
+    const struct library_db_row *focused_album =
+        library_controller_get_row(controller, (uint32_t)focused);
+    if (focused_album != NULL) {
+        render_draw_marquee_text(surface, FONT_STYLE_DISPLAY_18, focused_album->title,
+                                 (float)SCREEN_CENTER_X + text_dx, 246.0f + bottom_dy, 224.0f,
+                                 controller->elapsed_seconds, palette->ink_primary, text_alpha);
+        char meta_line[160];
+        snprintf(meta_line, sizeof(meta_line), "%s \xC2\xB7 %u TRACKS", focused_album->subtitle,
+                 (unsigned)focused_album->count);
+        render_draw_marquee_text(surface, FONT_STYLE_MONO_9, meta_line,
+                                 (float)SCREEN_CENTER_X + text_dx, 268.0f + bottom_dy, 214.0f,
+                                 controller->elapsed_seconds, palette->ink_secondary, text_alpha);
+    }
 
     /* Windowed 7-bar indicator strip */
     struct library_crate_bars_window bars;
@@ -1280,50 +1264,33 @@ static void draw_overlays(const struct framebuffer_surface *surface,
     }
 
     /* 4. Album / Artist / Track Quick Actions Overlay */
-    if (controller->quick_actions_progress > 0.01f && controller->catalog != NULL) {
+    if (controller->quick_actions_progress > 0.01f) {
         float progress = controller->quick_actions_progress;
         float ease = render_ease_out_expo(progress);
         render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, (float)SCREEN_WIDTH,
                                       (float)SCREEN_HEIGHT, is_dark ? 0xFF060709u : 0xFF0E1116u,
                                       progress * 0.78f);
 
-        bool is_favorite = false;
+        bool is_favorite = controller->quick_action_row.is_favorite;
         const char *header_label = "ALBUM ACTIONS";
         const char *action_label_active = "FAVORITED";
         const char *action_label_idle = "FAVORITE";
-        const char *title = "";
+        const char *title = controller->quick_action_row.title;
         char subtitle[128] = {0};
 
-        if (controller->quick_action_kind == LIB_QA_ALBUM &&
-            controller->quick_action_target_index < controller->catalog->album_count) {
-            const struct library_album *album =
-                &controller->catalog->albums[controller->quick_action_target_index];
-            is_favorite = album->is_favorite;
-            title = library_catalog_get_string(controller->catalog, album->title_offset);
+        if (controller->quick_action_kind == LIB_QA_ALBUM) {
             snprintf(subtitle, sizeof(subtitle), "%s \xC2\xB7 %u TRACKS",
-                     library_catalog_get_string(controller->catalog, album->artist_offset),
-                     (unsigned)album->track_count);
-        } else if (controller->quick_action_kind == LIB_QA_ARTIST &&
-                   controller->quick_action_target_index < controller->catalog->artist_count) {
-            const struct library_artist *artist =
-                &controller->catalog->artists[controller->quick_action_target_index];
-            is_favorite = artist->is_favorite;
+                     controller->quick_action_row.subtitle,
+                     (unsigned)controller->quick_action_row.count);
+        } else if (controller->quick_action_kind == LIB_QA_ARTIST) {
             header_label = "ARTIST ACTIONS";
             action_label_active = "LIKED";
             action_label_idle = "LIKE";
-            title = library_catalog_get_string(controller->catalog, artist->name_offset);
-            snprintf(subtitle, sizeof(subtitle), "%u ALBUMS \xC2\xB7 %u TRACKS",
-                     (unsigned)artist->album_count, (unsigned)artist->track_count);
-        } else if (controller->quick_action_kind == LIB_QA_TRACK &&
-                   controller->quick_action_target_index < controller->catalog->track_count) {
-            const struct library_track *track =
-                &controller->catalog->tracks[controller->quick_action_target_index];
-            is_favorite = track->is_favorite;
+            snprintf(subtitle, sizeof(subtitle), "%u ALBUMS",
+                     (unsigned)controller->quick_action_row.count);
+        } else if (controller->quick_action_kind == LIB_QA_TRACK) {
             header_label = "SONG ACTIONS";
-            title = library_catalog_get_string(controller->catalog, track->title_offset);
-            snprintf(subtitle, sizeof(subtitle), "%s \xC2\xB7 %s",
-                     library_catalog_get_string(controller->catalog, track->artist_offset),
-                     library_catalog_get_string(controller->catalog, track->album_offset));
+            snprintf(subtitle, sizeof(subtitle), "%s", controller->quick_action_row.subtitle);
         }
 
         float header_offset_y = render_lerp_f32(-12.0f, 0.0f, ease);
@@ -1375,7 +1342,7 @@ static void draw_overlays(const struct framebuffer_surface *surface,
     }
 
     /* 5. Playlist Action Sheet + 360-deg Delete Countdown */
-    if (controller->playlist_sheet_progress > 0.01f && controller->catalog != NULL) {
+    if (controller->playlist_sheet_progress > 0.01f) {
         float p = controller->playlist_sheet_progress;
         float ease = render_ease_out_expo(p);
         render_draw_filled_rect_alpha(surface, 0.0f, 0.0f, (float)SCREEN_WIDTH,
@@ -1386,12 +1353,7 @@ static void draw_overlays(const struct framebuffer_surface *surface,
         render_draw_stroked_rect_alpha(surface, 68.0f, card_y, 224.0f, 194.0f, 1.25f,
                                        palette->hairline_strong, p);
 
-        const char *pl_name =
-            (controller->playlist_sheet_index < controller->catalog->playlist_count)
-                ? library_catalog_get_string(
-                      controller->catalog,
-                      controller->catalog->playlists[controller->playlist_sheet_index].name_offset)
-                : "";
+        const char *pl_name = controller->playlist_sheet_name;
         render_draw_text_alpha(surface, FONT_STYLE_MONO_9, "PLAYLIST ACTIONS",
                                (float)SCREEN_CENTER_X, card_y + 18.0f, TEXT_ALIGN_CENTER,
                                TEXT_BASELINE_MIDDLE, palette->signal_highlight, p);
@@ -1471,9 +1433,7 @@ void render_library_hub_transition_layer(const struct framebuffer_surface *surfa
     draw_library_perspective_floor(surface, palette, is_dark, scroll_pos, floor_alpha);
 
     char sub[64];
-    uint32_t track_count = (controller != NULL && controller->catalog != NULL)
-                               ? controller->catalog->track_count
-                               : 0u;
+    uint32_t track_count = (controller != NULL) ? controller->counts.tracks : 0u;
     if (track_count > 0u) {
         char num[16];
         format_comma_u32(track_count, num, sizeof(num));
@@ -1519,8 +1479,8 @@ void render_draw_library_frame(const struct framebuffer_surface *surface,
     /* Tracklist Crystal Overlay draws focused album sleeve behind translucent glass sheet */
     if (view->kind == LIB_VIEW_TRACKS && view->source_type == LIB_TRACKS_ALBUM) {
         draw_crate_album_sleeve_and_disc(surface, (struct library_controller *)controller,
-                                         view->context_index, 172.0f, 152.0f, 120.0f, 0.0f, 1.0f,
-                                         0.95f, true, palette, is_dark);
+                                         &view->parent_album_row, 172.0f, 152.0f, 120.0f, 0.0f,
+                                         1.0f, 0.95f, true, palette, is_dark);
         float sheet_p = render_ease_out_expo(controller->transition_progress);
         float sheet_top_y = render_lerp_f32(316.0f, 74.0f, sheet_p);
         render_draw_filled_rect_alpha(surface, 0.0f, sheet_top_y, (float)SCREEN_WIDTH,
@@ -1551,7 +1511,7 @@ void render_draw_library_frame(const struct framebuffer_surface *surface,
         float part_factor = render_ease_in_out_cubic(render_normalize_range(f, 0.0f, 0.44f));
 
         char sub[64];
-        uint32_t track_count = controller->catalog != NULL ? controller->catalog->track_count : 0u;
+        uint32_t track_count = controller->counts.tracks;
         snprintf(sub, sizeof(sub), "2-UP CRYSTAL HUB \xC2\xB7 %u TRACKS", (unsigned)track_count);
         draw_standard_header(surface, "Library", sub, -10.0f * f, palette, hub_hdr_alpha);
         draw_standard_header(surface, view->title, view->subtitle,
@@ -1579,7 +1539,7 @@ void render_draw_library_frame(const struct framebuffer_surface *surface,
             body_alpha *= render_ease_out_cubic(tab_fade);
         } else if (view->kind == LIB_VIEW_HUB) {
             char sub[64];
-            uint32_t track_count = controller->catalog != NULL ? controller->catalog->track_count : 0u;
+            uint32_t track_count = controller->counts.tracks;
             if (track_count > 0u) {
                 char num[16];
                 format_comma_u32(track_count, num, sizeof(num));
@@ -1620,9 +1580,7 @@ void render_draw_library_frame(const struct framebuffer_surface *surface,
                                       view->item_count, palette, body_alpha);
             }
             if (view->kind == LIB_VIEW_ARTISTS) {
-                enum library_sort_mode art_sort = controller->state_store != NULL
-                                                      ? controller->state_store->artist_sort_mode
-                                                      : LIBRARY_SORT_ALPHABETICAL;
+                enum library_sort_mode art_sort = controller->artist_sort_mode;
                 float bob = sinf(controller->elapsed_seconds * 2.4f + 1.2f) * 1.1f;
                 draw_floating_circle_button(surface, LIBRARY_ARTISTS_SORT_BTN_X,
                                             LIBRARY_ARTISTS_SORT_BTN_Y + bob,

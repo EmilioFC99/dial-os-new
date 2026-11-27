@@ -2,11 +2,11 @@
 #define DIALOS_LIBRARY_CONTROLLER_H
 
 #include "constants.h"
-#include "library_catalog.h"
 #include "library_cover_cache.h"
-#include "library_state.h"
+#include "library_db.h"
 #include "protocol.h"
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -69,6 +69,8 @@
 
 #define LIBRARY_VIEW_STACK_CAPACITY 8u
 #define LIBRARY_MAX_SEEK_ANCHORS 64u
+#define LIBRARY_VIEWPORT_WINDOW_SIZE 96u
+#define LIBRARY_VIEWPORT_PREFETCH_MARGIN 24u
 
 enum library_view_kind {
     LIB_VIEW_HUB = 0,
@@ -177,8 +179,7 @@ struct library_view_frame {
     bool is_favorites_detail;
     bool show_track_numbers;
     bool show_album_subtitle;
-    uint64_t context_id;
-    uint32_t context_index;
+    int64_t context_id;
     char title[128];
     char subtitle[128];
 
@@ -193,24 +194,55 @@ struct library_view_frame {
     float songs_scroll_position;
     int32_t songs_target_index;
 
-    uint32_t *item_indices;
+    struct library_db_collection collection;
+    struct library_db_row parent_album_row;
     uint32_t item_count;
 };
 
 struct library_controller_action {
     enum library_action_kind kind;
-    uint32_t *play_track_indices;
-    uint32_t play_track_count;
+    struct library_db_collection play_collection;
+    uint32_t play_start_offset;
+    bool play_shuffle;
+    char play_first_track_path[LIBRARY_DB_PATH_BYTES];
+    char play_first_track_title[LIBRARY_DB_ROW_TEXT_BYTES];
+    int64_t play_first_track_id;
+    int64_t play_first_album_id;
+    uint64_t play_first_album_uid;
     bool state_dirty;
 };
 
 struct library_controller {
-    struct library_catalog *catalog;
-    struct library_state_store *state_store;
+    struct library_db *database;
     struct library_cover_cache *cover_cache;
+    struct library_db_counts counts;
+    enum library_sort_mode album_sort_mode;
+    enum library_sort_mode artist_sort_mode;
 
     struct library_view_frame view_stack[LIBRARY_VIEW_STACK_CAPACITY];
     uint32_t stack_depth;
+
+    /* Sliding-window viewport cache (read-only on Core 0, refilled on Core 1) */
+    struct library_db_row viewport_rows[LIBRARY_VIEWPORT_WINDOW_SIZE];
+    uint32_t viewport_start;
+    uint32_t viewport_count;
+    uint64_t viewport_generation;
+
+    pthread_t prefetch_thread;
+    pthread_mutex_t prefetch_mutex;
+    pthread_cond_t prefetch_cond;
+    bool prefetch_running;
+    bool prefetch_stop;
+    bool prefetch_has_request;
+    struct library_db_collection prefetch_req_collection;
+    enum library_sort_mode prefetch_req_sort_mode;
+    uint32_t prefetch_req_start;
+    uint64_t prefetch_req_generation;
+    bool prefetch_ready;
+    struct library_db_row prefetch_ready_rows[LIBRARY_VIEWPORT_WINDOW_SIZE];
+    uint32_t prefetch_ready_start;
+    uint32_t prefetch_ready_count;
+    uint64_t prefetch_ready_generation;
 
     float elapsed_seconds;
     float transition_progress;
@@ -233,8 +265,9 @@ struct library_controller {
 
     /* Active playback mirror (synced from a202/a102 or optimistic launch) */
     bool has_active_track;
-    uint64_t active_track_id;
-    uint64_t active_album_id;
+    int64_t active_track_id;
+    int64_t active_album_id;
+    uint64_t active_album_uid;
     bool is_playing;
     float vinyl_rotation_radians;
 
@@ -285,22 +318,18 @@ struct library_controller {
     bool quick_actions_open;
     float quick_actions_progress;
     enum library_quick_action_kind quick_action_kind;
-    uint64_t quick_action_target_id;
-    uint32_t quick_action_target_index;
+    struct library_db_row quick_action_row;
     bool quick_action_pressed;
     float quick_action_auto_close_timer;
 
     /* Playlist Action Sheet & Hold-to-Delete */
     bool playlist_sheet_open;
     float playlist_sheet_progress;
-    uint32_t playlist_sheet_index;
+    int64_t playlist_sheet_id;
+    char playlist_sheet_name[LIBRARY_DB_ROW_TEXT_BYTES];
     int32_t playlist_sheet_pressed_button; /* -1 none, 0 play, 1 shuffle, 2 delete */
     float delete_hold_progress;
     float delete_completed_flash;
-
-    /* Scratch queue buffer for PLAY_TRACKS */
-    uint32_t *action_track_buffer;
-    uint32_t action_track_capacity;
 };
 
 /* Pure geometry helpers */
@@ -327,14 +356,18 @@ enum library_sort_mode library_controller_effective_sort_mode(
 
 /* Controller lifecycle */
 void library_controller_initialize(struct library_controller *controller,
-                                   struct library_catalog *catalog,
-                                   struct library_state_store *state_store,
+                                   struct library_db *database,
                                    struct library_cover_cache *cover_cache);
 void library_controller_destroy(struct library_controller *controller);
+void library_controller_stop_prefetch(struct library_controller *controller);
+void library_controller_flush_prefetch(struct library_controller *controller);
 void library_controller_reset_to_hub(struct library_controller *controller, bool reset_scroll);
 void library_controller_refresh_catalog_views(struct library_controller *controller);
 void library_controller_set_active_playback(struct library_controller *controller,
                                             const char *track_path, bool is_playing);
+
+const struct library_db_row *library_controller_get_row(const struct library_controller *controller,
+                                                        uint32_t item_index);
 
 void library_controller_step(struct library_controller *controller, float delta_seconds);
 void library_controller_handle_touch(struct library_controller *controller,

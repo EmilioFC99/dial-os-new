@@ -5,14 +5,18 @@
 #include "font_atlas.h"
 #include "home_screen.h"
 #include "library_controller.h"
+#include "library_db.h"
 #include "render.h"
 #include "render_home.h"
 #include "render_library.h"
 #include "render_primitives.h"
 #include "theme.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static void assert_full_canvas_and_content_present(const uint32_t *pixels, uint32_t stride_pixels,
                                                    uint32_t expected_canvas_color) {
@@ -489,35 +493,47 @@ static void test_library_screens_dark_and_light_with_custom_stride(void) {
     }
     struct framebuffer_surface surface = {pixels, stride_pixels};
 
-    struct library_catalog catalog;
-    struct library_state_store store;
-    library_catalog_initialize(&catalog);
-    library_state_initialize(&store);
-    struct library_track_input tracks[3] = {
-        {.file_path = "/sd/1.flac", .relative_path = "1.flac", .title = "First Song",
-         .artist = "Artist A", .album = "Prism LP", .genre = "House",
-         .track_number = 1u, .duration_seconds = 120u, .added_at_seconds = 1700000000ll},
-        {.file_path = "/sd/2.flac", .relative_path = "2.flac", .title = "Second Song",
-         .artist = "Artist B", .album = "Grid LP", .genre = "Dub",
-         .track_number = 1u, .duration_seconds = 150u, .added_at_seconds = 1710000000ll},
-        {.file_path = "/sd/3.flac", .relative_path = "3.flac", .title = "Third Song",
-         .artist = "Artist C", .album = "Tape LP", .genre = "Ambient",
-         .track_number = 1u, .duration_seconds = 180u, .added_at_seconds = 1720000000ll},
+    char db_dir[128];
+    snprintf(db_dir, sizeof(db_dir), "/tmp/dialos_render_test_%d", (int)getpid());
+    char rm_cmd[160];
+    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf \"%s\"", db_dir);
+    (void)system(rm_cmd);
+    mkdir(db_dir, 0755);
+    struct library_db db;
+    TEST_ASSERT_TRUE(library_db_open(&db, db_dir));
+    struct library_db_track_input tracks[3] = {
+        {.path = "/sd/1.flac", .title = "First Song", .artist = "Artist A", .album = "Prism LP",
+         .genre = "House", .track_number = 1u, .duration_seconds = 120u,
+         .mtime_seconds = 1700000000ll, .audio_fingerprint = 0x101ull},
+        {.path = "/sd/2.flac", .title = "Second Song", .artist = "Artist B", .album = "Grid LP",
+         .genre = "Dub", .track_number = 1u, .duration_seconds = 150u,
+         .mtime_seconds = 1710000000ll, .audio_fingerprint = 0x102ull},
+        {.path = "/sd/3.flac", .title = "Third Song", .artist = "Artist C", .album = "Tape LP",
+         .genre = "Ambient", .track_number = 1u, .duration_seconds = 180u,
+         .mtime_seconds = 1720000000ll, .audio_fingerprint = 0x103ull},
     };
+    int64_t first_track_id = 0;
     for (uint32_t idx = 0u; idx < 3u; idx++) {
-        TEST_ASSERT_TRUE(library_catalog_add_track(&catalog, &tracks[idx]));
+        int64_t inserted_id = 0;
+        TEST_ASSERT_TRUE(library_db_upsert_track(&db, &tracks[idx], 0, &inserted_id));
+        if (idx == 0u) {
+            first_track_id = inserted_id;
+        }
     }
-    TEST_ASSERT_TRUE(library_catalog_finalize(&catalog));
-    uint32_t pl_tracks[1] = {0u};
-    TEST_ASSERT_TRUE(library_catalog_add_playlist(&catalog, library_fnv1a_64("pl:test"), "Mix 1",
-                                                  NULL, pl_tracks, 1u));
+    TEST_ASSERT_TRUE(library_db_recompute_aggregates(&db, NULL, 0u, NULL));
+    const char *pl_paths[1] = {"/sd/1.flac"};
+    TEST_ASSERT_TRUE(library_db_upsert_m3u_playlist(&db, "Mix 1", "/sd/mix1.m3u", pl_paths, 1u));
+    struct library_db_collection albums_col = {LIBRARY_DB_COLLECTION_ALBUMS, 0};
+    struct library_db_row album_rows[4];
+    TEST_ASSERT_EQ_U32(3u, library_db_fetch_window(&db, &albums_col, LIBRARY_SORT_ALPHABETICAL, 0u,
+                                                   4u, album_rows));
     TEST_ASSERT_TRUE(
-        library_state_toggle_track_favorite(&store, &catalog, catalog.tracks[0].track_id));
+        library_db_toggle_favorite(&db, LIBRARY_DB_FAVORITE_TRACK, first_track_id, NULL));
     TEST_ASSERT_TRUE(
-        library_state_toggle_album_favorite(&store, &catalog, catalog.albums[0].album_id));
+        library_db_toggle_favorite(&db, LIBRARY_DB_FAVORITE_ALBUM, album_rows[0].id, NULL));
 
     struct library_controller ctrl;
-    library_controller_initialize(&ctrl, &catalog, &store, NULL);
+    library_controller_initialize(&ctrl, &db, NULL);
     library_controller_set_active_playback(&ctrl, "/sd/1.flac", true);
 
     static const enum appearance_mode MODES[2] = {APPEARANCE_MODE_DARK, APPEARANCE_MODE_LIGHT};
@@ -556,7 +572,12 @@ static void test_library_screens_dark_and_light_with_custom_stride(void) {
         ctrl.quick_actions_open = true;
         ctrl.quick_actions_progress = 1.0f;
         ctrl.quick_action_kind = LIB_QA_ALBUM;
-        ctrl.quick_action_target_index = 0u;
+        {
+            const struct library_db_row *qa_row = library_controller_get_row(&ctrl, 0u);
+            if (qa_row != NULL) {
+                ctrl.quick_action_row = *qa_row;
+            }
+        }
         render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
         assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
         ctrl.quick_actions_open = false;
@@ -574,7 +595,12 @@ static void test_library_screens_dark_and_light_with_custom_stride(void) {
         ctrl.quick_actions_open = true;
         ctrl.quick_actions_progress = 1.0f;
         ctrl.quick_action_kind = LIB_QA_TRACK;
-        ctrl.quick_action_target_index = 0u;
+        {
+            const struct library_db_row *qa_row = library_controller_get_row(&ctrl, 0u);
+            if (qa_row != NULL) {
+                ctrl.quick_action_row = *qa_row;
+            }
+        }
         render_draw_library_frame(&surface, &ctrl, mode, 0.0f);
         assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
         ctrl.quick_actions_open = false;
@@ -614,8 +640,8 @@ static void test_library_screens_dark_and_light_with_custom_stride(void) {
     }
 
     library_controller_destroy(&ctrl);
-    library_state_destroy(&store);
-    library_catalog_destroy(&catalog);
+    library_db_close(&db);
+    (void)system(rm_cmd);
     free(pixels);
 }
 

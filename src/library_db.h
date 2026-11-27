@@ -1,13 +1,53 @@
 #ifndef DIALOS_LIBRARY_DB_H
 #define DIALOS_LIBRARY_DB_H
 
-#include "library_catalog.h"
-
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+
+#define LIBRARY_COVER_MOTIF_COUNT 6u
+
+enum library_sort_mode {
+    LIBRARY_SORT_ALPHABETICAL = 0,
+    LIBRARY_SORT_REVERSE_ALPHABETICAL = 1,
+    LIBRARY_SORT_LIKED_FIRST = 2,
+    LIBRARY_SORT_RECENT = 3,
+    LIBRARY_SORT_OLDEST = 4,
+    LIBRARY_SORT_MODE_COUNT = 5
+};
+
+enum library_audio_format {
+    LIBRARY_FORMAT_UNKNOWN = 0,
+    LIBRARY_FORMAT_FLAC = 1,
+    LIBRARY_FORMAT_MP3 = 2,
+    LIBRARY_FORMAT_M4A = 3,
+    LIBRARY_FORMAT_WAV = 4,
+    LIBRARY_FORMAT_OTHER = 5
+};
+
+enum library_cover_source_kind {
+    LIBRARY_COVER_NONE = 0,
+    LIBRARY_COVER_SIDECAR = 1,
+    LIBRARY_COVER_EMBEDDED_FLAC = 2,
+    LIBRARY_COVER_EMBEDDED_MP3 = 3,
+    LIBRARY_COVER_EMBEDDED_M4A = 4
+};
+
+struct library_seek_anchor {
+    char key[24];
+    char primary[16];
+    char sub_label[16];
+    char short_label[16];
+    bool is_date_mode;
+    bool is_favorite;
+    uint32_t first_item_index;
+};
+
+uint64_t library_fnv1a_64(const char *text);
+int32_t library_compare_ascii_casefold(const char *first, const char *second);
+const char *library_sort_mode_toast_label(enum library_sort_mode mode);
 
 #define LIBRARY_DB_FILE_NAME "library.db"
 #define LIBRARY_DB_CORRUPT_FILE_NAME ".library.db.corrupt"
@@ -202,6 +242,8 @@ uint32_t library_db_build_seek_anchors(struct library_db *database,
 bool library_db_write_context_m3u(struct library_db *database,
                                   const struct library_db_collection *collection,
                                   uint32_t start_offset, FILE *output, uint32_t *written_out);
+bool library_db_write_playlist_shuffled_m3u(struct library_db *database, int64_t playlist_id,
+                                            FILE *output, uint32_t *written_out);
 
 /* Cover cache bookkeeping. */
 uint32_t library_db_count_pending_covers(struct library_db *database);

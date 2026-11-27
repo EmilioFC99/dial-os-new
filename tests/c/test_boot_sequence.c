@@ -162,7 +162,7 @@ static void test_boot_library_scan_hold_and_summary_lines(void) {
     boot_controller_update_sd_mounted(&controller, true);
 
     /* Advance into Act 02 (BUFFER) and hold at 92% while scanning */
-    boot_controller_update_library_scan(&controller, 2u, 0u, 0u, 0u, 0u, true, false);
+    boot_controller_update_library_scan(&controller, 1u, 0u, 0u, 0u, 0u, true, false);
     step_in_increments(&controller, 6.8f, 1.0f / 60.0f);
     boot_controller_get_snapshot(&controller, &snapshot);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);
@@ -170,7 +170,7 @@ static void test_boot_library_scan_hold_and_summary_lines(void) {
     TEST_ASSERT_EQ_STR("SCAN // DISCOVERING", snapshot.status_label);
 
     /* Progress scan count updates status label without tripping stall warning */
-    boot_controller_update_library_scan(&controller, 3u, 5u, 2u, 1u, 2u, true, false);
+    boot_controller_update_library_scan(&controller, 2u, 5u, 2u, 1u, 2u, true, false);
     step_in_increments(&controller, 1.5f, 1.0f / 60.0f);
     boot_controller_get_snapshot(&controller, &snapshot);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, snapshot.phase);

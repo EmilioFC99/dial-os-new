@@ -4,33 +4,44 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
-static void build_test_catalog(struct library_catalog *catalog, struct library_state_store *store) {
-    library_catalog_initialize(catalog);
-    library_state_initialize(store);
+static uint32_t test_db_sequence = 0u;
 
-    struct library_track_input tracks[4] = {
-        {.file_path = "/sd/a/1.flac", .relative_path = "a/1.flac", .title = "Alpha",
-         .artist = "Artist One", .album = "Album A", .genre = "House",
-         .track_number = 1u, .duration_seconds = 120u, .added_at_seconds = 1700000000ll},
-        {.file_path = "/sd/a/2.flac", .relative_path = "a/2.flac", .title = "Bravo",
-         .artist = "Artist One", .album = "Album B", .genre = "House",
-         .track_number = 1u, .duration_seconds = 140u, .added_at_seconds = 1710000000ll},
-        {.file_path = "/sd/b/1.flac", .relative_path = "b/1.flac", .title = "Charlie",
-         .artist = "Artist Two", .album = "Album C", .genre = "Ambient",
-         .track_number = 1u, .duration_seconds = 160u, .added_at_seconds = 1720000000ll},
-        {.file_path = "/sd/c/1.flac", .relative_path = "c/1.flac", .title = "Delta",
-         .artist = "Artist Three", .album = "Album D", .genre = "Dub",
-         .track_number = 1u, .duration_seconds = 180u, .added_at_seconds = 1730000000ll},
+static void build_test_db(struct library_db *db, char *db_dir_out, size_t dir_cap) {
+    test_db_sequence++;
+    snprintf(db_dir_out, dir_cap, "/tmp/dialos_ctrl_test_%d_%u", (int)getpid(),
+             (unsigned)test_db_sequence);
+    char rm_cmd[160];
+    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf \"%s\"", db_dir_out);
+    (void)system(rm_cmd);
+    mkdir(db_dir_out, 0755);
+    TEST_ASSERT_TRUE(library_db_open(db, db_dir_out));
+
+    struct library_db_track_input tracks[4] = {
+        {.path = "/sd/a/1.flac", .title = "Alpha", .artist = "Artist One", .album = "Album A",
+         .genre = "House", .track_number = 1u, .duration_seconds = 120u,
+         .mtime_seconds = 1700000000ll, .audio_fingerprint = 0x101ull},
+        {.path = "/sd/a/2.flac", .title = "Bravo", .artist = "Artist One", .album = "Album B",
+         .genre = "House", .track_number = 1u, .duration_seconds = 140u,
+         .mtime_seconds = 1710000000ll, .audio_fingerprint = 0x102ull},
+        {.path = "/sd/b/1.flac", .title = "Charlie", .artist = "Artist Two", .album = "Album C",
+         .genre = "Ambient", .track_number = 1u, .duration_seconds = 160u,
+         .mtime_seconds = 1720000000ll, .audio_fingerprint = 0x103ull},
+        {.path = "/sd/c/1.flac", .title = "Delta", .artist = "Artist Three", .album = "Album D",
+         .genre = "Dub", .track_number = 1u, .duration_seconds = 180u,
+         .mtime_seconds = 1730000000ll, .audio_fingerprint = 0x104ull},
     };
     for (uint32_t idx = 0u; idx < 4u; idx++) {
-        TEST_ASSERT_TRUE(library_catalog_add_track(catalog, &tracks[idx]));
+        TEST_ASSERT_TRUE(library_db_upsert_track(db, &tracks[idx], 0, NULL));
     }
-    TEST_ASSERT_TRUE(library_catalog_finalize(catalog));
-    uint32_t pl_tracks[2] = {0u, 2u};
-    TEST_ASSERT_TRUE(library_catalog_add_playlist(catalog, library_fnv1a_64("pl:mix"), "Late Mix",
-                                                  NULL, pl_tracks, 2u));
+    TEST_ASSERT_TRUE(library_db_recompute_aggregates(db, NULL, 0u, NULL));
+    const char *pl_paths[2] = {"/sd/a/1.flac", "/sd/b/1.flac"};
+    TEST_ASSERT_TRUE(
+        library_db_upsert_m3u_playlist(db, "Late Mix", "/sd/late_mix.m3u", pl_paths, 2u));
 }
 
 static void send_tap(struct library_controller *controller, int32_t x, int32_t y, uint64_t ts_ms,
@@ -83,12 +94,12 @@ static void test_geometry_formulas(void) {
 }
 
 static void test_hub_bloom_scroll_preservation_and_playback(void) {
-    struct library_catalog catalog;
-    struct library_state_store store;
-    build_test_catalog(&catalog, &store);
+    struct library_db db;
+    char db_path[128];
+    build_test_db(&db, db_path, sizeof(db_path));
 
     struct library_controller ctrl;
-    library_controller_initialize(&ctrl, &catalog, &store, NULL);
+    library_controller_initialize(&ctrl, &db, NULL);
     struct library_controller_action action;
 
     /* Scroll Hub to pair 1, tap Albums tile (index 3 -> bottom-right of pair 1) */
@@ -102,7 +113,9 @@ static void test_hub_bloom_scroll_preservation_and_playback(void) {
     /* Tap focused sleeve -> plays album tracks from 0 */
     send_tap(&ctrl, 172, 152, 2000ull, &action);
     TEST_ASSERT_EQ_I32(LIBRARY_ACTION_PLAY_TRACKS, action.kind);
-    TEST_ASSERT_EQ_U32(1u, action.play_track_count);
+    TEST_ASSERT_EQ_I32(LIBRARY_DB_COLLECTION_TRACKS_ALBUM, action.play_collection.kind);
+    TEST_ASSERT_EQ_U32(0u, action.play_start_offset);
+    TEST_ASSERT_EQ_STR("/sd/a/1.flac", action.play_first_track_path);
 
     /* Sync active playback -> tapping same focused sleeve toggles play/pause */
     library_controller_set_active_playback(&ctrl, "/sd/a/1.flac", true);
@@ -137,17 +150,17 @@ static void test_hub_bloom_scroll_preservation_and_playback(void) {
     TEST_ASSERT_EQ_I32(LIBRARY_ACTION_EXIT_TO_HOME, action.kind);
 
     library_controller_destroy(&ctrl);
-    library_state_destroy(&store);
-    library_catalog_destroy(&catalog);
+    library_db_close(&db);
+    (void)unlink(db_path);
 }
 
 static void test_sort_wheel_quick_seek_and_long_press_overlays(void) {
-    struct library_catalog catalog;
-    struct library_state_store store;
-    build_test_catalog(&catalog, &store);
+    struct library_db db;
+    char db_path[128];
+    build_test_db(&db, db_path, sizeof(db_path));
 
     struct library_controller ctrl;
-    library_controller_initialize(&ctrl, &catalog, &store, NULL);
+    library_controller_initialize(&ctrl, &db, NULL);
     struct library_controller_action action;
 
     /* Open Albums, tap Sort button -> cycles sort mode + toast */
@@ -157,7 +170,8 @@ static void test_sort_wheel_quick_seek_and_long_press_overlays(void) {
     step_for_seconds(&ctrl, 0.6f);
 
     send_tap(&ctrl, 152, 325, 2000ull, &action);
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_REVERSE_ALPHABETICAL, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_REVERSE_ALPHABETICAL,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
     TEST_ASSERT_TRUE(ctrl.sort_toast_active);
     TEST_ASSERT_TRUE(action.state_dirty);
 
@@ -172,7 +186,8 @@ static void test_sort_wheel_quick_seek_and_long_press_overlays(void) {
     TEST_ASSERT_EQ_I32(2, ctrl.sort_wheel_hovered_slot);
     library_controller_handle_touch(&ctrl, &s_up, &action);
     TEST_ASSERT_FALSE(ctrl.sort_wheel_open);
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_LIKED_FIRST, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_LIKED_FIRST,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
 
     /* Long-press focused sleeve -> Album Quick Actions -> tap favorite -> auto-closes */
     struct touch_event qa_down = {TOUCH_EVENT_DOWN, 172, 152, 4000ull};
@@ -183,7 +198,9 @@ static void test_sort_wheel_quick_seek_and_long_press_overlays(void) {
     library_controller_handle_touch(&ctrl, &qa_up, &action);
     send_tap(&ctrl, 180, 196, 4600ull, &action);
     TEST_ASSERT_TRUE(action.state_dirty);
-    TEST_ASSERT_EQ_U32(1u, catalog.favorite_album_count);
+    struct library_db_counts counts;
+    TEST_ASSERT_TRUE(library_db_read_counts(&db, &counts));
+    TEST_ASSERT_EQ_U32(1u, counts.favorite_albums);
     step_for_seconds(&ctrl, 0.30f);
     TEST_ASSERT_FALSE(ctrl.quick_actions_open);
 
@@ -220,21 +237,22 @@ static void test_sort_wheel_quick_seek_and_long_press_overlays(void) {
     library_controller_handle_touch(&ctrl, &del_down, &action);
     step_for_seconds(&ctrl, 1.15f);
     TEST_ASSERT_FALSE(ctrl.playlist_sheet_open);
-    TEST_ASSERT_EQ_U32(0u, catalog.playlist_count);
+    TEST_ASSERT_TRUE(library_db_read_counts(&db, &counts));
+    TEST_ASSERT_EQ_U32(0u, counts.playlists);
     TEST_ASSERT_EQ_I32(LIB_VIEW_EMPTY, library_controller_current_view(&ctrl)->kind);
 
     library_controller_destroy(&ctrl);
-    library_state_destroy(&store);
-    library_catalog_destroy(&catalog);
+    library_db_close(&db);
+    (void)unlink(db_path);
 }
 
 static void test_track_row_long_press_quick_action(void) {
-    struct library_catalog catalog;
-    struct library_state_store store;
-    build_test_catalog(&catalog, &store);
+    struct library_db db;
+    char db_path[128];
+    build_test_db(&db, db_path, sizeof(db_path));
 
     struct library_controller controller;
-    library_controller_initialize(&controller, &catalog, &store, NULL);
+    library_controller_initialize(&controller, &db, NULL);
     struct library_controller_action action;
 
     /* Open All songs (Hub pair 2, right tile = (244, 152)) */
@@ -259,13 +277,15 @@ static void test_track_row_long_press_quick_action(void) {
     controller.view_stack[controller.stack_depth - 1u].target_index = 0;
 
     /* Long-press row 0 (Alpha) for 0.52s -> opens LIB_QA_TRACK */
-    uint64_t expected_track_id = catalog.tracks[tracks_view->item_indices[0]].track_id;
+    const struct library_db_row *first_row = library_controller_get_row(&controller, 0u);
+    TEST_ASSERT_TRUE(first_row != NULL);
+    int64_t expected_track_id = first_row->id;
     struct touch_event hold_down = {TOUCH_EVENT_DOWN, 180, 126, 2000ull};
     library_controller_handle_touch(&controller, &hold_down, &action);
     step_for_seconds(&controller, 0.52f);
     TEST_ASSERT_TRUE(controller.quick_actions_open);
     TEST_ASSERT_EQ_I32(LIB_QA_TRACK, controller.quick_action_kind);
-    TEST_ASSERT_TRUE(controller.quick_action_target_id == expected_track_id);
+    TEST_ASSERT_TRUE(controller.quick_action_row.id == expected_track_id);
     struct touch_event hold_up = {TOUCH_EVENT_UP, 180, 126, 2540ull};
     library_controller_handle_touch(&controller, &hold_up, &action);
 
@@ -273,7 +293,9 @@ static void test_track_row_long_press_quick_action(void) {
     send_tap(&controller, 180, 316, 2600ull, &action);
     TEST_ASSERT_FALSE(controller.quick_actions_open);
     TEST_ASSERT_FALSE(action.state_dirty);
-    TEST_ASSERT_EQ_U32(0u, catalog.favorite_track_count);
+    struct library_db_counts counts;
+    TEST_ASSERT_TRUE(library_db_read_counts(&db, &counts));
+    TEST_ASSERT_EQ_U32(0u, counts.favorite_tracks);
 
     /* Re-open long-press -> tap medallion -> favorites track + auto-closes */
     struct touch_event hold2_down = {TOUCH_EVENT_DOWN, 180, 126, 3000ull};
@@ -285,9 +307,10 @@ static void test_track_row_long_press_quick_action(void) {
 
     send_tap(&controller, 180, 196, 3600ull, &action);
     TEST_ASSERT_TRUE(action.state_dirty);
-    TEST_ASSERT_EQ_U32(1u, catalog.favorite_track_count);
-    TEST_ASSERT_EQ_U32(1u, store.favorite_track_count);
-    TEST_ASSERT_TRUE(catalog.tracks[tracks_view->item_indices[0]].is_favorite);
+    TEST_ASSERT_TRUE(library_db_read_counts(&db, &counts));
+    TEST_ASSERT_EQ_U32(1u, counts.favorite_tracks);
+    first_row = library_controller_get_row(&controller, 0u);
+    TEST_ASSERT_TRUE(first_row != NULL && first_row->is_favorite);
     step_for_seconds(&controller, 0.30f);
     TEST_ASSERT_FALSE(controller.quick_actions_open);
 
@@ -328,12 +351,13 @@ static void test_track_row_long_press_quick_action(void) {
     library_controller_handle_touch(&controller, &fav_hold_up, &action);
     send_tap(&controller, 180, 196, 7100ull, &action);
     TEST_ASSERT_TRUE(action.state_dirty);
-    TEST_ASSERT_EQ_U32(0u, catalog.favorite_track_count);
+    TEST_ASSERT_TRUE(library_db_read_counts(&db, &counts));
+    TEST_ASSERT_EQ_U32(0u, counts.favorite_tracks);
     TEST_ASSERT_EQ_U32(0u, fav_view->item_count);
 
     library_controller_destroy(&controller);
-    library_state_destroy(&store);
-    library_catalog_destroy(&catalog);
+    library_db_close(&db);
+    (void)unlink(db_path);
 }
 
 static void test_favorites_excludes_liked_first_sort(void) {
@@ -358,15 +382,19 @@ static void test_favorites_excludes_liked_first_sort(void) {
         TEST_ASSERT_EQ_I32((int32_t)idx, hovered);
     }
 
-    struct library_catalog catalog;
-    struct library_state_store store;
-    build_test_catalog(&catalog, &store);
-    TEST_ASSERT_TRUE(library_state_toggle_album_favorite(&store, &catalog, catalog.albums[0].album_id));
-    TEST_ASSERT_TRUE(library_state_toggle_album_favorite(&store, &catalog, catalog.albums[1].album_id));
-    store.album_sort_mode = LIBRARY_SORT_LIKED_FIRST;
+    struct library_db db;
+    char db_path[128];
+    build_test_db(&db, db_path, sizeof(db_path));
+    struct library_db_collection albums_col = {LIBRARY_DB_COLLECTION_ALBUMS, 0};
+    struct library_db_row album_rows[4];
+    TEST_ASSERT_EQ_U32(4u, library_db_fetch_window(&db, &albums_col, LIBRARY_SORT_ALPHABETICAL, 0u,
+                                                   4u, album_rows));
+    TEST_ASSERT_TRUE(library_db_toggle_favorite(&db, LIBRARY_DB_FAVORITE_ALBUM, album_rows[0].id, NULL));
+    TEST_ASSERT_TRUE(library_db_toggle_favorite(&db, LIBRARY_DB_FAVORITE_ALBUM, album_rows[1].id, NULL));
+    TEST_ASSERT_TRUE(library_db_set_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS, LIBRARY_SORT_LIKED_FIRST));
 
     struct library_controller controller;
-    library_controller_initialize(&controller, &catalog, &store, NULL);
+    library_controller_initialize(&controller, &db, NULL);
     struct library_controller_action action;
 
     /* Open Favorites -> ALBUMS (preferred default when favorite albums exist) */
@@ -378,17 +406,22 @@ static void test_favorites_excludes_liked_first_sort(void) {
     TEST_ASSERT_EQ_U32(2u, fav_albums->item_count);
     TEST_ASSERT_EQ_I32(LIBRARY_SORT_ALPHABETICAL,
                        library_controller_effective_sort_mode(&controller, fav_albums));
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_LIKED_FIRST, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_LIKED_FIRST,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
 
     /* Tap-cycling Sort button skips LIBRARY_SORT_LIKED_FIRST */
     send_tap(&controller, 152, 325, 2000ull, &action);
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_REVERSE_ALPHABETICAL, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_REVERSE_ALPHABETICAL,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
     send_tap(&controller, 152, 325, 2200ull, &action);
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_RECENT, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_RECENT,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
     send_tap(&controller, 152, 325, 2400ull, &action);
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_OLDEST, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_OLDEST,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
     send_tap(&controller, 152, 325, 2600ull, &action);
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_ALPHABETICAL, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_ALPHABETICAL,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
 
     /* Holding Sort button opens 4-slot wheel; slot 2 selects MOST RECENT, slot 3 selects OLDEST */
     struct touch_event wheel_down = {TOUCH_EVENT_DOWN, 152, 325, 3000ull};
@@ -403,7 +436,8 @@ static void test_favorites_excludes_liked_first_sort(void) {
     TEST_ASSERT_EQ_I32(2, controller.sort_wheel_hovered_slot);
     library_controller_handle_touch(&controller, &wheel_up, &action);
     TEST_ASSERT_FALSE(controller.sort_wheel_open);
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_RECENT, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_RECENT,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
 
     struct touch_event wheel2_down = {TOUCH_EVENT_DOWN, 152, 325, 4000ull};
     library_controller_handle_touch(&controller, &wheel2_down, &action);
@@ -415,11 +449,69 @@ static void test_favorites_excludes_liked_first_sort(void) {
     library_controller_handle_touch(&controller, &wheel2_move, &action);
     TEST_ASSERT_EQ_I32(3, controller.sort_wheel_hovered_slot);
     library_controller_handle_touch(&controller, &wheel2_up, &action);
-    TEST_ASSERT_EQ_I32(LIBRARY_SORT_OLDEST, store.album_sort_mode);
+    TEST_ASSERT_EQ_I32(LIBRARY_SORT_OLDEST,
+                       library_db_get_sort_mode(&db, LIBRARY_DB_SORT_SCOPE_ALBUMS));
 
     library_controller_destroy(&controller);
-    library_state_destroy(&store);
-    library_catalog_destroy(&catalog);
+    library_db_close(&db);
+    (void)unlink(db_path);
+}
+
+static void test_sliding_window_prefetch_beyond_96_rows(void) {
+    char db_dir[128];
+    test_db_sequence++;
+    snprintf(db_dir, sizeof(db_dir), "/tmp/dialos_ctrl_win_%d_%u", (int)getpid(),
+             (unsigned)test_db_sequence);
+    char rm_cmd[160];
+    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf \"%s\"", db_dir);
+    (void)system(rm_cmd);
+    mkdir(db_dir, 0755);
+    struct library_db db;
+    TEST_ASSERT_TRUE(library_db_open(&db, db_dir));
+    TEST_ASSERT_TRUE(library_db_begin(&db));
+    for (uint32_t idx = 0u; idx < 160u; idx++) {
+        char path[64], title[64];
+        snprintf(path, sizeof(path), "/sd/t_%03u.flac", (unsigned)idx);
+        snprintf(title, sizeof(title), "Track %03u", (unsigned)idx);
+        struct library_db_track_input input = {
+            .path = path,
+            .title = title,
+            .artist = "Artist",
+            .album = "Big Album",
+            .genre = "Genre",
+            .track_number = idx + 1u,
+            .duration_seconds = 100u,
+            .audio_fingerprint = 0x1000ull + (uint64_t)idx,
+        };
+        TEST_ASSERT_TRUE(library_db_upsert_track(&db, &input, 0, NULL));
+    }
+    TEST_ASSERT_TRUE(library_db_commit(&db));
+    TEST_ASSERT_TRUE(library_db_recompute_aggregates(&db, NULL, 0u, NULL));
+
+    struct library_controller controller;
+    library_controller_initialize(&controller, &db, NULL);
+    struct library_controller_action action;
+
+    controller.view_stack[0].scroll_position = 2.0f;
+    controller.view_stack[0].target_index = 2;
+    send_tap(&controller, 244, 152, 1000ull, &action);
+    step_for_seconds(&controller, 0.35f);
+    TEST_ASSERT_EQ_U32(160u, library_controller_current_view(&controller)->item_count);
+
+    /* Row 120 is outside initial 0..95 viewport -> scroll, step, and flush Core 1 prefetch */
+    TEST_ASSERT_TRUE(library_controller_get_row(&controller, 120u) == NULL);
+    controller.view_stack[controller.stack_depth - 1u].scroll_position = 120.0f;
+    controller.view_stack[controller.stack_depth - 1u].target_index = 120;
+    library_controller_step(&controller, 0.02f);
+    library_controller_flush_prefetch(&controller);
+
+    const struct library_db_row *row_120 = library_controller_get_row(&controller, 120u);
+    TEST_ASSERT_TRUE(row_120 != NULL);
+    TEST_ASSERT_EQ_STR("Track 120", row_120->title);
+
+    library_controller_destroy(&controller);
+    library_db_close(&db);
+    (void)system(rm_cmd);
 }
 
 void run_library_controller_tests(void) {
@@ -429,4 +521,5 @@ void run_library_controller_tests(void) {
     RUN_TEST(test_sort_wheel_quick_seek_and_long_press_overlays);
     RUN_TEST(test_track_row_long_press_quick_action);
     RUN_TEST(test_favorites_excludes_liked_first_sort);
+    RUN_TEST(test_sliding_window_prefetch_beyond_96_rows);
 }

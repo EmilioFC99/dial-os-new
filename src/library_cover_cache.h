@@ -1,15 +1,13 @@
 #ifndef DIALOS_LIBRARY_COVER_CACHE_H
 #define DIALOS_LIBRARY_COVER_CACHE_H
 
-#include "library_catalog.h"
+#include "library_db.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-struct library_db;
 
 #define LIBRARY_COVER_SIZE_PX 120u
 #define LIBRARY_COVER_PIXEL_COUNT (LIBRARY_COVER_SIZE_PX * LIBRARY_COVER_SIZE_PX)
@@ -123,16 +121,10 @@ bool library_cover_cache_request_from_db(struct library_cover_cache *cache,
                                          uint64_t album_uid);
 bool library_cover_cache_step(struct library_cover_cache *cache, bool allow_heavy_decode);
 
-void library_cover_cache_begin_boot_precache(struct library_cover_cache *cache,
-                                             const struct library_catalog *catalog);
 void library_cover_cache_begin_boot_precache_db(struct library_cover_cache *cache,
                                                 struct library_db *database);
 void library_cover_cache_cancel_boot_precache(struct library_cover_cache *cache);
 bool library_cover_cache_is_boot_precaching(const struct library_cover_cache *cache);
-bool library_cover_cache_step_boot_precache(struct library_cover_cache *cache,
-                                            const struct library_catalog *catalog,
-                                            uint64_t (*monotonic_ns)(void *context),
-                                            void *clock_context, uint64_t budget_ns);
 bool library_cover_cache_step_boot_precache_db(struct library_cover_cache *cache,
                                                struct library_db *database,
                                                uint64_t (*monotonic_ns)(void *context),

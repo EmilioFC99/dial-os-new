@@ -22,6 +22,60 @@
 #define GENRE_TOKEN_BYTES 64u
 #define SQL_STATEMENT_BYTES 1024u
 
+static char ascii_tolower_char(char character) {
+    if (character >= 'A' && character <= 'Z') {
+        return (char)(character + ('a' - 'A'));
+    }
+    return character;
+}
+
+uint64_t library_fnv1a_64(const char *text) {
+    uint64_t hash = 14695981039346656037ull;
+    if (text == NULL) {
+        return hash;
+    }
+    for (size_t index = 0u; text[index] != '\0'; index++) {
+        hash ^= (uint8_t)text[index];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+int32_t library_compare_ascii_casefold(const char *first, const char *second) {
+    const char *left = (first != NULL) ? first : "";
+    const char *right = (second != NULL) ? second : "";
+    size_t index = 0u;
+    while (left[index] != '\0' && right[index] != '\0') {
+        char left_char = ascii_tolower_char(left[index]);
+        char right_char = ascii_tolower_char(right[index]);
+        if (left_char != right_char) {
+            return (unsigned char)left_char < (unsigned char)right_char ? -1 : 1;
+        }
+        index++;
+    }
+    if (left[index] != right[index]) {
+        return left[index] == '\0' ? -1 : 1;
+    }
+    return 0;
+}
+
+const char *library_sort_mode_toast_label(enum library_sort_mode mode) {
+    switch (mode) {
+        case LIBRARY_SORT_ALPHABETICAL:
+            return "A\xE2\x80\x93Z";
+        case LIBRARY_SORT_REVERSE_ALPHABETICAL:
+            return "Z\xE2\x80\x93" "A";
+        case LIBRARY_SORT_LIKED_FIRST:
+            return "LIKED FIRST";
+        case LIBRARY_SORT_RECENT:
+            return "MOST RECENT";
+        case LIBRARY_SORT_OLDEST:
+            return "OLDEST FIRST";
+        default:
+            return "A\xE2\x80\x93Z";
+    }
+}
+
 static void copy_text_bounded(char *destination, size_t capacity, const char *source) {
     if (capacity == 0u) {
         return;
@@ -1796,6 +1850,42 @@ bool library_db_write_context_m3u(struct library_db *database,
             sqlite3_bind_int64(statement, 1, collection->context_id);
         }
         sqlite3_bind_int64(statement, 2, (sqlite3_int64)start_offset);
+        uint32_t written = 0u;
+        ok = true;
+        while (sqlite3_step(statement) == SQLITE_ROW) {
+            const char *path = (const char *)sqlite3_column_text(statement, 0);
+            if (path != NULL && fprintf(output, "%s\n", path) < 0) {
+                ok = false;
+                break;
+            }
+            written++;
+        }
+        if (written_out != NULL) {
+            *written_out = written;
+        }
+        sqlite3_finalize(statement);
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return ok;
+}
+
+bool library_db_write_playlist_shuffled_m3u(struct library_db *database, int64_t playlist_id,
+                                            FILE *output, uint32_t *written_out) {
+    if (database == NULL || database->handle == NULL || playlist_id <= 0 || output == NULL) {
+        return false;
+    }
+    if (written_out != NULL) {
+        *written_out = 0u;
+    }
+    pthread_mutex_lock(&database->mutex);
+    sqlite3_stmt *statement = NULL;
+    bool ok = false;
+    if (sqlite3_prepare_v2(
+            database->handle,
+            "SELECT t.path FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id "
+            "WHERE pt.playlist_id = ?1 ORDER BY RANDOM();",
+            -1, &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(statement, 1, playlist_id);
         uint32_t written = 0u;
         ok = true;
         while (sqlite3_step(statement) == SQLITE_ROW) {
