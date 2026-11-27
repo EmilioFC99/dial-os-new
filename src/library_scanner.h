@@ -40,6 +40,7 @@ bool library_parse_audio_file_metadata(const char *file_path, const char *root_p
                                        char *string_scratch, size_t scratch_capacity);
 bool library_compute_audio_fingerprint(const char *file_path, uint64_t audio_start_offset,
                                        uint64_t audio_payload_bytes, uint64_t *fingerprint_out);
+int64_t library_normalize_fat_mtime(int64_t raw_mtime_seconds, int32_t kernel_tz_minutes_west);
 
 enum library_db_scan_phase {
     LIB_DB_SCAN_IDLE = 0,
@@ -60,6 +61,7 @@ struct library_db_scan_telemetry {
     uint32_t db_writes;
     uint32_t m3u_parsed_count;
     uint32_t sidecars_updated_count;
+    int32_t kernel_tz_minutes_west;
 };
 
 struct library_db_scan_snapshot {

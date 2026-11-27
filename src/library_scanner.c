@@ -9,8 +9,37 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+
+struct linux_kernel_timezone {
+    int32_t minutes_west;
+    int32_t dst_time;
+};
+
+static int32_t read_kernel_tz_minutes_west(void) {
+#if defined(__linux__) && defined(SYS_gettimeofday)
+    struct timeval current_time;
+    struct linux_kernel_timezone kernel_timezone;
+    memset(&kernel_timezone, 0, sizeof(kernel_timezone));
+    if (syscall(SYS_gettimeofday, &current_time, &kernel_timezone) == 0) {
+        return kernel_timezone.minutes_west;
+    }
+#endif
+    return 0;
+}
+
+int64_t library_normalize_fat_mtime(int64_t raw_mtime_seconds, int32_t kernel_tz_minutes_west) {
+    return raw_mtime_seconds - (int64_t)kernel_tz_minutes_west * 60ll;
+}
+
+static int64_t normalize_stat_mtime(time_t raw_mtime) {
+    return library_normalize_fat_mtime((int64_t)raw_mtime, read_kernel_tz_minutes_west());
+}
 
 #define FLAC_METADATA_LAST_MASK 0x80u
 #define FLAC_BLOCK_TYPE_MASK 0x7Fu
@@ -925,7 +954,7 @@ bool library_parse_audio_file_metadata(const char *file_path, const char *root_p
     input_out->disc_number = fields.disc_number;
     input_out->track_number = fields.track_number;
     input_out->duration_seconds = fields.duration_seconds;
-    input_out->added_at_seconds = (int64_t)file_stat.st_mtime;
+    input_out->added_at_seconds = normalize_stat_mtime(file_stat.st_mtime);
     input_out->file_size_bytes = (uint64_t)file_stat.st_size;
     input_out->format_kind = format_kind;
     input_out->cover_source_kind = fields.cover_kind;
@@ -1319,12 +1348,12 @@ static void walk_music_directory(struct scanner_work_state *state, const char *d
             if (format_kind != LIBRARY_FORMAT_UNKNOWN) {
                 directory_has_audio = true;
                 record_discovered_audio(state, full_path, (uint64_t)entry_stat.st_size,
-                                        (int64_t)entry_stat.st_mtime, format_kind);
+                                        normalize_stat_mtime(entry_stat.st_mtime), format_kind);
                 atomic_store(&state->owner->atomic_discovered_files,
                              state->discovered_audio_count);
             } else if (is_m3u_filename(entry->d_name)) {
                 record_discovered_m3u(state, full_path, (uint64_t)entry_stat.st_size,
-                                      (int64_t)entry_stat.st_mtime);
+                                      normalize_stat_mtime(entry_stat.st_mtime));
             } else {
                 int cover_rank = classify_sidecar_cover_rank(entry->d_name);
                 if (cover_rank >= 0 && cover_rank < best_cover_rank) {
@@ -1332,7 +1361,7 @@ static void walk_music_directory(struct scanner_work_state *state, const char *d
                     copy_string_bounded(best_cover_path, sizeof(best_cover_path), full_path,
                                         sizeof(best_cover_path) - 1u);
                     best_cover_size = (uint64_t)entry_stat.st_size;
-                    best_cover_mtime = (int64_t)entry_stat.st_mtime;
+                    best_cover_mtime = normalize_stat_mtime(entry_stat.st_mtime);
                 }
             }
         }
@@ -1485,6 +1514,7 @@ static void *db_scanner_worker_main(void *argument) {
     struct library_db_scanner *scanner = (struct library_db_scanner *)argument;
     struct library_db_scan_telemetry telemetry;
     memset(&telemetry, 0, sizeof(telemetry));
+    telemetry.kernel_tz_minutes_west = read_kernel_tz_minutes_west();
 
     struct stat root_stat;
     bool root_exists =
@@ -1696,7 +1726,7 @@ static void *db_scanner_worker_main(void *argument) {
                     legacy_input.cover_path != NULL && legacy_input.cover_path[0] != '\0') {
                     struct stat cover_stat;
                     if (stat(legacy_input.cover_path, &cover_stat) == 0) {
-                        db_input.cover_source_mtime = (int64_t)cover_stat.st_mtime;
+                        db_input.cover_source_mtime = normalize_stat_mtime(cover_stat.st_mtime);
                         db_input.cover_source_size = (uint64_t)cover_stat.st_size;
                     }
                 }

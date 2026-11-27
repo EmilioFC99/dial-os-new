@@ -428,9 +428,16 @@ static void test_scanner_duplicates_corrupt_skip_and_cancel(void) {
     remove_scan_tree(work_dir);
 }
 
+static void test_normalize_fat_mtime_strips_kernel_timezone_offset(void) {
+    TEST_ASSERT_TRUE(library_normalize_fat_mtime(1777026312ll, 360) == 1777004712ll);
+    TEST_ASSERT_TRUE(library_normalize_fat_mtime(1777004712ll, 0) == 1777004712ll);
+    TEST_ASSERT_TRUE(library_normalize_fat_mtime(1777004712ll, -540) == 1777037112ll);
+}
+
 void run_library_scanner_db_tests(void) {
     printf("Library DB scanner tests...\n");
     RUN_TEST(test_audio_payload_fingerprint_ignores_tag_and_padding_edits);
     RUN_TEST(test_incremental_scanner_cold_warm_edit_move_and_delete);
     RUN_TEST(test_scanner_duplicates_corrupt_skip_and_cancel);
+    RUN_TEST(test_normalize_fat_mtime_strips_kernel_timezone_offset);
 }

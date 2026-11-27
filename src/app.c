@@ -420,6 +420,7 @@ static void enter_home_from_boot_complete(struct app_runtime *runtime, uint64_t 
     }
 }
 
+static void begin_library_mount_sync(struct app_runtime *runtime);
 static void handle_sd_mount_transition(struct app_runtime *runtime);
 
 static void handle_aa24_during_boot(struct app_runtime *runtime,
@@ -446,7 +447,10 @@ static void handle_aa24_during_boot(struct app_runtime *runtime,
                     runtime->hardware.sd_mounted ? 1u : 0u);
     if (runtime->hardware.sd_mounted) {
         runtime->boot_sd_missing_since_ns = 0ull;
-        if (!runtime->library_prev_sd_mounted) {
+        if (!runtime->library_scan_started) {
+            runtime->library_prev_sd_mounted = true;
+            begin_library_mount_sync(runtime);
+        } else if (!runtime->library_prev_sd_mounted) {
             handle_sd_mount_transition(runtime);
         }
     } else {
@@ -676,10 +680,7 @@ void app_initialize(struct app_runtime *runtime, const struct platform_operation
     if (platform->probe_hardware_status != NULL) {
         platform->probe_hardware_status(platform->context, &runtime->hardware);
     }
-    runtime->library_prev_sd_mounted = runtime->hardware.sd_mounted;
-    if (runtime->hardware.sd_mounted) {
-        begin_library_mount_sync(runtime);
-    }
+    runtime->library_prev_sd_mounted = false;
     sync_home_telemetry(runtime);
 
     runtime->initial_crash_count =
@@ -766,7 +767,9 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
                 runtime->platform->probe_hardware_status(runtime->platform->context,
                                                          &runtime->hardware);
                 boot_controller_update_sd_mounted(&runtime->boot, runtime->hardware.sd_mounted);
-                handle_sd_mount_transition(runtime);
+                if (runtime->aa24_received) {
+                    handle_sd_mount_transition(runtime);
+                }
                 sync_home_telemetry(runtime);
             } else if (runtime->state == UI_STATE_HOME) {
                 runtime->platform->probe_hardware_status(runtime->platform->context,
@@ -1064,7 +1067,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                     logger_log_line(
                         &runtime->logger, runtime_uptime_ms(runtime, scan_end_ns), "BOOT",
                         "scan_done ms=%llu tracks=%u albums=%u artists=%u genres=%u playlists=%u "
-                        "added=%u updated=%u moved=%u removed=%u",
+                        "added=%u updated=%u moved=%u removed=%u tz_min=%d",
                         (unsigned long long)elapsed_ms_since(scan_end_ns,
                                                              runtime->library_scan_start_ns),
                         (unsigned)counts.tracks, (unsigned)counts.albums,
@@ -1073,7 +1076,8 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                         (unsigned)scan_snap.telemetry.modified_count,
                         (unsigned)(scan_snap.telemetry.moved_count +
                                    scan_snap.telemetry.moved_edited_count),
-                        (unsigned)scan_snap.telemetry.deleted_count);
+                        (unsigned)scan_snap.telemetry.deleted_count,
+                        (int)scan_snap.telemetry.kernel_tz_minutes_west);
                 }
                 boot_controller_update_library_scan(
                     &runtime->boot, (uint32_t)scan_snap.phase, scan_snap.discovered_files,
@@ -1097,6 +1101,7 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                             logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns),
                                             "BOOT", "sd_recovered");
                             if (!runtime->library_scan_started) {
+                                runtime->library_prev_sd_mounted = true;
                                 begin_library_mount_sync(runtime);
                             }
                         }

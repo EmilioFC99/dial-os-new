@@ -906,25 +906,27 @@ static void test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker(vo
     struct app_runtime runtime;
     app_initialize(&runtime, &operations);
 
-    /* Advance 900 ms (still in Act 01 WAKE): precache must NOT have started */
+    /* Advance 900 ms (still in Act 01 WAKE): neither scan nor precache must have started */
     advance_runtime_ticks(&runtime, &fake, 900u);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_WAKE, runtime.boot.phase);
+    TEST_ASSERT_FALSE(runtime.library_scan_started);
     TEST_ASSERT_FALSE(runtime.boot_cover_precache_started);
     TEST_ASSERT_EQ_U32(0u, runtime.library_covers.precache_decoded);
 
     /* Enter Act 02 and deliver aa24 while SD momentarily reports unmounted (remount race) */
     advance_runtime_ticks(&runtime, &fake, 200u);
     TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, runtime.boot.phase);
-    wait_for_library_scan_ready(&runtime, &fake);
     fake.hardware.sd_mounted = false;
     struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
     app_handle_ipc_message(&runtime, &aa24);
-    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
+    TEST_ASSERT_FALSE(runtime.library_scan_started);
 
-    /* Step 600 ms while unmounted, then restore SD mount -> 500 ms probe recovers */
+    /* Step 600 ms while unmounted, then restore SD mount -> 500 ms probe recovers and scans */
     advance_runtime_ticks(&runtime, &fake, 600u);
     fake.hardware.sd_mounted = true;
     advance_runtime_ticks(&runtime, &fake, 1000u);
+    wait_for_library_scan_ready(&runtime, &fake);
+    TEST_ASSERT_EQ_U32(1u, runtime.home.telemetry.album_count);
     for (uint32_t spin = 0u;
          spin < 500u && library_cover_cache_is_boot_precaching(&runtime.library_covers); spin++) {
         usleep(1000u);
