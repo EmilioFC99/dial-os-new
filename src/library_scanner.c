@@ -491,10 +491,10 @@ static void parse_mp3_file(FILE *file, uint64_t file_size_bytes, struct parsed_t
                     }
                 }
             } else if (frame_size <= 1024u) {
-                uint8_t buf[1024];
-                if (fread(buf, 1u, frame_size, file) == frame_size) {
+                uint8_t frame_payload[1024];
+                if (fread(frame_payload, 1u, frame_size, file) == frame_size) {
                     char text[160];
-                    decode_id3_text(buf, frame_size, text, sizeof(text));
+                    decode_id3_text(frame_payload, frame_size, text, sizeof(text));
                     if (strcmp(frame_id, "TIT2") == 0 || strcmp(frame_id, "TT2") == 0) {
                         apply_tag_pair(fields, "TITLE", text);
                     } else if (strcmp(frame_id, "TPE1") == 0 || strcmp(frame_id, "TP1") == 0) {

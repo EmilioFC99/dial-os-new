@@ -55,6 +55,9 @@ struct platform_operations {
     bool (*appearance_mode_read)(void *context, enum appearance_mode *mode_out);
     void (*appearance_mode_write)(void *context, enum appearance_mode mode);
     bool (*log_append)(void *context, const char *text, size_t length, bool sync_to_disk);
+    const char *library_music_root;
+    const char *library_dialos_directory;
+    const char *library_temp_directory;
 };
 
 #endif

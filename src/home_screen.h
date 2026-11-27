@@ -120,6 +120,7 @@ void home_compute_slot_layout(int32_t virtual_slot, int32_t focused_slot, float 
 
 void home_controller_initialize(struct home_controller *controller);
 void home_controller_enter_from_boot(struct home_controller *controller);
+void home_controller_return_from_shell(struct home_controller *controller, enum home_app_id app_id);
 void home_controller_step(struct home_controller *controller, float delta_seconds);
 enum home_controller_event home_controller_handle_touch(struct home_controller *controller,
                                                         const struct touch_event *event);

@@ -7,6 +7,11 @@
 
 #include "boot_sequence.h"
 #include "home_screen.h"
+#include "library_catalog.h"
+#include "library_controller.h"
+#include "library_cover_cache.h"
+#include "library_scanner.h"
+#include "library_state.h"
 #include "logger.h"
 #include "platform.h"
 #include "protocol.h"
@@ -48,6 +53,16 @@ struct app_runtime {
     bool sd_followup_second_pending;
     struct boot_controller boot;
     struct home_controller home;
+    struct library_catalog library_catalog;
+    struct library_scanner library_scanner;
+    struct library_state_store library_state;
+    struct library_cover_cache library_covers;
+    struct library_controller library;
+    bool library_scan_started;
+    bool library_delta_pending;
+    bool library_prev_sd_mounted;
+    bool library_hub_reset_on_dive;
+    uint32_t m3u_sequence;
     uint64_t last_boot_tick_ns;
     uint64_t last_home_tick_ns;
     enum appearance_mode appearance_mode;
@@ -101,6 +116,7 @@ bool crash_write_log_atomic(const struct crash_record *record, bool sd_mounted,
 
 /* Phase 1 runtime state machine */
 void app_initialize(struct app_runtime *runtime, const struct platform_operations *platform);
+void app_destroy(struct app_runtime *runtime);
 void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ipc_message *message);
 void app_handle_button_action(struct app_runtime *runtime, enum physical_button_action action);
 void app_handle_touch_event(struct app_runtime *runtime, const struct touch_event *event);

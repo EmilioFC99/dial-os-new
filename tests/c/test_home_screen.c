@@ -197,6 +197,15 @@ static void test_now_playing_idle_active_storage_and_library_transitions(void) {
     home_controller_handle_touch(&controller, &cta_down);
     home_controller_handle_touch(&controller, &cta_up);
     TEST_ASSERT_TRUE(controller.launch_target < 0.01f);
+
+    /* 4. Direct return_from_shell restores Home anchored on HOME_APP_LIBRARY */
+    controller.active_screen = ACTIVE_SCREEN_LIBRARY_SHELL;
+    home_controller_return_from_shell(&controller, HOME_APP_LIBRARY);
+    TEST_ASSERT_EQ_I32(ACTIVE_SCREEN_HOME, controller.active_screen);
+    TEST_ASSERT_EQ_I32(HOME_APP_LIBRARY, home_wrap_app_slot(controller.focused_slot));
+    TEST_ASSERT_EQ_I32(HOME_APP_LIBRARY, controller.launched_app_id);
+    TEST_ASSERT_TRUE(controller.launch_progress > 0.99f);
+    TEST_ASSERT_TRUE(controller.launch_target < 0.01f);
 }
 
 void run_home_screen_tests(void) {

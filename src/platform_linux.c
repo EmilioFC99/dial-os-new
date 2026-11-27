@@ -703,6 +703,7 @@ bool platform_linux_initialize(struct platform_linux_state *state,
     }
 
     memset(state, 0, sizeof(*state));
+    memset(operations_out, 0, sizeof(*operations_out));
     state->fb_fd = -1;
     state->event0_fd = -1;
     state->event1_fd = -1;
