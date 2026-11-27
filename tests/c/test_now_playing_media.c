@@ -192,6 +192,13 @@ static void test_sidecar_and_embedded_lyrics_files(void) {
     pthread_mutex_lock(&media.mutex);
     TEST_ASSERT_FALSE(media.active_lyrics_ready);
     TEST_ASSERT_EQ_STR("", media.active_lyrics_path);
+    media.active_cover_ready = true;
+    media.active_cover_album_uid = 42ull;
+    pthread_mutex_unlock(&media.mutex);
+    now_playing_media_request_active(&media, 1, 42ull, "/m/new2.flac");
+    pthread_mutex_lock(&media.mutex);
+    TEST_ASSERT_TRUE(media.active_cover_ready);
+    TEST_ASSERT_FALSE(media.active_lyrics_ready);
     pthread_mutex_unlock(&media.mutex);
     now_playing_media_destroy(&media);
 

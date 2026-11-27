@@ -720,6 +720,8 @@ static void *media_worker_main(void *argument) {
         bool do_active = media->has_pending_active;
         int64_t album_id = do_active ? media->req_active_album_id : media->req_peek_album_id;
         uint64_t album_uid = do_active ? media->req_active_album_uid : media->req_peek_album_uid;
+        bool need_cover = !do_active || !media->active_cover_ready ||
+                          media->active_cover_album_uid != album_uid;
         char track_path[LIBRARY_DB_PATH_BYTES];
         track_path[0] = '\0';
         if (do_active) {
@@ -745,6 +747,10 @@ static void *media_worker_main(void *argument) {
                 media->active_lyrics_ready = true;
             }
             pthread_mutex_unlock(&media->mutex);
+        }
+
+        if (!need_cover) {
+            continue;
         }
 
         bool cover_ok = false;
@@ -891,12 +897,20 @@ const uint16_t *now_playing_media_get_active_cover(struct now_playing_media *med
     if (album_uid == 0ull) {
         return NULL;
     }
-    if (media != NULL && media->active_cover_ready && media->active_cover_album_uid == album_uid &&
-        media->active_cover_pixels != NULL) {
-        if (size_out != NULL) {
-            *size_out = NOW_PLAYING_COVER_SIZE_PX;
+    if (media != NULL) {
+        const uint16_t *ready_pixels = NULL;
+        pthread_mutex_lock(&media->mutex);
+        if (media->active_cover_ready && media->active_cover_album_uid == album_uid &&
+            media->active_cover_pixels != NULL) {
+            ready_pixels = media->active_cover_pixels;
         }
-        return media->active_cover_pixels;
+        pthread_mutex_unlock(&media->mutex);
+        if (ready_pixels != NULL) {
+            if (size_out != NULL) {
+                *size_out = NOW_PLAYING_COVER_SIZE_PX;
+            }
+            return ready_pixels;
+        }
     }
     if (fallback_cache != NULL) {
         const uint16_t *thumb = library_cover_cache_lookup_or_load_disk(fallback_cache, album_uid);
@@ -918,12 +932,20 @@ const uint16_t *now_playing_media_get_peek_cover(struct now_playing_media *media
     if (album_uid == 0ull) {
         return NULL;
     }
-    if (media != NULL && media->peek_cover_ready && media->peek_cover_album_uid == album_uid &&
-        media->peek_cover_pixels != NULL) {
-        if (size_out != NULL) {
-            *size_out = NOW_PLAYING_COVER_SIZE_PX;
+    if (media != NULL) {
+        const uint16_t *ready_pixels = NULL;
+        pthread_mutex_lock(&media->mutex);
+        if (media->peek_cover_ready && media->peek_cover_album_uid == album_uid &&
+            media->peek_cover_pixels != NULL) {
+            ready_pixels = media->peek_cover_pixels;
         }
-        return media->peek_cover_pixels;
+        pthread_mutex_unlock(&media->mutex);
+        if (ready_pixels != NULL) {
+            if (size_out != NULL) {
+                *size_out = NOW_PLAYING_COVER_SIZE_PX;
+            }
+            return ready_pixels;
+        }
     }
     if (fallback_cache != NULL) {
         const uint16_t *thumb = library_cover_cache_lookup_or_load_disk(fallback_cache, album_uid);

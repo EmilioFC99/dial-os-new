@@ -327,7 +327,8 @@ static void draw_alive_cube_icon(const struct framebuffer_surface *surface,
             const uint16_t *cover_pixels =
                 (library != NULL && library->has_active_track && library->active_album_uid != 0ull &&
                  library->cover_cache != NULL)
-                    ? library_cover_cache_lookup(library->cover_cache, library->active_album_uid)
+                    ? library_cover_cache_lookup_or_load_disk(library->cover_cache,
+                                                              library->active_album_uid)
                     : NULL;
             if (cover_pixels != NULL && scale_x > 0.70f) {
                 render_blit_rgb565_circle_rotated(
@@ -1352,7 +1353,8 @@ void render_draw_home_with_library_frame(const struct framebuffer_surface *surfa
         const uint16_t *cover_pixels =
             (library != NULL && library->has_active_track && library->active_album_uid != 0ull &&
              library->cover_cache != NULL)
-                ? library_cover_cache_lookup(library->cover_cache, library->active_album_uid)
+                ? library_cover_cache_lookup_or_load_disk(library->cover_cache,
+                                                          library->active_album_uid)
                 : NULL;
         if (cover_pixels != NULL) {
             render_blit_rgb565_circle_rotated(surface, cover_pixels, LIBRARY_COVER_SIZE_PX,
