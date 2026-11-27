@@ -661,6 +661,143 @@ static void test_scale_has_no_track_cap_and_windows_stay_fast(void) {
     remove_tree(work_directory);
 }
 
+static void test_playback_queue_shuffle_reconcile_and_persistence(void) {
+    char work_directory[128];
+    make_work_directory(work_directory, sizeof(work_directory));
+    struct library_db database;
+    TEST_ASSERT_TRUE(library_db_open(&database, work_directory));
+
+    int64_t track_one =
+        insert_track(&database, "/m/a/1.flac", "Alpha", "Artist A", "Album A", "Rock", 1, 10);
+    int64_t track_two =
+        insert_track(&database, "/m/a/2.flac", "Beta", "Artist A", "Album A", "Rock", 2, 20);
+    int64_t track_three =
+        insert_track(&database, "/m/b/3.flac", "Gamma", "Artist B", "Album B", "Jazz", 1, 30);
+    TEST_ASSERT_TRUE(library_db_recompute_aggregates(&database, NULL, 0u, NULL));
+
+    /* Track details lookup */
+    struct library_db_track_details details;
+    TEST_ASSERT_TRUE(library_db_get_track_details(&database, track_two, &details));
+    TEST_ASSERT_EQ_STR("Beta", details.title);
+    TEST_ASSERT_EQ_STR("Artist A", details.artist);
+    TEST_ASSERT_EQ_STR("Album A", details.album);
+    TEST_ASSERT_EQ_U32(2u, details.album_track_count);
+
+    /* Build natural queue for ALL SONGS anchored at track_two */
+    struct library_db_collection all_songs = {LIBRARY_DB_COLLECTION_TRACKS_ALL, 0};
+    uint32_t slot = 99u;
+    uint32_t total = 0u;
+    TEST_ASSERT_TRUE(
+        library_db_build_playback_queue(&database, &all_songs, track_two, false, &slot, &total));
+    TEST_ASSERT_EQ_U32(3u, total);
+    TEST_ASSERT_EQ_U32(1u, slot);
+
+    /* Shuffle ON anchors track_two at slot 0 */
+    TEST_ASSERT_TRUE(library_db_reshuffle_playback_queue(&database, track_two, 0, &total));
+    TEST_ASSERT_EQ_U32(3u, total);
+    TEST_ASSERT_TRUE(library_db_get_queue_track(&database, 0u, &details));
+    TEST_ASSERT_EQ_I32(track_two, details.track_id);
+
+    /* Repeat All wrap reshuffle avoids repeating last_track_id at slot 0 */
+    for (uint32_t round = 0u; round < 5u; round++) {
+        TEST_ASSERT_TRUE(library_db_reshuffle_playback_queue(&database, 0, track_three, &total));
+        TEST_ASSERT_TRUE(library_db_get_queue_track(&database, 0u, &details));
+        TEST_ASSERT_TRUE(details.track_id != track_three);
+    }
+
+    /* Rolling M3U slice streams max_tracks from start_slot */
+    FILE *slice = tmpfile();
+    uint32_t written = 0u;
+    TEST_ASSERT_TRUE(library_db_write_queue_slice_m3u(&database, 1u, 2u, slice, &written));
+    fclose(slice);
+    TEST_ASSERT_EQ_U32(2u, written);
+
+    /* Restore natural order */
+    TEST_ASSERT_TRUE(library_db_restore_playback_queue_order(&database, &all_songs, track_two,
+                                                             false, &slot, &total));
+    TEST_ASSERT_EQ_U32(3u, total);
+    TEST_ASSERT_EQ_U32(1u, slot);
+
+    /* Favorites live mutation: unfavoriting active track marks it ephemeral, drop removes it */
+    bool fav_state = false;
+    TEST_ASSERT_TRUE(
+        library_db_toggle_favorite(&database, LIBRARY_DB_FAVORITE_TRACK, track_one, &fav_state));
+    TEST_ASSERT_TRUE(fav_state);
+    TEST_ASSERT_TRUE(
+        library_db_toggle_favorite(&database, LIBRARY_DB_FAVORITE_TRACK, track_two, &fav_state));
+    struct library_db_collection favs = {LIBRARY_DB_COLLECTION_TRACKS_FAVORITES, 0};
+    TEST_ASSERT_TRUE(
+        library_db_build_playback_queue(&database, &favs, track_one, false, &slot, &total));
+    TEST_ASSERT_EQ_U32(2u, total);
+
+    TEST_ASSERT_TRUE(
+        library_db_toggle_favorite(&database, LIBRARY_DB_FAVORITE_TRACK, track_one, &fav_state));
+    TEST_ASSERT_FALSE(fav_state);
+    bool ephemeral = false;
+    TEST_ASSERT_TRUE(library_db_reconcile_playback_queue(&database, &favs, track_one, false, &slot,
+                                                         &total, &ephemeral));
+    TEST_ASSERT_TRUE(ephemeral);
+    TEST_ASSERT_EQ_U32(2u, total);
+    TEST_ASSERT_EQ_U32(0u, slot);
+    TEST_ASSERT_TRUE(library_db_drop_queue_slot(&database, 0u, &total));
+    TEST_ASSERT_EQ_U32(1u, total);
+
+    /* Playlist Picker CRUD: auto-creates DialOS Crate, toggles track membership */
+    int64_t default_pl_id = 0;
+    TEST_ASSERT_TRUE(library_db_ensure_default_playlist(&database, &default_pl_id));
+    TEST_ASSERT_TRUE(default_pl_id > 0);
+    struct library_db_playlist_membership memberships[4];
+    uint32_t pl_total = 0u;
+    uint32_t pl_count = library_db_list_playlists_for_track(&database, track_one, 0u, 4u,
+                                                            memberships, &pl_total);
+    TEST_ASSERT_EQ_U32(1u, pl_total);
+    TEST_ASSERT_EQ_U32(1u, pl_count);
+    TEST_ASSERT_EQ_STR("DialOS Crate", memberships[0].name);
+    TEST_ASSERT_FALSE(memberships[0].contains_track);
+
+    bool added = false;
+    TEST_ASSERT_TRUE(
+        library_db_toggle_track_in_playlist(&database, default_pl_id, track_one, &added));
+    TEST_ASSERT_TRUE(added);
+    pl_count = library_db_list_playlists_for_track(&database, track_one, 0u, 4u, memberships,
+                                                   &pl_total);
+    TEST_ASSERT_TRUE(memberships[0].contains_track);
+    TEST_ASSERT_EQ_U32(1u, memberships[0].track_count);
+
+    TEST_ASSERT_TRUE(
+        library_db_toggle_track_in_playlist(&database, default_pl_id, track_one, &added));
+    TEST_ASSERT_FALSE(added);
+
+    /* Playback state persistence round-trip */
+    struct library_db_playback_state saved = {0};
+    saved.has_volume = true;
+    saved.volume_level = 77u;
+    saved.shuffle_enabled = true;
+    saved.repeat_mode = PLAYBACK_REPEAT_ALL;
+    saved.has_active_queue = true;
+    saved.context_kind = LIBRARY_DB_COLLECTION_TRACKS_ALL;
+    saved.context_id = 0;
+    snprintf(saved.context_title, sizeof(saved.context_title), "All songs");
+    saved.current_slot = 1u;
+    saved.active_track_id = track_two;
+    saved.elapsed_ms = 42500u;
+    TEST_ASSERT_TRUE(library_db_save_playback_state(&database, &saved));
+
+    struct library_db_playback_state loaded = {0};
+    TEST_ASSERT_TRUE(library_db_load_playback_state(&database, &loaded));
+    TEST_ASSERT_TRUE(loaded.has_volume);
+    TEST_ASSERT_EQ_U32(77u, loaded.volume_level);
+    TEST_ASSERT_TRUE(loaded.shuffle_enabled);
+    TEST_ASSERT_EQ_I32(PLAYBACK_REPEAT_ALL, loaded.repeat_mode);
+    TEST_ASSERT_TRUE(loaded.has_active_queue);
+    TEST_ASSERT_EQ_U32(1u, loaded.current_slot);
+    TEST_ASSERT_EQ_I32(track_two, loaded.active_track_id);
+    TEST_ASSERT_EQ_U32(42500u, loaded.elapsed_ms);
+
+    library_db_close(&database);
+    remove_tree(work_directory);
+}
+
 void run_library_db_tests(void) {
     printf("Library DB tests...\n");
     RUN_TEST(test_open_creates_schema);
@@ -676,4 +813,5 @@ void run_library_db_tests(void) {
     RUN_TEST(test_corrupt_database_is_quarantined_and_recreated);
     RUN_TEST(test_empty_database_queries_are_calm);
     RUN_TEST(test_scale_has_no_track_cap_and_windows_stay_fast);
+    RUN_TEST(test_playback_queue_shuffle_reconcile_and_persistence);
 }
