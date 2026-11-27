@@ -181,7 +181,7 @@ static void test_bezel_volume_swipe_and_audio_started_clock_sync(void) {
     now_playing_controller_handle_touch(&ctrl, &bez_move, &effects, &vol_changed, &action);
     TEST_ASSERT_TRUE(vol_changed);
     TEST_ASSERT_TRUE(ctrl.volume_hud_active);
-    TEST_ASSERT_TRUE(ctrl.volume_level > 60u);
+    TEST_ASSERT_TRUE(ctrl.volume_level >= 90u && ctrl.volume_level <= 94u);
     now_playing_controller_handle_touch(&ctrl, &bez_up, &effects, &vol_changed, &action);
 
     uint8_t prev_vol = ctrl.volume_level;
