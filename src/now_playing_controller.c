@@ -241,6 +241,8 @@ void now_playing_controller_enter(struct now_playing_controller *controller,
     controller->playlist_picker_progress = 0.0f;
     controller->details_sheet_open = false;
     controller->details_sheet_progress = 0.0f;
+    controller->details_lyrics_banner_active = false;
+    controller->details_lyrics_banner_alpha = 0.0f;
     controller->queue_sheet_open = false;
     controller->queue_sheet_progress = 0.0f;
     controller->lyrics_open = false;
@@ -327,6 +329,7 @@ void now_playing_controller_apply_effects(struct now_playing_controller *control
         controller->last_audio_started = controller->engine->audio_started;
     }
     if (effects->track_changed && controller->engine != NULL) {
+        controller->details_lyrics_banner_active = false;
         controller->lyrics_last_cue_index = -1;
         controller->lyrics_prev_cue_index = -1;
         controller->lyrics_prev_cue_text[0] = '\0';
@@ -366,6 +369,7 @@ bool now_playing_controller_step_back(struct now_playing_controller *controller,
     }
     if (controller->details_sheet_open) {
         controller->details_sheet_open = false;
+        controller->details_lyrics_banner_active = false;
         return true;
     }
     if (controller->queue_sheet_open) {
@@ -550,6 +554,11 @@ void now_playing_controller_step(struct now_playing_controller *controller, floa
     controller->details_sheet_progress = approach_f32(
         controller->details_sheet_progress, controller->details_sheet_open ? 1.0f : 0.0f, 14.0f,
         delta_seconds);
+    bool show_lyrics_banner =
+        (controller->details_sheet_open && controller->details_lyrics_banner_active);
+    controller->details_lyrics_banner_alpha = approach_f32(
+        controller->details_lyrics_banner_alpha, show_lyrics_banner ? 1.0f : 0.0f, 24.0f,
+        delta_seconds);
     controller->queue_sheet_progress = approach_f32(
         controller->queue_sheet_progress, controller->queue_sheet_open ? 1.0f : 0.0f, 14.0f,
         delta_seconds);
@@ -711,8 +720,17 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             return;
         }
         if (controller->details_sheet_open) {
-            controller->pointer_mode =
-                ((float)event->x <= LEFT_EDGE_SWIPE_ZONE_PX) ? NP_PTR_LEFT_EDGE_PENDING : NP_PTR_NONE;
+            if ((float)event->x <= LEFT_EDGE_SWIPE_ZONE_PX) {
+                controller->pointer_mode = NP_PTR_LEFT_EDGE_PENDING;
+            } else if (event->x >= NP_DETAILS_LYRICS_BADGE_HIT_LEFT &&
+                       event->x <= NP_DETAILS_LYRICS_BADGE_HIT_RIGHT &&
+                       event->y >= NP_DETAILS_LYRICS_BADGE_HIT_TOP &&
+                       event->y <= NP_DETAILS_LYRICS_BADGE_HIT_BOTTOM) {
+                controller->pointer_mode = NP_PTR_DETAILS_LYRICS_BADGE;
+                controller->details_lyrics_banner_active = true;
+            } else {
+                controller->pointer_mode = NP_PTR_NONE;
+            }
             return;
         }
         if (controller->queue_sheet_open) {
@@ -948,6 +966,14 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
                 break;
             }
 
+            case NP_PTR_DETAILS_LYRICS_BADGE:
+                controller->details_lyrics_banner_active =
+                    (event->x >= NP_DETAILS_LYRICS_BADGE_HOLD_LEFT &&
+                     event->x <= NP_DETAILS_LYRICS_BADGE_HOLD_RIGHT &&
+                     event->y >= NP_DETAILS_LYRICS_BADGE_HOLD_TOP &&
+                     event->y <= NP_DETAILS_LYRICS_BADGE_HOLD_BOTTOM);
+                break;
+
             default:
                 break;
         }
@@ -965,7 +991,11 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
         controller->pointer_active = false;
         controller->pointer_mode = NP_PTR_NONE;
         controller->idle_cta_pressed = false;
+        controller->details_lyrics_banner_active = false;
 
+        if (mode == NP_PTR_DETAILS_LYRICS_BADGE) {
+            return;
+        }
         if (mode == NP_PTR_IDLE_CTA) {
             if (was_tap && action_out != NULL) {
                 *action_out = NP_ACTION_BROWSE_LIBRARY;

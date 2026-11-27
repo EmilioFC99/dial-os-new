@@ -178,28 +178,141 @@ static void test_sidecar_and_embedded_lyrics_files(void) {
     fclose(ff2);
     TEST_ASSERT_TRUE(now_playing_media_load_lyrics_for_track(flac_path, &doc));
     TEST_ASSERT_TRUE(doc.has_timed);
+    TEST_ASSERT_EQ_I32(LYRICS_SOURCE_EMBEDDED, doc.source_kind);
     TEST_ASSERT_EQ_STR("Synced line", doc.cues[0].text);
     unlink(flac_path);
 
-    /* 5. Requesting a new track immediately clears previous active_lyrics_path & ready flag */
+    /* 5. Lyrics badge states & same-album cover preservation */
+    struct now_playing_media badge_media;
+    memset(&badge_media, 0, sizeof(badge_media));
+    pthread_mutex_init(&badge_media.mutex, NULL);
+
+    char badge_label[32];
+    bool badge_timed = false;
+    bool badge_has = false;
+    now_playing_media_get_lyrics_badge(&badge_media, "/m/new.flac", badge_label,
+                                       sizeof(badge_label), &badge_timed, &badge_has);
+    TEST_ASSERT_EQ_STR("LYRICS · LOADING", badge_label);
+    TEST_ASSERT_FALSE(badge_timed);
+    TEST_ASSERT_FALSE(badge_has);
+
+    badge_media.active_lyrics_ready = true;
+    snprintf(badge_media.active_lyrics_path, sizeof(badge_media.active_lyrics_path), "/m/new2.flac");
+    badge_media.active_lyrics.cue_count = 0u;
+    badge_media.active_lyrics.source_kind = LYRICS_SOURCE_NONE;
+    now_playing_media_get_lyrics_badge(&badge_media, "/m/new2.flac", badge_label,
+                                       sizeof(badge_label), &badge_timed, &badge_has);
+    TEST_ASSERT_EQ_STR("LYRICS · NONE", badge_label);
+    TEST_ASSERT_FALSE(badge_timed);
+    TEST_ASSERT_FALSE(badge_has);
+
+    badge_media.active_lyrics.cue_count = 1u;
+    badge_media.active_lyrics.source_kind = LYRICS_SOURCE_EMBEDDED;
+    badge_media.active_lyrics.has_timed = true;
+    now_playing_media_get_lyrics_badge(&badge_media, "/m/new2.flac", badge_label,
+                                       sizeof(badge_label), &badge_timed, &badge_has);
+    TEST_ASSERT_EQ_STR("LYRICS · TIMED (TAG)", badge_label);
+    TEST_ASSERT_TRUE(badge_timed);
+    TEST_ASSERT_TRUE(badge_has);
+
+    badge_media.active_lyrics.has_timed = false;
+    now_playing_media_get_lyrics_badge(&badge_media, "/m/new2.flac", badge_label,
+                                       sizeof(badge_label), &badge_timed, &badge_has);
+    TEST_ASSERT_EQ_STR("LYRICS · UNTIMED (TAG)", badge_label);
+    TEST_ASSERT_FALSE(badge_timed);
+    TEST_ASSERT_TRUE(badge_has);
+
+    badge_media.active_lyrics.source_kind = LYRICS_SOURCE_SIDECAR_LRC;
+    badge_media.active_lyrics.has_timed = true;
+    now_playing_media_get_lyrics_badge(&badge_media, "/m/new2.flac", badge_label,
+                                       sizeof(badge_label), &badge_timed, &badge_has);
+    TEST_ASSERT_EQ_STR("LYRICS · TIMED (.LRC)", badge_label);
+    TEST_ASSERT_TRUE(badge_timed);
+    TEST_ASSERT_TRUE(badge_has);
+
+    badge_media.active_lyrics.has_timed = false;
+    now_playing_media_get_lyrics_badge(&badge_media, "/m/new2.flac", badge_label,
+                                       sizeof(badge_label), &badge_timed, &badge_has);
+    TEST_ASSERT_EQ_STR("LYRICS · UNTIMED (.LRC)", badge_label);
+    TEST_ASSERT_FALSE(badge_timed);
+    TEST_ASSERT_TRUE(badge_has);
+
+    badge_media.active_cover_ready = true;
+    badge_media.active_cover_album_uid = 42ull;
+    now_playing_media_request_active(&badge_media, 1, 42ull, "/m/new3.flac");
+    TEST_ASSERT_TRUE(badge_media.active_cover_ready);
+    TEST_ASSERT_FALSE(badge_media.active_lyrics_ready);
+    TEST_ASSERT_EQ_STR("", badge_media.active_lyrics_path);
+
+    struct lyrics_badge_details details;
+    now_playing_media_get_lyrics_details(NULL, "/m/new2.flac", &details);
+    TEST_ASSERT_EQ_STR("NO LYRICS", details.badge_label);
+    TEST_ASSERT_EQ_STR("NO LYRICS FOUND", details.banner_title);
+    TEST_ASSERT_EQ_STR("NO EMBEDDED TAG OR .LRC FILE", details.banner_subtitle);
+    TEST_ASSERT_TRUE(details.is_ready);
+    TEST_ASSERT_FALSE(details.has_lyrics);
+    TEST_ASSERT_FALSE(details.is_timed);
+
+    now_playing_media_get_lyrics_details(&badge_media, "/m/new2.flac", &details);
+    TEST_ASSERT_EQ_STR("LOADING", details.badge_label);
+    TEST_ASSERT_EQ_STR("LOADING LYRICS", details.banner_title);
+    TEST_ASSERT_EQ_STR("READING TRACK METADATA", details.banner_subtitle);
+    TEST_ASSERT_FALSE(details.is_ready);
+
+    badge_media.active_lyrics_ready = true;
+    snprintf(badge_media.active_lyrics_path, sizeof(badge_media.active_lyrics_path), "/m/new2.flac");
+    badge_media.active_lyrics.cue_count = 0u;
+    badge_media.active_lyrics.source_kind = LYRICS_SOURCE_NONE;
+    now_playing_media_get_lyrics_details(&badge_media, "/m/new2.flac", &details);
+    TEST_ASSERT_EQ_STR("NO LYRICS", details.badge_label);
+    TEST_ASSERT_EQ_STR("NO LYRICS FOUND", details.banner_title);
+    TEST_ASSERT_TRUE(details.is_ready);
+    TEST_ASSERT_FALSE(details.has_lyrics);
+
+    badge_media.active_lyrics.cue_count = 2u;
+    badge_media.active_lyrics.source_kind = LYRICS_SOURCE_SIDECAR_LRC;
+    badge_media.active_lyrics.has_timed = true;
+    now_playing_media_get_lyrics_details(&badge_media, "/m/new2.flac", &details);
+    TEST_ASSERT_EQ_STR("TIMED", details.badge_label);
+    TEST_ASSERT_EQ_STR("TIMED LYRICS (.LRC)", details.banner_title);
+    TEST_ASSERT_EQ_STR("SYNCED FROM SIDECAR .LRC FILE", details.banner_subtitle);
+    TEST_ASSERT_TRUE(details.is_timed);
+    TEST_ASSERT_TRUE(details.has_lyrics);
+
+    badge_media.active_lyrics.has_timed = false;
+    now_playing_media_get_lyrics_details(&badge_media, "/m/new2.flac", &details);
+    TEST_ASSERT_EQ_STR("UNTIMED", details.badge_label);
+    TEST_ASSERT_EQ_STR("UNTIMED LYRICS (.LRC)", details.banner_title);
+    TEST_ASSERT_EQ_STR("AUTO-PACED · SIDECAR .LRC FILE", details.banner_subtitle);
+    TEST_ASSERT_FALSE(details.is_timed);
+    TEST_ASSERT_TRUE(details.has_lyrics);
+
+    badge_media.active_lyrics.source_kind = LYRICS_SOURCE_EMBEDDED;
+    badge_media.active_lyrics.has_timed = true;
+    snprintf(badge_media.active_lyrics.source_note, sizeof(badge_media.active_lyrics.source_note),
+             "EMBEDDED FLAC");
+    now_playing_media_get_lyrics_details(&badge_media, "/m/new2.flac", &details);
+    TEST_ASSERT_EQ_STR("TIMED", details.badge_label);
+    TEST_ASSERT_EQ_STR("TIMED EMBEDDED LYRICS", details.banner_title);
+    TEST_ASSERT_EQ_STR("SYNCED · EMBEDDED FLAC", details.banner_subtitle);
+    TEST_ASSERT_TRUE(details.is_timed);
+
+    badge_media.active_lyrics.has_timed = false;
+    now_playing_media_get_lyrics_details(&badge_media, "/m/new2.flac", &details);
+    TEST_ASSERT_EQ_STR("UNTIMED", details.badge_label);
+    TEST_ASSERT_EQ_STR("UNTIMED EMBEDDED LYRICS", details.banner_title);
+    TEST_ASSERT_EQ_STR("AUTO-PACED · EMBEDDED FLAC", details.banner_subtitle);
+    TEST_ASSERT_FALSE(details.is_timed);
+
+    badge_media.active_lyrics.source_note[0] = '\0';
+    now_playing_media_get_lyrics_details(&badge_media, "/m/new2.flac", &details);
+    TEST_ASSERT_EQ_STR("AUTO-PACED · EMBEDDED TAG", details.banner_subtitle);
+
+    pthread_mutex_destroy(&badge_media.mutex);
+
     struct now_playing_media media;
     now_playing_media_initialize(&media, NULL);
-    pthread_mutex_lock(&media.mutex);
-    media.active_lyrics_ready = true;
-    snprintf(media.active_lyrics_path, sizeof(media.active_lyrics_path), "/m/old.flac");
-    pthread_mutex_unlock(&media.mutex);
     now_playing_media_request_active(&media, 0, 0ull, "/m/new.flac");
-    pthread_mutex_lock(&media.mutex);
-    TEST_ASSERT_FALSE(media.active_lyrics_ready);
-    TEST_ASSERT_EQ_STR("", media.active_lyrics_path);
-    media.active_cover_ready = true;
-    media.active_cover_album_uid = 42ull;
-    pthread_mutex_unlock(&media.mutex);
-    now_playing_media_request_active(&media, 1, 42ull, "/m/new2.flac");
-    pthread_mutex_lock(&media.mutex);
-    TEST_ASSERT_TRUE(media.active_cover_ready);
-    TEST_ASSERT_FALSE(media.active_lyrics_ready);
-    pthread_mutex_unlock(&media.mutex);
     now_playing_media_destroy(&media);
 
     rmdir(temp_dir);

@@ -22,6 +22,12 @@ enum lyrics_mode {
     LYRICS_MODE_NONE = 3
 };
 
+enum lyrics_source_kind {
+    LYRICS_SOURCE_NONE = 0,
+    LYRICS_SOURCE_SIDECAR_LRC = 1,
+    LYRICS_SOURCE_EMBEDDED = 2
+};
+
 struct lyrics_cue {
     uint32_t time_ms;
     bool has_timestamp;
@@ -30,6 +36,7 @@ struct lyrics_cue {
 
 struct lyrics_document {
     bool has_timed;
+    enum lyrics_source_kind source_kind;
     uint32_t cue_count;
     struct lyrics_cue cues[LYRICS_MAX_CUES];
     char source_note[64];
@@ -105,5 +112,20 @@ void now_playing_media_resolve_cue(const struct lyrics_document *document,
                                    enum lyrics_mode requested_mode, uint32_t elapsed_ms,
                                    uint32_t duration_ms,
                                    struct lyrics_resolved_state *resolved_out);
+struct lyrics_badge_details {
+    char badge_label[24];
+    char banner_title[48];
+    char banner_subtitle[64];
+    bool is_timed;
+    bool has_lyrics;
+    bool is_ready;
+};
+
+void now_playing_media_get_lyrics_badge(struct now_playing_media *media, const char *track_path,
+                                        char *label_out, size_t label_capacity,
+                                        bool *is_timed_out, bool *has_lyrics_out);
+void now_playing_media_get_lyrics_details(struct now_playing_media *media,
+                                          const char *track_path,
+                                          struct lyrics_badge_details *details_out);
 
 #endif

@@ -244,7 +244,7 @@ static void draw_lyrics_overlay(const struct framebuffer_surface *surface,
     } else if (resolved.effective_mode == LYRICS_MODE_TIMED) {
         snprintf(status_line, sizeof(status_line), "TIMED SYNC · %s", time_str);
     } else if (resolved.effective_mode == LYRICS_MODE_UNTIMED) {
-        snprintf(status_line, sizeof(status_line), "AUTO PACE · %s", time_str);
+        snprintf(status_line, sizeof(status_line), "UNTIMED · %s", time_str);
     } else {
         snprintf(status_line, sizeof(status_line), "NO LYRICS · %s", time_str);
     }
@@ -652,102 +652,188 @@ static const char *format_kind_label(uint8_t format_kind) {
     }
 }
 
+static void draw_details_lyrics_badge_and_banner(
+    const struct framebuffer_surface *surface, const struct now_playing_controller *controller,
+    const char *track_path, float sheet_offset_y, float sheet_alpha,
+    const struct appearance_palette *palette) {
+    struct lyrics_badge_details details;
+    now_playing_media_get_lyrics_details(controller->media, track_path, &details);
+
+    bool pressed = controller->details_lyrics_banner_active;
+    uint32_t badge_stroke =
+        (pressed || details.is_timed) ? palette->signal_highlight : palette->hairline_strong;
+    uint32_t badge_ink =
+        details.is_timed ? palette->signal_highlight
+                         : (details.has_lyrics ? palette->ink_primary : palette->ink_secondary);
+    float inset = pressed ? 1.5f : 0.0f;
+    float badge_left = 126.0f + inset;
+    float badge_top = 301.0f + sheet_offset_y + inset * 0.5f;
+    float badge_width = 108.0f - inset * 2.0f;
+    float badge_height = 24.0f - inset;
+
+    render_draw_chamfer_plate_filled_aa(surface, badge_left, badge_top, badge_width, badge_height,
+                                        6.0f, palette->surface, sheet_alpha);
+    render_draw_chamfer_plate_stroked_aa(surface, badge_left, badge_top, badge_width, badge_height,
+                                         6.0f, pressed ? 1.6f : 1.2f, badge_stroke, sheet_alpha);
+    render_draw_chamfer_plate_stroked_aa(surface, 136.0f + inset * 0.5f,
+                                         308.5f + sheet_offset_y + inset * 0.25f, 12.0f, 9.0f, 2.0f,
+                                         1.2f, badge_ink, sheet_alpha);
+    render_draw_filled_rect_alpha(surface, 139.0f + inset * 0.5f,
+                                  311.5f + sheet_offset_y + inset * 0.25f, 2.0f, 3.0f, badge_ink,
+                                  sheet_alpha);
+    render_draw_filled_rect_alpha(surface, 143.0f + inset * 0.5f,
+                                  311.5f + sheet_offset_y + inset * 0.25f, 2.0f, 3.0f, badge_ink,
+                                  sheet_alpha);
+    render_draw_text_alpha(surface, FONT_STYLE_MONO_8, details.badge_label, 191.0f,
+                           313.0f + sheet_offset_y, TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE,
+                           badge_ink, sheet_alpha);
+
+    if (controller->details_lyrics_banner_alpha > ALPHA_VISIBILITY_THRESHOLD) {
+        float banner_alpha =
+            render_clamp_f32(controller->details_lyrics_banner_alpha * sheet_alpha, 0.0f, 1.0f);
+        float banner_lift = render_lerp_f32(
+            8.0f, 0.0f, render_ease_out_cubic(controller->details_lyrics_banner_alpha));
+        float banner_left = 54.0f;
+        float banner_top = 198.0f + sheet_offset_y + banner_lift;
+        float banner_width = 252.0f;
+        float banner_height = 58.0f;
+        uint32_t accent_color =
+            details.is_timed ? palette->signal_highlight
+                             : (details.has_lyrics ? 0xFFF5F6F8u : 0xFF8D96A6u);
+
+        render_draw_chamfer_plate_filled_aa(surface, banner_left, banner_top, banner_width,
+                                            banner_height, 8.0f, 0xFF0E1117u,
+                                            0.96f * banner_alpha);
+        render_draw_chamfer_plate_stroked_aa(
+            surface, banner_left, banner_top, banner_width, banner_height, 8.0f, 1.4f,
+            details.has_lyrics ? palette->signal_highlight : palette->hairline_strong,
+            banner_alpha);
+        render_draw_filled_rect_alpha(surface, 148.0f, banner_top, 64.0f, 2.5f, accent_color,
+                                      banner_alpha);
+
+        struct clip_rect banner_clip = {62, (int32_t)(banner_top + 4.0f), 298,
+                                        (int32_t)(banner_top + 54.0f)};
+        render_draw_marquee_text_rect_clipped(
+            surface, FONT_STYLE_DISPLAY_13, details.banner_title, 180.0f, banner_top + 21.0f,
+            232.0f, controller->elapsed_seconds, &banner_clip, 0xFFF5F6F8u, banner_alpha);
+        render_draw_marquee_text_rect_clipped(
+            surface, FONT_STYLE_MONO_8, details.banner_subtitle, 180.0f, banner_top + 41.0f, 232.0f,
+            controller->elapsed_seconds, &banner_clip,
+            details.is_timed ? palette->signal_highlight : 0xFFB8C0CEu, banner_alpha);
+    }
+}
+
 static void draw_details_sheet(const struct framebuffer_surface *surface,
                                const struct now_playing_controller *controller,
                                struct library_cover_cache *cover_cache,
                                const struct appearance_palette *palette) {
-    float p = controller->details_sheet_progress;
-    if (p <= ALPHA_VISIBILITY_THRESHOLD || controller->engine == NULL) {
+    float progress = controller->details_sheet_progress;
+    if (progress <= ALPHA_VISIBILITY_THRESHOLD || controller->engine == NULL) {
         return;
     }
-    float ease = render_ease_out_cubic(p);
-    float y_off = render_lerp_f32(84.0f, 0.0f, ease);
-    render_draw_text_alpha(surface, FONT_STYLE_MONO_9, "TRACK DETAILS", 180.0f, 54.0f + y_off,
-                           TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE, palette->signal_highlight, ease);
+    float ease = render_ease_out_cubic(progress);
+    float sheet_offset_y = render_lerp_f32(84.0f, 0.0f, ease);
+    render_draw_text_alpha(surface, FONT_STYLE_MONO_9, "TRACK DETAILS", 180.0f,
+                           54.0f + sheet_offset_y, TEXT_ALIGN_CENTER, TEXT_BASELINE_MIDDLE,
+                           palette->signal_highlight, ease);
 
-    const struct library_db_track_details *trk = &controller->engine->active_track;
-    render_draw_chamfer_plate_filled_aa(surface, 56.0f, 70.0f + y_off, 248.0f, 68.0f, 8.0f,
+    const struct library_db_track_details *track = &controller->engine->active_track;
+    render_draw_chamfer_plate_filled_aa(surface, 56.0f, 70.0f + sheet_offset_y, 248.0f, 68.0f, 8.0f,
                                         palette->surface, ease);
-    render_draw_chamfer_plate_stroked_aa(surface, 56.0f, 70.0f + y_off, 248.0f, 68.0f, 8.0f, 1.2f,
-                                         palette->hairline_strong, ease);
+    render_draw_chamfer_plate_stroked_aa(surface, 56.0f, 70.0f + sheet_offset_y, 248.0f, 68.0f,
+                                         8.0f, 1.2f, palette->hairline_strong, ease);
 
     const uint16_t *thumb =
-        (cover_cache != NULL && trk->album_uid != 0ull)
-            ? library_cover_cache_lookup_or_load_disk(cover_cache, trk->album_uid)
+        (cover_cache != NULL && track->album_uid != 0ull)
+            ? library_cover_cache_lookup_or_load_disk(cover_cache, track->album_uid)
             : NULL;
     if (thumb != NULL) {
-        struct clip_rect thumb_clip = {66, (int32_t)(81.0f + y_off), 112, (int32_t)(127.0f + y_off)};
+        struct clip_rect thumb_clip = {66, (int32_t)(81.0f + sheet_offset_y), 112,
+                                       (int32_t)(127.0f + sheet_offset_y)};
         render_blit_rgb565_scaled_clipped(surface, thumb, LIBRARY_COVER_SIZE_PX,
-                                          LIBRARY_COVER_SIZE_PX, 66.0f, 81.0f + y_off, 46.0f,
-                                          46.0f, &thumb_clip, ease);
+                                          LIBRARY_COVER_SIZE_PX, 66.0f, 81.0f + sheet_offset_y,
+                                          46.0f, 46.0f, &thumb_clip, ease);
     } else {
-        render_draw_filled_rect_alpha(surface, 66.0f, 81.0f + y_off, 46.0f, 46.0f,
+        render_draw_filled_rect_alpha(surface, 66.0f, 81.0f + sheet_offset_y, 46.0f, 46.0f,
                                       palette->hairline, ease);
     }
-    render_draw_stroked_rect_alpha(surface, 66.0f, 81.0f + y_off, 46.0f, 46.0f, 1.2f,
+    render_draw_stroked_rect_alpha(surface, 66.0f, 81.0f + sheet_offset_y, 46.0f, 46.0f, 1.2f,
                                    palette->signal_highlight, ease);
 
-    struct clip_rect info_clip = {120, (int32_t)(72.0f + y_off), 296, (int32_t)(136.0f + y_off)};
-    render_draw_marquee_text_rect_clipped(surface, FONT_STYLE_DISPLAY_13, trk->title, 208.0f,
-                                          89.0f + y_off, 174.0f, controller->elapsed_seconds,
-                                          &info_clip, palette->ink_primary, ease);
-    render_draw_marquee_text_rect_clipped(surface, FONT_STYLE_DISPLAY_11, trk->artist, 208.0f,
-                                          106.0f + y_off, 174.0f, controller->elapsed_seconds,
-                                          &info_clip, palette->ink_secondary, ease);
-    char album_yr[144];
-    if (trk->year > 0u) {
-        snprintf(album_yr, sizeof(album_yr), "%s · %u", trk->album, (unsigned)trk->year);
+    struct clip_rect info_clip = {120, (int32_t)(72.0f + sheet_offset_y), 296,
+                                  (int32_t)(136.0f + sheet_offset_y)};
+    render_draw_marquee_text_rect_clipped(surface, FONT_STYLE_DISPLAY_13, track->title, 208.0f,
+                                          89.0f + sheet_offset_y, 174.0f,
+                                          controller->elapsed_seconds, &info_clip,
+                                          palette->ink_primary, ease);
+    render_draw_marquee_text_rect_clipped(surface, FONT_STYLE_DISPLAY_11, track->artist, 208.0f,
+                                          106.0f + sheet_offset_y, 174.0f,
+                                          controller->elapsed_seconds, &info_clip,
+                                          palette->ink_secondary, ease);
+    char album_year_text[144];
+    if (track->year > 0u) {
+        snprintf(album_year_text, sizeof(album_year_text), "%s · %u", track->album,
+                 (unsigned)track->year);
     } else {
-        snprintf(album_yr, sizeof(album_yr), "%s", trk->album[0] ? trk->album : "UNKNOWN ALBUM");
+        snprintf(album_year_text, sizeof(album_year_text), "%s",
+                 track->album[0] ? track->album : "UNKNOWN ALBUM");
     }
-    render_draw_marquee_text_rect_clipped(surface, FONT_STYLE_MONO_9, album_yr, 208.0f,
-                                          123.0f + y_off, 174.0f, controller->elapsed_seconds,
-                                          &info_clip, palette->ink_secondary, ease);
+    render_draw_marquee_text_rect_clipped(surface, FONT_STYLE_MONO_9, album_year_text, 208.0f,
+                                          123.0f + sheet_offset_y, 174.0f,
+                                          controller->elapsed_seconds, &info_clip,
+                                          palette->ink_secondary, ease);
 
     /* 2x2 technical spec grid */
     const char *labels[4] = {"FORMAT", "SAMPLE RATE", "BITRATE", "DISC TRACK"};
-    char vals[4][32];
-    snprintf(vals[0], sizeof(vals[0]), "%s", format_kind_label(trk->format_kind));
-    snprintf(vals[1], sizeof(vals[1]), "44.1 KHZ");
-    if (trk->duration_seconds > 0u && trk->file_size_bytes > 0u) {
-        uint32_t kbps = (uint32_t)((trk->file_size_bytes * 8ull) /
-                                   ((uint64_t)trk->duration_seconds * 1000ull));
-        snprintf(vals[2], sizeof(vals[2]), "%u KBPS", (unsigned)kbps);
+    char values[4][32];
+    snprintf(values[0], sizeof(values[0]), "%s", format_kind_label(track->format_kind));
+    snprintf(values[1], sizeof(values[1]), "44.1 KHZ");
+    if (track->duration_seconds > 0u && track->file_size_bytes > 0u) {
+        uint32_t kbps = (uint32_t)((track->file_size_bytes * 8ull) /
+                                   ((uint64_t)track->duration_seconds * 1000ull));
+        snprintf(values[2], sizeof(values[2]), "%u KBPS", (unsigned)kbps);
     } else {
-        snprintf(vals[2], sizeof(vals[2]), "1,024 KBPS");
+        snprintf(values[2], sizeof(values[2]), "1,024 KBPS");
     }
-    snprintf(vals[3], sizeof(vals[3]), "%02u / %02u",
-             (unsigned)(trk->track_number > 0u ? trk->track_number : 1u),
-             (unsigned)(trk->album_track_count > 0u ? trk->album_track_count : 1u));
+    snprintf(values[3], sizeof(values[3]), "%02u / %02u",
+             (unsigned)(track->track_number > 0u ? track->track_number : 1u),
+             (unsigned)(track->album_track_count > 0u ? track->album_track_count : 1u));
 
     for (uint32_t cell = 0u; cell < 4u; cell++) {
-        float cx = 56.0f + (float)(cell % 2u) * 128.0f;
-        float cy = 148.0f + (float)(cell / 2u) * 56.0f + y_off;
-        render_draw_chamfer_plate_filled_aa(surface, cx, cy, 120.0f, 48.0f, 6.0f,
+        float cell_x = 56.0f + (float)(cell % 2u) * 128.0f;
+        float cell_y = 148.0f + (float)(cell / 2u) * 56.0f + sheet_offset_y;
+        render_draw_chamfer_plate_filled_aa(surface, cell_x, cell_y, 120.0f, 48.0f, 6.0f,
                                             palette->surface, ease);
         render_draw_chamfer_plate_stroked_aa(
-            surface, cx, cy, 120.0f, 48.0f, 6.0f, 1.2f,
+            surface, cell_x, cell_y, 120.0f, 48.0f, 6.0f, 1.2f,
             cell == 0u ? palette->signal_highlight : palette->hairline_strong, ease);
-        render_draw_text_alpha(surface, FONT_STYLE_MONO_8, labels[cell], cx + 12.0f, cy + 15.0f,
-                               TEXT_ALIGN_LEFT, TEXT_BASELINE_MIDDLE, palette->ink_secondary, ease);
-        render_draw_text_alpha(surface, FONT_STYLE_MONO_11, vals[cell], cx + 12.0f, cy + 33.0f,
-                               TEXT_ALIGN_LEFT, TEXT_BASELINE_MIDDLE,
+        render_draw_text_alpha(surface, FONT_STYLE_MONO_8, labels[cell], cell_x + 12.0f,
+                               cell_y + 15.0f, TEXT_ALIGN_LEFT, TEXT_BASELINE_MIDDLE,
+                               palette->ink_secondary, ease);
+        render_draw_text_alpha(surface, FONT_STYLE_MONO_11, values[cell], cell_x + 12.0f,
+                               cell_y + 33.0f, TEXT_ALIGN_LEFT, TEXT_BASELINE_MIDDLE,
                                cell == 0u ? palette->signal_highlight : palette->ink_primary, ease);
     }
 
-    char dur_str[16];
-    format_mm_ss_u32(trk->duration_seconds, dur_str, sizeof(dur_str));
-    float mb = trk->file_size_bytes > 0u ? ((float)trk->file_size_bytes / (1024.0f * 1024.0f))
-                                         : ((float)trk->duration_seconds * 0.13f);
+    char duration_text[16];
+    format_mm_ss_u32(track->duration_seconds, duration_text, sizeof(duration_text));
+    float size_megabytes = track->file_size_bytes > 0u
+                               ? ((float)track->file_size_bytes / (1024.0f * 1024.0f))
+                               : ((float)track->duration_seconds * 0.13f);
     char footer[192];
     snprintf(footer, sizeof(footer), "%s · %.1f MB · %s",
-             trk->genre[0] ? trk->genre : "AUDIO", (double)mb, dur_str);
-    render_draw_chamfer_plate_filled_aa(surface, 62.0f, 264.0f + y_off, 236.0f, 30.0f, 6.0f,
-                                        palette->surface, ease);
-    struct clip_rect f_clip = {70, (int32_t)(266.0f + y_off), 290, (int32_t)(292.0f + y_off)};
+             track->genre[0] ? track->genre : "AUDIO", (double)size_megabytes, duration_text);
+    render_draw_chamfer_plate_filled_aa(surface, 62.0f, 264.0f + sheet_offset_y, 236.0f, 30.0f,
+                                        6.0f, palette->surface, ease);
+    struct clip_rect footer_clip = {70, (int32_t)(266.0f + sheet_offset_y), 290,
+                                    (int32_t)(292.0f + sheet_offset_y)};
     render_draw_marquee_text_rect_clipped(surface, FONT_STYLE_MONO_9, footer, 180.0f,
-                                          279.0f + y_off, 220.0f, controller->elapsed_seconds,
-                                          &f_clip, palette->ink_primary, ease);
+                                          279.0f + sheet_offset_y, 220.0f,
+                                          controller->elapsed_seconds, &footer_clip,
+                                          palette->ink_primary, ease);
+
+    draw_details_lyrics_badge_and_banner(surface, controller, track->path, sheet_offset_y, ease,
+                                         palette);
 }
 
 static void draw_queue_sheet(const struct framebuffer_surface *surface,

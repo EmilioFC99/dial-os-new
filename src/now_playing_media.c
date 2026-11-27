@@ -293,6 +293,7 @@ static bool try_load_sidecar_lrc(const char *track_path, struct lyrics_document 
         bool ok = now_playing_media_parse_lrc_text(text, read_bytes, document_out);
         free(text);
         if (ok) {
+            document_out->source_kind = LYRICS_SOURCE_SIDECAR_LRC;
             copy_text_bounded(document_out->source_note, sizeof(document_out->source_note),
                               "SIDECAR .LRC");
             return true;
@@ -384,6 +385,7 @@ static bool try_load_flac_lyrics(const char *track_path, struct lyrics_document 
     }
     fclose(file);
     if (found) {
+        document_out->source_kind = LYRICS_SOURCE_EMBEDDED;
         copy_text_bounded(document_out->source_note, sizeof(document_out->source_note),
                           "EMBEDDED FLAC TAG");
     }
@@ -506,6 +508,7 @@ static bool try_load_mp3_lyrics(const char *track_path, struct lyrics_document *
                     found = now_playing_media_parse_lrc_text(utf8, utf8_len, document_out);
                     free(utf8);
                     if (found) {
+                        document_out->source_kind = LYRICS_SOURCE_EMBEDDED;
                         copy_text_bounded(document_out->source_note,
                                           sizeof(document_out->source_note), "EMBEDDED USLT");
                         break;
@@ -560,6 +563,7 @@ static bool try_load_m4a_lyrics(const char *track_path, struct lyrics_document *
                     size_t text_len = data_size - 16u;
                     found = now_playing_media_parse_lrc_text(text, text_len, document_out);
                     if (found) {
+                        document_out->source_kind = LYRICS_SOURCE_EMBEDDED;
                         copy_text_bounded(document_out->source_note,
                                           sizeof(document_out->source_note), "EMBEDDED M4A");
                         break;
@@ -955,4 +959,119 @@ const uint16_t *now_playing_media_get_peek_cover(struct now_playing_media *media
         return thumb;
     }
     return NULL;
+}
+
+void now_playing_media_get_lyrics_badge(struct now_playing_media *media, const char *track_path,
+                                        char *label_out, size_t label_capacity,
+                                        bool *is_timed_out, bool *has_lyrics_out) {
+    if (is_timed_out != NULL) {
+        *is_timed_out = false;
+    }
+    if (has_lyrics_out != NULL) {
+        *has_lyrics_out = false;
+    }
+    if (label_out == NULL || label_capacity == 0u) {
+        return;
+    }
+    if (media == NULL || track_path == NULL || track_path[0] == '\0') {
+        copy_text_bounded(label_out, label_capacity, "LYRICS · NONE");
+        return;
+    }
+
+    pthread_mutex_lock(&media->mutex);
+    bool ready = media->active_lyrics_ready &&
+                 strcmp(media->active_lyrics_path, track_path) == 0;
+    enum lyrics_source_kind source_kind = media->active_lyrics.source_kind;
+    bool has_timed = media->active_lyrics.has_timed;
+    uint32_t cue_count = media->active_lyrics.cue_count;
+    pthread_mutex_unlock(&media->mutex);
+
+    if (!ready) {
+        copy_text_bounded(label_out, label_capacity, "LYRICS · LOADING");
+        return;
+    }
+    if (cue_count == 0u || source_kind == LYRICS_SOURCE_NONE) {
+        copy_text_bounded(label_out, label_capacity, "LYRICS · NONE");
+        return;
+    }
+
+    if (source_kind == LYRICS_SOURCE_SIDECAR_LRC) {
+        copy_text_bounded(label_out, label_capacity,
+                          has_timed ? "LYRICS · TIMED (.LRC)" : "LYRICS · UNTIMED (.LRC)");
+    } else {
+        copy_text_bounded(label_out, label_capacity,
+                          has_timed ? "LYRICS · TIMED (TAG)" : "LYRICS · UNTIMED (TAG)");
+    }
+    if (has_lyrics_out != NULL) {
+        *has_lyrics_out = true;
+    }
+    if (is_timed_out != NULL) {
+        *is_timed_out = has_timed;
+    }
+}
+
+void now_playing_media_get_lyrics_details(struct now_playing_media *media,
+                                          const char *track_path,
+                                          struct lyrics_badge_details *details_out) {
+    if (details_out == NULL) {
+        return;
+    }
+    memset(details_out, 0, sizeof(*details_out));
+
+    if (media == NULL || track_path == NULL || track_path[0] == '\0') {
+        copy_text_bounded(details_out->badge_label, sizeof(details_out->badge_label), "NO LYRICS");
+        copy_text_bounded(details_out->banner_title, sizeof(details_out->banner_title),
+                          "NO LYRICS FOUND");
+        copy_text_bounded(details_out->banner_subtitle, sizeof(details_out->banner_subtitle),
+                          "NO EMBEDDED TAG OR .LRC FILE");
+        details_out->is_ready = true;
+        return;
+    }
+
+    char source_note[64];
+    pthread_mutex_lock(&media->mutex);
+    bool ready = media->active_lyrics_ready &&
+                 strcmp(media->active_lyrics_path, track_path) == 0;
+    enum lyrics_source_kind source_kind = media->active_lyrics.source_kind;
+    bool has_timed = media->active_lyrics.has_timed;
+    uint32_t cue_count = media->active_lyrics.cue_count;
+    copy_text_bounded(source_note, sizeof(source_note), media->active_lyrics.source_note);
+    pthread_mutex_unlock(&media->mutex);
+
+    if (!ready) {
+        copy_text_bounded(details_out->badge_label, sizeof(details_out->badge_label), "LOADING");
+        copy_text_bounded(details_out->banner_title, sizeof(details_out->banner_title),
+                          "LOADING LYRICS");
+        copy_text_bounded(details_out->banner_subtitle, sizeof(details_out->banner_subtitle),
+                          "READING TRACK METADATA");
+        return;
+    }
+
+    details_out->is_ready = true;
+    if (cue_count == 0u || source_kind == LYRICS_SOURCE_NONE) {
+        copy_text_bounded(details_out->badge_label, sizeof(details_out->badge_label), "NO LYRICS");
+        copy_text_bounded(details_out->banner_title, sizeof(details_out->banner_title),
+                          "NO LYRICS FOUND");
+        copy_text_bounded(details_out->banner_subtitle, sizeof(details_out->banner_subtitle),
+                          "NO EMBEDDED TAG OR .LRC FILE");
+        return;
+    }
+
+    details_out->has_lyrics = true;
+    details_out->is_timed = has_timed;
+    copy_text_bounded(details_out->badge_label, sizeof(details_out->badge_label),
+                      has_timed ? "TIMED" : "UNTIMED");
+    if (source_kind == LYRICS_SOURCE_SIDECAR_LRC) {
+        copy_text_bounded(details_out->banner_title, sizeof(details_out->banner_title),
+                          has_timed ? "TIMED LYRICS (.LRC)" : "UNTIMED LYRICS (.LRC)");
+        copy_text_bounded(details_out->banner_subtitle, sizeof(details_out->banner_subtitle),
+                          has_timed ? "SYNCED FROM SIDECAR .LRC FILE"
+                                    : "AUTO-PACED · SIDECAR .LRC FILE");
+    } else {
+        copy_text_bounded(details_out->banner_title, sizeof(details_out->banner_title),
+                          has_timed ? "TIMED EMBEDDED LYRICS" : "UNTIMED EMBEDDED LYRICS");
+        const char *tag_source = source_note[0] != '\0' ? source_note : "EMBEDDED TAG";
+        snprintf(details_out->banner_subtitle, sizeof(details_out->banner_subtitle), "%s · %s",
+                 has_timed ? "SYNCED" : "AUTO-PACED", tag_source);
+    }
 }

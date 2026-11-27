@@ -37,6 +37,14 @@
 #define NP_QUEUE_PREFETCH_MARGIN 16u
 #define NP_PICKER_VISIBLE_ROWS 4u
 #define NP_PICKER_WINDOW_SIZE 32u
+#define NP_DETAILS_LYRICS_BADGE_HIT_LEFT 112
+#define NP_DETAILS_LYRICS_BADGE_HIT_RIGHT 248
+#define NP_DETAILS_LYRICS_BADGE_HIT_TOP 294
+#define NP_DETAILS_LYRICS_BADGE_HIT_BOTTOM 340
+#define NP_DETAILS_LYRICS_BADGE_HOLD_LEFT 100
+#define NP_DETAILS_LYRICS_BADGE_HOLD_RIGHT 260
+#define NP_DETAILS_LYRICS_BADGE_HOLD_TOP 286
+#define NP_DETAILS_LYRICS_BADGE_HOLD_BOTTOM 348
 
 enum now_playing_return_target {
     NP_RETURN_HOME = 0,
@@ -69,7 +77,8 @@ enum now_playing_pointer_mode {
     NP_PTR_PLAYLIST_PICKER = 10,
     NP_PTR_QUEUE_HEADER = 11,
     NP_PTR_QUEUE_LIST = 12,
-    NP_PTR_IDLE_CTA = 13
+    NP_PTR_IDLE_CTA = 13,
+    NP_PTR_DETAILS_LYRICS_BADGE = 14
 };
 
 struct now_playing_controller {
@@ -111,6 +120,8 @@ struct now_playing_controller {
 
     bool details_sheet_open;
     float details_sheet_progress;
+    bool details_lyrics_banner_active;
+    float details_lyrics_banner_alpha;
 
     bool queue_sheet_open;
     float queue_sheet_progress;

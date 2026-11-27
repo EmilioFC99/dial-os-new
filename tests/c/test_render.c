@@ -739,8 +739,12 @@ static void test_now_playing_screens_dark_and_light_with_custom_stride(void) {
 
         ctrl.details_sheet_open = true;
         ctrl.details_sheet_progress = 1.0f;
+        ctrl.details_lyrics_banner_active = true;
+        ctrl.details_lyrics_banner_alpha = 1.0f;
         render_draw_now_playing_frame(&surface, &ctrl, NULL, mode);
         assert_bezel_clip_and_content_present(pixels, stride_pixels, canvas);
+        ctrl.details_lyrics_banner_active = false;
+        ctrl.details_lyrics_banner_alpha = 0.0f;
         ctrl.details_sheet_open = false;
         ctrl.details_sheet_progress = 0.0f;
         TEST_ASSERT_EQ_U32(canary_value, pixels[SCREEN_WIDTH]);

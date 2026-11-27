@@ -213,6 +213,51 @@ static void test_bezel_volume_swipe_and_audio_started_clock_sync(void) {
     now_playing_controller_step(&ctrl, 0.05f, &effects, &vol_changed, &action);
     TEST_ASSERT_TRUE(ctrl.interpolated_elapsed_ms >= 1040.0f);
 
+    /* Track Details press-and-hold lyrics badge banner */
+    ctrl.details_sheet_open = true;
+    ctrl.details_sheet_progress = 1.0f;
+    struct touch_event badge_miss = {TOUCH_EVENT_DOWN, 180, 180, 300ull};
+    struct touch_event badge_miss_up = {TOUCH_EVENT_UP, 180, 180, 320ull};
+    now_playing_controller_handle_touch(&ctrl, &badge_miss, &effects, &vol_changed, &action);
+    TEST_ASSERT_FALSE(ctrl.details_lyrics_banner_active);
+    now_playing_controller_handle_touch(&ctrl, &badge_miss_up, &effects, &vol_changed, &action);
+
+    struct touch_event badge_down = {TOUCH_EVENT_DOWN, 180, 312, 340ull};
+    now_playing_controller_handle_touch(&ctrl, &badge_down, &effects, &vol_changed, &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_DETAILS_LYRICS_BADGE, (uint32_t)ctrl.pointer_mode);
+    TEST_ASSERT_TRUE(ctrl.details_lyrics_banner_active);
+    for (uint32_t tick = 0u; tick < 5u; tick++) {
+        now_playing_controller_step(&ctrl, 0.05f, &effects, &vol_changed, &action);
+    }
+    TEST_ASSERT_TRUE(ctrl.details_lyrics_banner_alpha > 0.5f);
+
+    struct touch_event badge_move_off = {TOUCH_EVENT_MOVE, 30, 100, 360ull};
+    now_playing_controller_handle_touch(&ctrl, &badge_move_off, &effects, &vol_changed, &action);
+    TEST_ASSERT_FALSE(ctrl.details_lyrics_banner_active);
+
+    struct touch_event badge_move_back = {TOUCH_EVENT_MOVE, 180, 312, 380ull};
+    now_playing_controller_handle_touch(&ctrl, &badge_move_back, &effects, &vol_changed, &action);
+    TEST_ASSERT_TRUE(ctrl.details_lyrics_banner_active);
+
+    struct touch_event badge_up = {TOUCH_EVENT_UP, 180, 312, 400ull};
+    now_playing_controller_handle_touch(&ctrl, &badge_up, &effects, &vol_changed, &action);
+    TEST_ASSERT_FALSE(ctrl.details_lyrics_banner_active);
+    for (uint32_t tick = 0u; tick < 8u; tick++) {
+        now_playing_controller_step(&ctrl, 0.05f, &effects, &vol_changed, &action);
+    }
+    TEST_ASSERT_TRUE(ctrl.details_lyrics_banner_alpha < 0.05f);
+
+    ctrl.details_lyrics_banner_active = true;
+    TEST_ASSERT_TRUE(now_playing_controller_step_back(&ctrl, &action));
+    TEST_ASSERT_FALSE(ctrl.details_sheet_open);
+    TEST_ASSERT_FALSE(ctrl.details_lyrics_banner_active);
+
+    ctrl.details_lyrics_banner_active = true;
+    memset(&effects, 0, sizeof(effects));
+    effects.track_changed = true;
+    now_playing_controller_apply_effects(&ctrl, &effects);
+    TEST_ASSERT_FALSE(ctrl.details_lyrics_banner_active);
+
     library_db_close(&database);
     cleanup_ctrl_temp_dir(dir_path);
 }
