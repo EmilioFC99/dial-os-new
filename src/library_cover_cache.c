@@ -77,6 +77,8 @@ void library_cover_cache_clear(struct library_cover_cache *cache) {
     cache->precache_ram_preloaded = 0u;
     cache->precache_failed = 0u;
     cache->precache_max_decode_ms = 0u;
+    cache->last_fail_reason = LIBRARY_COVER_FAIL_NONE;
+    cache->last_fail_path[0] = '\0';
     cache->window_ram_hits = 0u;
     cache->window_disk_hits = 0u;
     cache->window_decodes = 0u;
@@ -347,10 +349,17 @@ static void downsample_rgb888_to_rgb565(const uint8_t *rgb_pixels, uint32_t sour
     }
 }
 
+static void record_cover_failure(struct library_cover_cache *cache,
+                                 enum library_cover_fail_reason reason, const char *source_path) {
+    cache->last_fail_reason = reason;
+    copy_path_bounded(cache->last_fail_path, sizeof(cache->last_fail_path), source_path);
+}
+
 static bool decode_request_to_cache(struct library_cover_cache *cache,
                                     const struct library_cover_request *request) {
     FILE *file = fopen(request->source_path, "rb");
     if (file == NULL) {
+        record_cover_failure(cache, LIBRARY_COVER_FAIL_OPEN, request->source_path);
         return false;
     }
 
@@ -358,12 +367,14 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
     if (request->cover_source_kind == LIBRARY_COVER_SIDECAR) {
         if (fseek(file, 0L, SEEK_END) != 0) {
             fclose(file);
+            record_cover_failure(cache, LIBRARY_COVER_FAIL_SIZE, request->source_path);
             return false;
         }
         long file_size = ftell(file);
         if (file_size <= 0 || (uint64_t)file_size > LIBRARY_COVER_MAX_INPUT_BYTES ||
             fseek(file, 0L, SEEK_SET) != 0) {
             fclose(file);
+            record_cover_failure(cache, LIBRARY_COVER_FAIL_SIZE, request->source_path);
             return false;
         }
         payload_length = (size_t)file_size;
@@ -371,6 +382,7 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
         if (request->data_length == 0u || request->data_length > LIBRARY_COVER_MAX_INPUT_BYTES ||
             fseek(file, (long)request->data_offset, SEEK_SET) != 0) {
             fclose(file);
+            record_cover_failure(cache, LIBRARY_COVER_FAIL_SIZE, request->source_path);
             return false;
         }
         payload_length = request->data_length;
@@ -379,12 +391,14 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
     uint8_t *raw_bytes = malloc(payload_length);
     if (raw_bytes == NULL) {
         fclose(file);
+        record_cover_failure(cache, LIBRARY_COVER_FAIL_SIZE, request->source_path);
         return false;
     }
     size_t read_bytes = fread(raw_bytes, 1u, payload_length, file);
     fclose(file);
     if (read_bytes != payload_length) {
         free(raw_bytes);
+        record_cover_failure(cache, LIBRARY_COVER_FAIL_OPEN, request->source_path);
         return false;
     }
 
@@ -397,6 +411,7 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
         (uint32_t)image_width > LIBRARY_COVER_MAX_DIMENSION_PX ||
         (uint32_t)image_height > LIBRARY_COVER_MAX_DIMENSION_PX) {
         free(raw_bytes);
+        record_cover_failure(cache, LIBRARY_COVER_FAIL_INFO, request->source_path);
         return false;
     }
 
@@ -407,12 +422,14 @@ static bool decode_request_to_cache(struct library_cover_cache *cache,
                                              &decoded_height, &decoded_channels, 3);
     free(raw_bytes);
     if (decoded == NULL || decoded_width <= 0 || decoded_height <= 0) {
+        record_cover_failure(cache, LIBRARY_COVER_FAIL_DECODE, request->source_path);
         return false;
     }
 
     struct library_cover_slot *slot = allocate_lru_slot(cache, request->album_id);
     if (slot == NULL) {
         stbi_image_free(decoded);
+        record_cover_failure(cache, LIBRARY_COVER_FAIL_SLOT, request->source_path);
         return false;
     }
     downsample_rgb888_to_rgb565(decoded, (uint32_t)decoded_width, (uint32_t)decoded_height,
@@ -482,6 +499,13 @@ void library_cover_cache_begin_boot_precache(struct library_cover_cache *cache,
         }
     }
     cache->precache_active = (cache->precache_total > 0u);
+}
+
+void library_cover_cache_cancel_boot_precache(struct library_cover_cache *cache) {
+    if (cache == NULL) {
+        return;
+    }
+    cache->precache_active = false;
 }
 
 bool library_cover_cache_is_boot_precaching(const struct library_cover_cache *cache) {

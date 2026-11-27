@@ -18,6 +18,15 @@
 #define LIBRARY_COVER_MAX_INPUT_BYTES (8u * 1024u * 1024u)
 #define LIBRARY_COVER_MAX_DIMENSION_PX 4096u
 
+enum library_cover_fail_reason {
+    LIBRARY_COVER_FAIL_NONE = 0,
+    LIBRARY_COVER_FAIL_OPEN = 1,
+    LIBRARY_COVER_FAIL_SIZE = 2,
+    LIBRARY_COVER_FAIL_INFO = 3,
+    LIBRARY_COVER_FAIL_DECODE = 4,
+    LIBRARY_COVER_FAIL_SLOT = 5
+};
+
 struct library_cover_slot {
     bool occupied;
     uint64_t album_id;
@@ -53,6 +62,8 @@ struct library_cover_cache {
     uint32_t precache_ram_preloaded;
     uint32_t precache_failed;
     uint32_t precache_max_decode_ms;
+    enum library_cover_fail_reason last_fail_reason;
+    char last_fail_path[256];
 
     uint32_t window_ram_hits;
     uint32_t window_disk_hits;
@@ -76,6 +87,7 @@ bool library_cover_cache_step(struct library_cover_cache *cache, bool allow_heav
 
 void library_cover_cache_begin_boot_precache(struct library_cover_cache *cache,
                                              const struct library_catalog *catalog);
+void library_cover_cache_cancel_boot_precache(struct library_cover_cache *cache);
 bool library_cover_cache_is_boot_precaching(const struct library_cover_cache *cache);
 bool library_cover_cache_step_boot_precache(struct library_cover_cache *cache,
                                             const struct library_catalog *catalog,

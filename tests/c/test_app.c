@@ -827,6 +827,117 @@ static void test_library_boot_scan_playback_and_sd_hotswap(void) {
     (void)system(remove_command);
 }
 
+static void write_minimal_2x2_png(const char *path) {
+    /* Valid 2x2 RGBA/RGB stored-deflate PNG (67 bytes) */
+    static const uint8_t PNG_2X2[79] = {
+        0x89u, 0x50u, 0x4Eu, 0x47u, 0x0Du, 0x0Au, 0x1Au, 0x0Au,
+        0x00u, 0x00u, 0x00u, 0x0Du, 0x49u, 0x48u, 0x44u, 0x52u,
+        0x00u, 0x00u, 0x00u, 0x02u, 0x00u, 0x00u, 0x00u, 0x02u,
+        0x08u, 0x02u, 0x00u, 0x00u, 0x00u, 0xFDu, 0xD4u, 0x9Au, 0x73u,
+        0x00u, 0x00u, 0x00u, 0x19u, 0x49u, 0x44u, 0x41u, 0x54u,
+        0x78u, 0x01u, 0x01u, 0x0Eu, 0x00u, 0xF1u, 0xFFu,
+        0x00u, 0xFFu, 0x00u, 0x00u, 0xFFu, 0x00u, 0x00u,
+        0x00u, 0xFFu, 0x00u, 0x00u, 0xFFu, 0x00u, 0x00u,
+        0x23u, 0xC8u, 0x05u, 0xF9u, 0x6Du, 0x62u, 0x7Du, 0xD4u,
+        0x00u, 0x00u, 0x00u, 0x00u, 0x49u, 0x45u, 0x4Eu, 0x44u,
+    };
+    /* Note: append IEND CRC32 (0xAE 0x42 0x60 0x82) */
+    static const uint8_t IEND_CRC[4] = {0xAEu, 0x42u, 0x60u, 0x82u};
+    FILE *file = fopen(path, "wb");
+    if (file != NULL) {
+        fwrite(PNG_2X2, 1u, sizeof(PNG_2X2), file);
+        fwrite(IEND_CRC, 1u, sizeof(IEND_CRC), file);
+        fclose(file);
+    }
+}
+
+static void test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker(void) {
+    char base_directory[256];
+    char music_directory[300];
+    char dialos_directory[300];
+    char temp_directory[300];
+    snprintf(base_directory, sizeof(base_directory), "/tmp/dialos_app_pre_%d", (int)getpid());
+    char remove_command[320];
+    snprintf(remove_command, sizeof(remove_command), "rm -rf \"%s\"", base_directory);
+    (void)system(remove_command);
+    mkdir(base_directory, 0755);
+    snprintf(music_directory, sizeof(music_directory), "%s/sdcard", base_directory);
+    snprintf(dialos_directory, sizeof(dialos_directory), "%s/sdcard/.dial-os", base_directory);
+    snprintf(temp_directory, sizeof(temp_directory), "%s/tmp", base_directory);
+    mkdir(music_directory, 0755);
+    mkdir(dialos_directory, 0755);
+    mkdir(temp_directory, 0755);
+
+    char artist_directory[340], album_directory[380], wav_path[420], cover_path[420];
+    snprintf(artist_directory, sizeof(artist_directory), "%s/Test Artist", music_directory);
+    snprintf(album_directory, sizeof(album_directory), "%s/Test Album", artist_directory);
+    snprintf(wav_path, sizeof(wav_path), "%s/01 - Test Song.wav", album_directory);
+    snprintf(cover_path, sizeof(cover_path), "%s/cover.png", album_directory);
+    mkdir(artist_directory, 0755);
+    mkdir(album_directory, 0755);
+    FILE *wav_file = fopen(wav_path, "wb");
+    TEST_ASSERT_TRUE(wav_file != NULL);
+    uint8_t wav_header[44] = {'R','I','F','F',36,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,
+                              0x44,0xAC,0,0,0x88,0x58,1,0,2,0,16,0,'d','a','t','a',0,0,0,0};
+    fwrite(wav_header, 1u, 44u, wav_file);
+    fclose(wav_file);
+    write_minimal_2x2_png(cover_path);
+
+    /* Case 1: Act 01 must NOT precache; transient SD false at aa24 recovers within 500 ms */
+    struct fake_platform_context fake;
+    struct platform_operations operations;
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+
+    struct app_runtime runtime;
+    app_initialize(&runtime, &operations);
+
+    /* Advance 900 ms (still in Act 01 WAKE): precache must NOT have started */
+    advance_runtime_ticks(&runtime, &fake, 900u);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_WAKE, runtime.boot.phase);
+    TEST_ASSERT_FALSE(runtime.boot_cover_precache_started);
+    TEST_ASSERT_EQ_U32(0u, runtime.library_covers.precache_decoded);
+
+    /* Enter Act 02 and deliver aa24 while SD momentarily reports unmounted (remount race) */
+    advance_runtime_ticks(&runtime, &fake, 200u);
+    TEST_ASSERT_EQ_I32(BOOT_PHASE_BUFFER, runtime.boot.phase);
+    fake.hardware.sd_mounted = false;
+    struct inbound_ipc_message aa24 = make_aa24_message(48u, 85u, 180u);
+    app_handle_ipc_message(&runtime, &aa24);
+    TEST_ASSERT_TRUE(runtime.library_catalog.album_count == 1u);
+
+    /* Step 600 ms while unmounted, then restore SD mount -> 500 ms probe recovers */
+    advance_runtime_ticks(&runtime, &fake, 600u);
+    fake.hardware.sd_mounted = true;
+    advance_runtime_ticks(&runtime, &fake, 9000u);
+
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    TEST_ASSERT_EQ_U32(1u, runtime.library_covers.precache_decoded);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT precache_start") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT precache_done") != NULL);
+    TEST_ASSERT_TRUE(strstr(fake.log_output, "BOOT sd_recovered") != NULL);
+    TEST_ASSERT_TRUE(library_cover_cache_lookup_or_load_disk(
+                         &runtime.library_covers, runtime.library_catalog.albums[0].album_id) !=
+                     NULL);
+    app_destroy(&runtime);
+
+    /* Case 2: If SD stays unmounted > 2.5 s after aa24, boot finishes without deadlocking */
+    init_fake_platform(&fake, &operations);
+    operations.library_music_root = music_directory;
+    operations.library_dialos_directory = dialos_directory;
+    operations.library_temp_directory = temp_directory;
+    fake.hardware.sd_mounted = false;
+    app_initialize(&runtime, &operations);
+    app_handle_ipc_message(&runtime, &aa24);
+    advance_runtime_ticks(&runtime, &fake, 10000u);
+    TEST_ASSERT_EQ_I32(UI_STATE_HOME, runtime.state);
+    app_destroy(&runtime);
+
+    (void)system(remove_command);
+}
+
 void run_app_tests(void) {
     printf("Suite: app\n");
     RUN_TEST(test_crash_formatting_and_count_parsing);
@@ -841,4 +952,5 @@ void run_app_tests(void) {
     RUN_TEST(test_boot_large_stall_delta_does_not_skip_signal_lock_and_handoff);
     RUN_TEST(test_persistent_event_and_performance_logging);
     RUN_TEST(test_library_boot_scan_playback_and_sd_hotswap);
+    RUN_TEST(test_boot_cover_precache_defers_past_wake_and_recovers_sd_flicker);
 }

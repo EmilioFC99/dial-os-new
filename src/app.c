@@ -420,6 +420,8 @@ static void enter_home_from_boot_complete(struct app_runtime *runtime, uint64_t 
     }
 }
 
+static void handle_sd_mount_transition(struct app_runtime *runtime);
+
 static void handle_aa24_during_boot(struct app_runtime *runtime,
                                     const struct boot_config_snapshot *boot_config,
                                     uint64_t now_ns) {
@@ -440,6 +442,17 @@ static void handle_aa24_during_boot(struct app_runtime *runtime,
     attempt_send_disable_idle_poweroff(runtime, now_ns);
 
     runtime->platform->probe_hardware_status(runtime->platform->context, &runtime->hardware);
+    logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns), "BOOT", "aa24 sd=%u",
+                    runtime->hardware.sd_mounted ? 1u : 0u);
+    if (runtime->hardware.sd_mounted) {
+        runtime->boot_sd_missing_since_ns = 0ull;
+        if (!runtime->library_prev_sd_mounted) {
+            handle_sd_mount_transition(runtime);
+        }
+    } else {
+        runtime->boot_sd_missing_since_ns = now_ns;
+        runtime->boot_last_sd_probe_ns = now_ns;
+    }
     boot_controller_mark_audio_ready(&runtime->boot, runtime->hardware.sd_mounted);
 
     if (runtime->state == UI_STATE_WARNING) {
@@ -520,6 +533,7 @@ static void handle_sd_mount_transition(struct app_runtime *runtime) {
         library_scanner_reset(&runtime->library_scanner);
         library_catalog_clear(&runtime->library_catalog);
         library_cover_cache_clear(&runtime->library_covers);
+        boot_controller_update_cover_precache(&runtime->boot, false, 0u, 0u);
         library_controller_reset_to_hub(&runtime->library, true);
         sync_library_counts_to_home(runtime);
     }
@@ -1019,19 +1033,6 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                         (unsigned)runtime->library_catalog.artist_count,
                         (unsigned)runtime->library_catalog.genre_count,
                         (unsigned)runtime->library_catalog.playlist_count);
-                    if (!runtime->boot_cover_precache_started) {
-                        runtime->boot_cover_precache_started = true;
-                        runtime->cover_precache_start_ns = scan_end_ns;
-                        library_cover_cache_begin_boot_precache(&runtime->library_covers,
-                                                                &runtime->library_catalog);
-                        if (library_cover_cache_is_boot_precaching(&runtime->library_covers)) {
-                            logger_log_line(&runtime->logger,
-                                            runtime_uptime_ms(runtime, scan_end_ns), "BOOT",
-                                            "precache_start albums_with_cover=%u",
-                                            (unsigned)runtime->library_covers.precache_total);
-                            flush_runtime_logs(runtime, false);
-                        }
-                    }
                 }
                 boot_controller_update_library_scan(
                     &runtime->boot, (uint32_t)runtime->library_scanner.phase,
@@ -1041,32 +1042,120 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
                     runtime->library_scanner.music_root_exists,
                     library_scanner_is_ready(&runtime->library_scanner));
             }
-            if (runtime->hardware.sd_mounted &&
-                library_cover_cache_is_boot_precaching(&runtime->library_covers)) {
-                (void)library_cover_cache_step_boot_precache(
-                    &runtime->library_covers, &runtime->library_catalog,
-                    runtime->platform->monotonic_ns, runtime->platform->context,
-                    LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
-                bool still_precaching =
-                    library_cover_cache_is_boot_precaching(&runtime->library_covers);
-                boot_controller_update_cover_precache(
-                    &runtime->boot, still_precaching, runtime->library_covers.precache_done,
-                    runtime->library_covers.precache_total);
-                if (!still_precaching) {
-                    uint64_t precache_end_ns =
-                        runtime->platform->monotonic_ns(runtime->platform->context);
-                    logger_log_line(
-                        &runtime->logger, runtime_uptime_ms(runtime, precache_end_ns), "BOOT",
-                        "precache_done ms=%llu decoded=%u disk_hits=%u ram_preloaded=%u "
-                        "failed=%u max_decode_ms=%u",
-                        (unsigned long long)elapsed_ms_since(precache_end_ns,
-                                                            runtime->cover_precache_start_ns),
-                        (unsigned)runtime->library_covers.precache_decoded,
-                        (unsigned)runtime->library_covers.precache_disk_hits,
-                        (unsigned)runtime->library_covers.precache_ram_preloaded,
-                        (unsigned)runtime->library_covers.precache_failed,
-                        (unsigned)runtime->library_covers.precache_max_decode_ms);
-                    flush_runtime_logs(runtime, false);
+            if (runtime->boot.phase == BOOT_PHASE_BUFFER && runtime->aa24_received) {
+                if (!runtime->hardware.sd_mounted) {
+                    if (runtime->boot_sd_missing_since_ns == 0ull) {
+                        runtime->boot_sd_missing_since_ns = now_ns;
+                        runtime->boot_last_sd_probe_ns = now_ns;
+                    }
+                    if (elapsed_ms_since(now_ns, runtime->boot_last_sd_probe_ns) >= 500ull) {
+                        runtime->boot_last_sd_probe_ns = now_ns;
+                        runtime->platform->probe_hardware_status(runtime->platform->context,
+                                                                 &runtime->hardware);
+                        boot_controller_update_sd_mounted(&runtime->boot,
+                                                          runtime->hardware.sd_mounted);
+                        if (runtime->hardware.sd_mounted) {
+                            runtime->boot_sd_missing_since_ns = 0ull;
+                            logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns),
+                                            "BOOT", "sd_recovered");
+                            if (!runtime->library_scan_started) {
+                                begin_library_mount_sync(runtime, true);
+                            }
+                        }
+                    }
+                    if (!runtime->hardware.sd_mounted &&
+                        elapsed_ms_since(now_ns, runtime->boot_sd_missing_since_ns) >= 2500ull) {
+                        if (library_cover_cache_is_boot_precaching(&runtime->library_covers) ||
+                            runtime->boot.cover_precache_active) {
+                            library_cover_cache_cancel_boot_precache(&runtime->library_covers);
+                            boot_controller_update_cover_precache(
+                                &runtime->boot, false, runtime->library_covers.precache_done,
+                                runtime->library_covers.precache_total);
+                            logger_log_line(&runtime->logger, runtime_uptime_ms(runtime, now_ns),
+                                            "BOOT", "sd_missing_timeout");
+                        }
+                    }
+                } else {
+                    runtime->boot_sd_missing_since_ns = 0ull;
+                    if (library_scanner_is_ready(&runtime->library_scanner)) {
+                        if (!runtime->boot_cover_precache_started) {
+                            runtime->boot_cover_precache_started = true;
+                            runtime->cover_precache_start_ns = now_ns;
+                            runtime->boot_last_precache_log_ns = now_ns;
+                            runtime->boot_logged_cover_failures = 0u;
+                            library_cover_cache_begin_boot_precache(&runtime->library_covers,
+                                                                    &runtime->library_catalog);
+                            if (library_cover_cache_is_boot_precaching(&runtime->library_covers)) {
+                                boot_controller_update_cover_precache(
+                                    &runtime->boot, true, 0u,
+                                    runtime->library_covers.precache_total);
+                                runtime->boot_precache_announced_frame = true;
+                                logger_log_line(&runtime->logger,
+                                                runtime_uptime_ms(runtime, now_ns), "BOOT",
+                                                "precache_start albums_with_cover=%u",
+                                                (unsigned)runtime->library_covers.precache_total);
+                                flush_runtime_logs(runtime, false);
+                            }
+                        } else if (runtime->boot_precache_announced_frame) {
+                            runtime->boot_precache_announced_frame = false;
+                        } else if (library_cover_cache_is_boot_precaching(
+                                       &runtime->library_covers)) {
+                            uint32_t previous_failed = runtime->library_covers.precache_failed;
+                            (void)library_cover_cache_step_boot_precache(
+                                &runtime->library_covers, &runtime->library_catalog,
+                                runtime->platform->monotonic_ns, runtime->platform->context,
+                                LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
+                            if (runtime->library_covers.precache_failed > previous_failed &&
+                                runtime->boot_logged_cover_failures < 8u) {
+                                runtime->boot_logged_cover_failures++;
+                                logger_log_line(&runtime->logger,
+                                                runtime_uptime_ms(runtime, now_ns), "BOOT",
+                                                "cover_fail done=%u reason=%u path=%s",
+                                                (unsigned)runtime->library_covers.precache_done,
+                                                (unsigned)runtime->library_covers.last_fail_reason,
+                                                runtime->library_covers.last_fail_path);
+                            }
+                            bool still_precaching =
+                                library_cover_cache_is_boot_precaching(&runtime->library_covers);
+                            boot_controller_update_cover_precache(
+                                &runtime->boot, still_precaching,
+                                runtime->library_covers.precache_done,
+                                runtime->library_covers.precache_total);
+                            if (still_precaching &&
+                                elapsed_ms_since(now_ns, runtime->boot_last_precache_log_ns) >=
+                                    5000ull) {
+                                runtime->boot_last_precache_log_ns = now_ns;
+                                logger_log_line(
+                                    &runtime->logger, runtime_uptime_ms(runtime, now_ns), "BOOT",
+                                    "precache_progress done=%u total=%u decoded=%u hits=%u "
+                                    "failed=%u max_ms=%u",
+                                    (unsigned)runtime->library_covers.precache_done,
+                                    (unsigned)runtime->library_covers.precache_total,
+                                    (unsigned)runtime->library_covers.precache_decoded,
+                                    (unsigned)runtime->library_covers.precache_disk_hits,
+                                    (unsigned)runtime->library_covers.precache_failed,
+                                    (unsigned)runtime->library_covers.precache_max_decode_ms);
+                                flush_runtime_logs(runtime, false);
+                            }
+                            if (!still_precaching) {
+                                uint64_t precache_end_ns =
+                                    runtime->platform->monotonic_ns(runtime->platform->context);
+                                logger_log_line(
+                                    &runtime->logger, runtime_uptime_ms(runtime, precache_end_ns),
+                                    "BOOT",
+                                    "precache_done ms=%llu decoded=%u disk_hits=%u "
+                                    "ram_preloaded=%u failed=%u max_decode_ms=%u",
+                                    (unsigned long long)elapsed_ms_since(
+                                        precache_end_ns, runtime->cover_precache_start_ns),
+                                    (unsigned)runtime->library_covers.precache_decoded,
+                                    (unsigned)runtime->library_covers.precache_disk_hits,
+                                    (unsigned)runtime->library_covers.precache_ram_preloaded,
+                                    (unsigned)runtime->library_covers.precache_failed,
+                                    (unsigned)runtime->library_covers.precache_max_decode_ms);
+                                flush_runtime_logs(runtime, false);
+                            }
+                        }
+                    }
                 }
             }
             boot_controller_step(&runtime->boot, delta_seconds);
@@ -1105,8 +1194,8 @@ void app_handle_tick(struct app_runtime *runtime, uint64_t now_ns) {
             }
             runtime->animation_frames++;
             runtime->next_frame_ns += BOOT_FRAME_PERIOD_NS;
-            if (runtime->next_frame_ns <= now_ns) {
-                runtime->next_frame_ns = now_ns + BOOT_FRAME_PERIOD_NS;
+            if (runtime->next_frame_ns <= frame_end_ns) {
+                runtime->next_frame_ns = frame_end_ns + BOOT_FRAME_PERIOD_NS;
             }
         }
         return;
