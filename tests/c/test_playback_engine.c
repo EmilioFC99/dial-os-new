@@ -118,7 +118,7 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
     TEST_ASSERT_EQ_STR("REPEAT // ALL", effects.toast_text);
     TEST_ASSERT_TRUE(playback_engine_cycle_repeat(&engine, &effects)); /* ONE */
     TEST_ASSERT_EQ_STR("REPEAT // ONE", effects.toast_text);
-    TEST_ASSERT_EQ_U32(IPC_PLAY_MODE_SINGLE_LOOP, effects.ipc_play_mode);
+    TEST_ASSERT_FALSE(effects.send_play_mode);
     TEST_ASSERT_TRUE(playback_engine_skip(&engine, 1, &effects));
     TEST_ASSERT_TRUE(effects.boundary_bounce);
     TEST_ASSERT_EQ_STR("END OF ALL SONGS", effects.toast_text);
@@ -133,8 +133,15 @@ static void test_launch_3s_rule_and_repeat_matrix(void) {
         .has_state = true, .state = IPC_PLAYBACK_STOPPED
     }, &effects);
     TEST_ASSERT_FALSE(engine.is_playing);
+    TEST_ASSERT_EQ_U32(0u, engine.slice_count);
     TEST_ASSERT_EQ_U32(0u, engine.current_slot);
     TEST_ASSERT_EQ_STR("END OF ALL SONGS", effects.toast_text);
+
+    /* Stale playing IPC after end-of-queue stop must not restart vinyl */
+    playback_engine_handle_ipc_status(&engine, &(struct playback_status_update){
+        .has_state = true, .state = IPC_PLAYBACK_PLAYING
+    }, &effects);
+    TEST_ASSERT_FALSE(engine.is_playing);
 
     library_db_close(&db);
     cleanup_temp_dir(dir_path);
@@ -200,6 +207,7 @@ static void test_gapless_slice_advance_ephemeral_and_reboot_resume(void) {
 
     TEST_ASSERT_TRUE(playback_engine_toggle_play_pause(&restored, &effects));
     TEST_ASSERT_TRUE(effects.launch_slice);
+    TEST_ASSERT_TRUE(effects.vinyl_nudge_radians == 0.0f);
     playback_engine_handle_ipc_status(&restored, &(struct playback_status_update){
         .has_state = true, .state = IPC_PLAYBACK_PLAYING,
         .has_track_path = true, .track_path = "/m/a/2.flac"

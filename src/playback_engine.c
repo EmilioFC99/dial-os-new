@@ -44,14 +44,10 @@ static uint8_t desired_ipc_play_mode(const struct playback_engine *engine) {
 
 static void sync_play_mode_effect(struct playback_engine *engine,
                                   struct playback_engine_effects *effects_out) {
-    uint8_t target_mode = desired_ipc_play_mode(engine);
-    if (engine->active_ipc_play_mode != target_mode) {
-        engine->active_ipc_play_mode = target_mode;
-        if (effects_out != NULL) {
-            effects_out->send_play_mode = true;
-            effects_out->ipc_play_mode = target_mode;
-        }
-    }
+    /* Stock 0654 controls backlight brightness (hw_echo_set_brightness), not play mode;
+     * DialOS handles Repeat OFF / ALL / ONE directly in handle_natural_eof(). */
+    (void)effects_out;
+    engine->active_ipc_play_mode = desired_ipc_play_mode(engine);
 }
 
 static void arm_slice_launch(struct playback_engine *engine,
@@ -62,6 +58,7 @@ static void arm_slice_launch(struct playback_engine *engine,
     engine->slice_count =
         remaining > PLAYBACK_M3U_SLICE_TRACKS ? PLAYBACK_M3U_SLICE_TRACKS : remaining;
     engine->awaiting_slice_load = true;
+    engine->audio_started = false;
     if (effects_out != NULL) {
         effects_out->launch_slice = true;
         effects_out->slice_start_slot = engine->slice_start_slot;
@@ -80,6 +77,7 @@ static void stop_to_idle_with_toast(struct playback_engine *engine, const char *
     engine->slice_start_slot = 0u;
     engine->slice_count = 0u;
     engine->awaiting_slice_load = false;
+    engine->audio_started = false;
     engine->has_pending_resume_seek = false;
     engine->pending_resume_seek_ms = 0u;
     memset(&engine->active_track, 0, sizeof(engine->active_track));
@@ -140,7 +138,9 @@ static void load_slot_track(struct playback_engine *engine, uint32_t slot, bool 
     if (keep_playing) {
         arm_slice_launch(engine, effects_out);
     } else {
+        engine->slice_count = 0u;
         engine->awaiting_slice_load = false;
+        engine->audio_started = false;
         if (effects_out != NULL) {
             effects_out->send_stop = true;
         }
@@ -301,7 +301,6 @@ bool playback_engine_launch_context(struct playback_engine *engine,
         /* Same track already loaded in mq_player: resume without restarting audio. */
         if (!was_awaiting_or_playing && effects_out != NULL) {
             effects_out->send_play_pause = true;
-            effects_out->vinyl_nudge_radians = 0.24f;
         }
         return true;
     }
@@ -337,9 +336,6 @@ bool playback_engine_toggle_play_pause(struct playback_engine *engine,
         }
         sync_play_mode_effect(engine, effects_out);
         arm_slice_launch(engine, effects_out);
-        if (effects_out != NULL) {
-            effects_out->vinyl_nudge_radians = 0.24f;
-        }
         engine->persistence_dirty = true;
         return true;
     }
@@ -348,9 +344,6 @@ bool playback_engine_toggle_play_pause(struct playback_engine *engine,
     engine->persistence_dirty = true;
     if (effects_out != NULL) {
         effects_out->send_play_pause = true;
-        if (engine->is_playing) {
-            effects_out->vinyl_nudge_radians = 0.24f;
-        }
     }
     return true;
 }
@@ -690,6 +683,12 @@ void playback_engine_handle_ipc_status(struct playback_engine *engine,
         return;
     }
 
+    if (!engine->is_playing && engine->slice_count == 0u && !engine->awaiting_slice_load &&
+        status->has_state && status->state == IPC_PLAYBACK_PLAYING) {
+        /* Ignore stale playing frames after Repeat OFF stops at end of queue. */
+        return;
+    }
+
     if (status->has_track_path) {
         if (strcmp(status->track_path, engine->active_track.path) == 0) {
             engine->awaiting_slice_load = false;
@@ -698,6 +697,9 @@ void playback_engine_handle_ipc_status(struct playback_engine *engine,
             }
             if (status->has_state && status->state == IPC_PLAYBACK_PLAYING) {
                 engine->is_playing = true;
+                if (!status->is_loading_state) {
+                    engine->audio_started = true;
+                }
                 if (engine->has_pending_resume_seek && effects_out != NULL) {
                     effects_out->send_seek = true;
                     effects_out->seek_ms = engine->pending_resume_seek_ms;
@@ -760,6 +762,9 @@ void playback_engine_handle_ipc_status(struct playback_engine *engine,
         }
         if (status->state == IPC_PLAYBACK_PLAYING) {
             engine->is_playing = true;
+            if (!status->is_loading_state && !engine->awaiting_slice_load) {
+                engine->audio_started = true;
+            }
             if (engine->has_pending_resume_seek && !engine->awaiting_slice_load &&
                 effects_out != NULL) {
                 effects_out->send_seek = true;
@@ -780,6 +785,9 @@ void playback_engine_handle_ipc_elapsed(struct playback_engine *engine, uint32_t
     }
     if (engine->duration_ms > 0u && elapsed_ms > engine->duration_ms) {
         elapsed_ms = engine->duration_ms;
+    }
+    if (elapsed_ms > 0u) {
+        engine->audio_started = true;
     }
     engine->elapsed_ms = elapsed_ms;
 }

@@ -58,6 +58,7 @@ struct playback_engine {
     uint32_t slice_start_slot;
     uint32_t slice_count;
     bool awaiting_slice_load;
+    bool audio_started;
     bool has_pending_resume_seek;
     uint32_t pending_resume_seek_ms;
     uint8_t active_ipc_play_mode;

@@ -355,10 +355,9 @@ static void test_nominal_boot_aa24_retry_and_a607(void) {
     advance_runtime_ticks(&runtime, &fake, IPC_RETRY_INTERVAL_MS);
     TEST_ASSERT_TRUE(runtime.idle_poweroff_disabled);
     TEST_ASSERT_FALSE(runtime.pending_disable_idle_poweroff);
-    TEST_ASSERT_EQ_U32(3u, fake.ipc_count);
+    TEST_ASSERT_EQ_U32(2u, fake.ipc_count);
     TEST_ASSERT_EQ_STR("0664000C0000", fake.ipc_messages[0]);
     TEST_ASSERT_EQ_STR("0711000C0078", fake.ipc_messages[1]);
-    TEST_ASSERT_EQ_STR("0647000C0001", fake.ipc_messages[2]);
 
     /* Complete remaining boot acts (~9.75s total) -> enters READY and writes telemetry */
     advance_runtime_ticks(&runtime, &fake, 9300u);
@@ -370,12 +369,12 @@ static void test_nominal_boot_aa24_retry_and_a607(void) {
     struct inbound_ipc_message a607 = {0};
     a607.kind = IPC_INBOUND_INPUT_MODE_READY;
     app_handle_ipc_message(&runtime, &a607);
-    TEST_ASSERT_EQ_U32(4u, fake.ipc_count);
-    TEST_ASSERT_EQ_STR("0664000C0000", fake.ipc_messages[3]);
+    TEST_ASSERT_EQ_U32(3u, fake.ipc_count);
+    TEST_ASSERT_EQ_STR("0664000C0000", fake.ipc_messages[2]);
 
     /* Second a607 does not spam 0664 */
     app_handle_ipc_message(&runtime, &a607);
-    TEST_ASSERT_EQ_U32(4u, fake.ipc_count);
+    TEST_ASSERT_EQ_U32(3u, fake.ipc_count);
     app_destroy(&runtime);
 }
 
@@ -838,6 +837,7 @@ static void test_library_boot_scan_playback_and_sd_hotswap(void) {
     app_handle_touch_event(&runtime, &back_down);
     app_handle_touch_event(&runtime, &back_move);
     app_handle_touch_event(&runtime, &back_up);
+    advance_runtime_ticks(&runtime, &fake, 400u);
     TEST_ASSERT_EQ_I32(ACTIVE_SCREEN_LIBRARY_SHELL, runtime.home.active_screen);
 
     /* Tap same active track -> sends 0201 toggle */

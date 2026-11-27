@@ -481,13 +481,6 @@ static void execute_playback_effects(struct app_runtime *runtime,
         return;
     }
     char command[IPC_SEEK_COMMAND_BUFFER_BYTES];
-    if (effects->send_play_mode) {
-        size_t length =
-            protocol_format_set_play_mode(effects->ipc_play_mode, command, sizeof(command));
-        if (length > 0u) {
-            (void)runtime->platform->ipc_send_player(runtime->platform->context, command, length);
-        }
-    }
     if (effects->launch_slice) {
         write_and_send_queue_slice(runtime, effects->slice_start_slot, now_ns);
     }
@@ -527,9 +520,6 @@ static void execute_playback_effects(struct app_runtime *runtime,
 
     if (runtime->playback.persistence_dirty) {
         mark_playback_persistence_dirty(runtime, now_ns);
-        if (effects->send_play_mode && runtime->library_db_open_ok) {
-            flush_playback_persistence(runtime);
-        }
     }
 }
 
@@ -555,11 +545,6 @@ static void maybe_restore_playback_state(struct app_runtime *runtime, uint64_t n
         if (length > 0u) {
             (void)runtime->platform->ipc_send_player(runtime->platform->context, command, length);
         }
-    }
-    size_t mode_length = protocol_format_set_play_mode(runtime->playback.active_ipc_play_mode,
-                                                       command, sizeof(command));
-    if (mode_length > 0u) {
-        (void)runtime->platform->ipc_send_player(runtime->platform->context, command, mode_length);
     }
 
     sync_home_telemetry(runtime);
@@ -631,11 +616,6 @@ static void attempt_send_disable_idle_poweroff(struct app_runtime *runtime, uint
             if (max_vol_len > 0u) {
                 (void)runtime->platform->ipc_send_player(runtime->platform->context, command,
                                                          max_vol_len);
-            }
-            size_t gapless_len = protocol_format_set_gapless(true, command, sizeof(command));
-            if (gapless_len > 0u) {
-                (void)runtime->platform->ipc_send_player(runtime->platform->context, command,
-                                                         gapless_len);
             }
             maybe_restore_playback_state(runtime, now_ns);
         }
@@ -1066,7 +1046,6 @@ void app_handle_ipc_message(struct app_runtime *runtime, const struct inbound_ip
             playback_engine_handle_ipc_elapsed(&runtime->playback, message->elapsed_ms);
             runtime->home.telemetry.elapsed_ms = message->elapsed_ms;
             runtime->home.elapsed_fractional_ms = 0.0f;
-            runtime->now_playing.interpolated_elapsed_ms = (float)message->elapsed_ms;
             break;
 
         case IPC_INBOUND_PLAYBACK_STOP:
@@ -1334,6 +1313,13 @@ void app_handle_touch_event(struct app_runtime *runtime, const struct touch_even
                                                      : NP_OPEN_FROM_LIBRARY,
                         false, runtime->library.vinyl_rotation_radians, runtime->volume_level);
                 }
+            } else if (action.kind == LIBRARY_ACTION_OPEN_NOW_PLAYING) {
+                runtime->home.active_screen = ACTIVE_SCREEN_NOW_PLAYING_SHELL;
+                runtime->now_playing_entered_from_home = true;
+                now_playing_controller_enter(&runtime->now_playing, NP_RETURN_LIBRARY,
+                                             NP_OPEN_FROM_ALBUM_CRATE, false,
+                                             runtime->library.vinyl_rotation_radians,
+                                             runtime->volume_level);
             } else if (action.kind == LIBRARY_ACTION_TOGGLE_PLAY_PAUSE) {
                 struct playback_engine_effects effects;
                 if (playback_engine_toggle_play_pause(&runtime->playback, &effects)) {
