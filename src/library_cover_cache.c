@@ -1,0 +1,399 @@
+#include "library_cover_cache.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#define STBI_NO_STDIO
+#include "third_party/stb_image.h"
+#pragma GCC diagnostic pop
+
+static void copy_path_bounded(char *output, size_t capacity, const char *input) {
+    if (capacity == 0u) {
+        return;
+    }
+    if (input == NULL) {
+        output[0] = '\0';
+        return;
+    }
+    size_t length = strlen(input);
+    if (length >= capacity) {
+        length = capacity - 1u;
+    }
+    memcpy(output, input, length);
+    output[length] = '\0';
+}
+
+void library_cover_cache_initialize(struct library_cover_cache *cache,
+                                    const char *covers_directory) {
+    if (cache == NULL) {
+        return;
+    }
+    memset(cache, 0, sizeof(*cache));
+    copy_path_bounded(cache->covers_directory, sizeof(cache->covers_directory), covers_directory);
+    cache->slots = calloc(LIBRARY_COVER_LRU_SLOTS, sizeof(struct library_cover_slot));
+}
+
+void library_cover_cache_set_directory(struct library_cover_cache *cache,
+                                       const char *covers_directory) {
+    if (cache == NULL) {
+        return;
+    }
+    copy_path_bounded(cache->covers_directory, sizeof(cache->covers_directory), covers_directory);
+}
+
+void library_cover_cache_clear(struct library_cover_cache *cache) {
+    if (cache == NULL) {
+        return;
+    }
+    if (cache->slots != NULL) {
+        memset(cache->slots, 0, LIBRARY_COVER_LRU_SLOTS * sizeof(struct library_cover_slot));
+    }
+    cache->pending_count = 0u;
+    cache->failed_count = 0u;
+    cache->access_tick = 0ull;
+}
+
+void library_cover_cache_destroy(struct library_cover_cache *cache) {
+    if (cache == NULL) {
+        return;
+    }
+    free(cache->slots);
+    memset(cache, 0, sizeof(*cache));
+}
+
+static bool is_album_marked_failed(const struct library_cover_cache *cache, uint64_t album_id) {
+    for (uint32_t index = 0u; index < cache->failed_count; index++) {
+        if (cache->failed_album_ids[index] == album_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void mark_album_failed(struct library_cover_cache *cache, uint64_t album_id) {
+    if (is_album_marked_failed(cache, album_id)) {
+        return;
+    }
+    if (cache->failed_count < LIBRARY_COVER_FAILED_SET_CAPACITY) {
+        cache->failed_album_ids[cache->failed_count++] = album_id;
+    }
+}
+
+static struct library_cover_slot *allocate_lru_slot(struct library_cover_cache *cache,
+                                                    uint64_t album_id) {
+    if (cache->slots == NULL) {
+        return NULL;
+    }
+    uint32_t victim_index = 0u;
+    uint64_t oldest_tick = UINT64_MAX;
+    for (uint32_t index = 0u; index < LIBRARY_COVER_LRU_SLOTS; index++) {
+        if (!cache->slots[index].occupied) {
+            victim_index = index;
+            break;
+        }
+        if (cache->slots[index].album_id == album_id) {
+            victim_index = index;
+            break;
+        }
+        if (cache->slots[index].last_used_tick < oldest_tick) {
+            oldest_tick = cache->slots[index].last_used_tick;
+            victim_index = index;
+        }
+    }
+    struct library_cover_slot *slot = &cache->slots[victim_index];
+    slot->occupied = true;
+    slot->album_id = album_id;
+    slot->last_used_tick = ++cache->access_tick;
+    return slot;
+}
+
+const uint16_t *library_cover_cache_lookup(struct library_cover_cache *cache, uint64_t album_id) {
+    if (cache == NULL || cache->slots == NULL || album_id == 0ull) {
+        return NULL;
+    }
+    for (uint32_t index = 0u; index < LIBRARY_COVER_LRU_SLOTS; index++) {
+        if (cache->slots[index].occupied && cache->slots[index].album_id == album_id) {
+            cache->slots[index].last_used_tick = ++cache->access_tick;
+            return cache->slots[index].pixels;
+        }
+    }
+    return NULL;
+}
+
+bool library_cover_cache_request(struct library_cover_cache *cache, uint64_t album_id,
+                                 uint8_t cover_source_kind, const char *source_path,
+                                 uint32_t data_offset, uint32_t data_length) {
+    if (cache == NULL || album_id == 0ull || cover_source_kind == LIBRARY_COVER_NONE ||
+        source_path == NULL || source_path[0] == '\0') {
+        return false;
+    }
+    if (library_cover_cache_lookup(cache, album_id) != NULL ||
+        is_album_marked_failed(cache, album_id)) {
+        return false;
+    }
+    for (uint32_t index = 0u; index < cache->pending_count; index++) {
+        if (cache->pending[index].album_id == album_id) {
+            return true;
+        }
+    }
+    if (cache->pending_count >= LIBRARY_COVER_PENDING_QUEUE_CAPACITY) {
+        return false;
+    }
+    struct library_cover_request *request = &cache->pending[cache->pending_count++];
+    memset(request, 0, sizeof(*request));
+    request->album_id = album_id;
+    request->cover_source_kind = cover_source_kind;
+    copy_path_bounded(request->source_path, sizeof(request->source_path), source_path);
+    request->data_offset = data_offset;
+    request->data_length = data_length;
+    return true;
+}
+
+static bool try_load_rgb565_from_disk(struct library_cover_cache *cache, uint64_t album_id) {
+    if (cache->covers_directory[0] == '\0') {
+        return false;
+    }
+    char cache_path[384];
+    snprintf(cache_path, sizeof(cache_path), "%s/%016" PRIx64 ".rgb565", cache->covers_directory,
+             album_id);
+    struct stat file_stat;
+    if (stat(cache_path, &file_stat) != 0 ||
+        (uint64_t)file_stat.st_size != (uint64_t)LIBRARY_COVER_BYTE_SIZE) {
+        return false;
+    }
+    FILE *file = fopen(cache_path, "rb");
+    if (file == NULL) {
+        return false;
+    }
+    struct library_cover_slot *slot = allocate_lru_slot(cache, album_id);
+    if (slot == NULL) {
+        fclose(file);
+        return false;
+    }
+    size_t read_bytes = fread(slot->pixels, 1u, LIBRARY_COVER_BYTE_SIZE, file);
+    fclose(file);
+    if (read_bytes != LIBRARY_COVER_BYTE_SIZE) {
+        slot->occupied = false;
+        return false;
+    }
+    return true;
+}
+
+static void save_rgb565_to_disk_atomic(const struct library_cover_cache *cache, uint64_t album_id,
+                                       const uint16_t *pixels) {
+    if (cache->covers_directory[0] == '\0' || pixels == NULL) {
+        return;
+    }
+    if (mkdir(cache->covers_directory, 0755) != 0 && errno != EEXIST) {
+        return;
+    }
+    char temp_path[384];
+    char final_path[384];
+    snprintf(temp_path, sizeof(temp_path), "%s/.%016" PRIx64 ".rgb565.tmp",
+             cache->covers_directory, album_id);
+    snprintf(final_path, sizeof(final_path), "%s/%016" PRIx64 ".rgb565",
+             cache->covers_directory, album_id);
+
+    int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        return;
+    }
+    const uint8_t *bytes = (const uint8_t *)pixels;
+    size_t written_total = 0u;
+    bool ok = true;
+    while (written_total < LIBRARY_COVER_BYTE_SIZE) {
+        ssize_t chunk = write(fd, bytes + written_total, LIBRARY_COVER_BYTE_SIZE - written_total);
+        if (chunk < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ok = false;
+            break;
+        }
+        written_total += (size_t)chunk;
+    }
+    if (ok && fsync(fd) != 0) {
+        ok = false;
+    }
+    close(fd);
+    if (!ok || rename(temp_path, final_path) != 0) {
+        (void)unlink(temp_path);
+        return;
+    }
+    int directory_fd = open(cache->covers_directory, O_RDONLY | O_CLOEXEC);
+    if (directory_fd >= 0) {
+        (void)fsync(directory_fd);
+        close(directory_fd);
+    }
+}
+
+static void downsample_rgb888_to_rgb565(const uint8_t *rgb_pixels, uint32_t source_width,
+                                        uint32_t source_height, uint16_t *dest_pixels) {
+    for (uint32_t dest_y = 0u; dest_y < LIBRARY_COVER_SIZE_PX; dest_y++) {
+        uint32_t y_start = (dest_y * source_height) / LIBRARY_COVER_SIZE_PX;
+        uint32_t y_end = ((dest_y + 1u) * source_height) / LIBRARY_COVER_SIZE_PX;
+        if (y_end <= y_start) {
+            y_end = y_start + 1u;
+        }
+        if (y_end > source_height) {
+            y_end = source_height;
+        }
+        for (uint32_t dest_x = 0u; dest_x < LIBRARY_COVER_SIZE_PX; dest_x++) {
+            uint32_t x_start = (dest_x * source_width) / LIBRARY_COVER_SIZE_PX;
+            uint32_t x_end = ((dest_x + 1u) * source_width) / LIBRARY_COVER_SIZE_PX;
+            if (x_end <= x_start) {
+                x_end = x_start + 1u;
+            }
+            if (x_end > source_width) {
+                x_end = source_width;
+            }
+
+            uint32_t sum_red = 0u;
+            uint32_t sum_green = 0u;
+            uint32_t sum_blue = 0u;
+            uint32_t sample_count = 0u;
+            for (uint32_t sample_y = y_start; sample_y < y_end; sample_y++) {
+                const uint8_t *row_ptr = rgb_pixels + ((size_t)sample_y * source_width) * 3u;
+                for (uint32_t sample_x = x_start; sample_x < x_end; sample_x++) {
+                    const uint8_t *pixel = row_ptr + (size_t)sample_x * 3u;
+                    sum_red += pixel[0];
+                    sum_green += pixel[1];
+                    sum_blue += pixel[2];
+                    sample_count++;
+                }
+            }
+            uint32_t red8 = sum_red / sample_count;
+            uint32_t green8 = sum_green / sample_count;
+            uint32_t blue8 = sum_blue / sample_count;
+            uint16_t rgb565 = (uint16_t)(((red8 >> 3u) << 11u) | ((green8 >> 2u) << 5u) |
+                                         (blue8 >> 3u));
+            dest_pixels[dest_y * LIBRARY_COVER_SIZE_PX + dest_x] = rgb565;
+        }
+    }
+}
+
+static bool decode_request_to_cache(struct library_cover_cache *cache,
+                                    const struct library_cover_request *request) {
+    FILE *file = fopen(request->source_path, "rb");
+    if (file == NULL) {
+        return false;
+    }
+
+    size_t payload_length = 0u;
+    if (request->cover_source_kind == LIBRARY_COVER_SIDECAR) {
+        if (fseek(file, 0L, SEEK_END) != 0) {
+            fclose(file);
+            return false;
+        }
+        long file_size = ftell(file);
+        if (file_size <= 0 || (uint64_t)file_size > LIBRARY_COVER_MAX_INPUT_BYTES ||
+            fseek(file, 0L, SEEK_SET) != 0) {
+            fclose(file);
+            return false;
+        }
+        payload_length = (size_t)file_size;
+    } else {
+        if (request->data_length == 0u || request->data_length > LIBRARY_COVER_MAX_INPUT_BYTES ||
+            fseek(file, (long)request->data_offset, SEEK_SET) != 0) {
+            fclose(file);
+            return false;
+        }
+        payload_length = request->data_length;
+    }
+
+    uint8_t *raw_bytes = malloc(payload_length);
+    if (raw_bytes == NULL) {
+        fclose(file);
+        return false;
+    }
+    size_t read_bytes = fread(raw_bytes, 1u, payload_length, file);
+    fclose(file);
+    if (read_bytes != payload_length) {
+        free(raw_bytes);
+        return false;
+    }
+
+    int image_width = 0;
+    int image_height = 0;
+    int image_channels = 0;
+    if (!stbi_info_from_memory(raw_bytes, (int)payload_length, &image_width, &image_height,
+                               &image_channels) ||
+        image_width <= 0 || image_height <= 0 ||
+        (uint32_t)image_width > LIBRARY_COVER_MAX_DIMENSION_PX ||
+        (uint32_t)image_height > LIBRARY_COVER_MAX_DIMENSION_PX) {
+        free(raw_bytes);
+        return false;
+    }
+
+    int decoded_width = 0;
+    int decoded_height = 0;
+    int decoded_channels = 0;
+    uint8_t *decoded = stbi_load_from_memory(raw_bytes, (int)payload_length, &decoded_width,
+                                             &decoded_height, &decoded_channels, 3);
+    free(raw_bytes);
+    if (decoded == NULL || decoded_width <= 0 || decoded_height <= 0) {
+        return false;
+    }
+
+    struct library_cover_slot *slot = allocate_lru_slot(cache, request->album_id);
+    if (slot == NULL) {
+        stbi_image_free(decoded);
+        return false;
+    }
+    downsample_rgb888_to_rgb565(decoded, (uint32_t)decoded_width, (uint32_t)decoded_height,
+                                slot->pixels);
+    stbi_image_free(decoded);
+
+    save_rgb565_to_disk_atomic(cache, request->album_id, slot->pixels);
+    return true;
+}
+
+bool library_cover_cache_step(struct library_cover_cache *cache, bool allow_heavy_decode) {
+    if (cache == NULL || cache->pending_count == 0u) {
+        return false;
+    }
+
+    /* Fast path: fulfill any queued disk .rgb565 cache hit first */
+    for (uint32_t index = 0u; index < cache->pending_count; index++) {
+        uint64_t album_id = cache->pending[index].album_id;
+        if (try_load_rgb565_from_disk(cache, album_id)) {
+            for (uint32_t shift = index; shift + 1u < cache->pending_count; shift++) {
+                cache->pending[shift] = cache->pending[shift + 1u];
+            }
+            cache->pending_count--;
+            return true;
+        }
+    }
+
+    if (!allow_heavy_decode) {
+        return false;
+    }
+
+    struct library_cover_request request = cache->pending[0];
+    for (uint32_t shift = 0u; shift + 1u < cache->pending_count; shift++) {
+        cache->pending[shift] = cache->pending[shift + 1u];
+    }
+    cache->pending_count--;
+
+    if (!decode_request_to_cache(cache, &request)) {
+        mark_album_failed(cache, request.album_id);
+    }
+    return true;
+}
