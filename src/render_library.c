@@ -378,7 +378,8 @@ static void draw_crate_album_sleeve_and_disc(
 
     const uint16_t *cover_pixels = NULL;
     if (controller->cover_cache != NULL && album->cover_source_kind != LIBRARY_COVER_NONE) {
-        cover_pixels = library_cover_cache_lookup(controller->cover_cache, album->album_id);
+        cover_pixels =
+            library_cover_cache_lookup_or_load_disk(controller->cover_cache, album->album_id);
         if (cover_pixels == NULL) {
             const char *cov_path =
                 library_catalog_get_string(controller->catalog, album->cover_path_offset);

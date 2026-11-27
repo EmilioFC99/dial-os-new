@@ -118,14 +118,24 @@ static void test_cover_decode_disk_cache_and_lru(void) {
     TEST_ASSERT_EQ_U32(0xF800u, pixels[0]);
     TEST_ASSERT_EQ_U32(0xF800u, pixels[LIBRARY_COVER_PIXEL_COUNT - 1u]);
 
-    /* Delete original sidecar and reset RAM LRU; disk .rgb565 loads even with heavy=false */
+    /* Delete original sidecar and reset RAM LRU; lookup_or_load_disk hits disk immediately */
     unlink(sidecar_path);
     library_cover_cache_clear(&cache);
     TEST_ASSERT_TRUE(library_cover_cache_lookup(&cache, 0x1111ull) == NULL);
-    TEST_ASSERT_TRUE(library_cover_cache_request(&cache, 0x1111ull, LIBRARY_COVER_SIDECAR,
-                                                 sidecar_path, 0u, 0u));
-    TEST_ASSERT_TRUE(library_cover_cache_step(&cache, false));
-    TEST_ASSERT_TRUE(library_cover_cache_lookup(&cache, 0x1111ull) != NULL);
+    TEST_ASSERT_TRUE(library_cover_cache_lookup_or_load_disk(&cache, 0x1111ull) != NULL);
+    uint32_t ram_hits = 0u;
+    uint32_t disk_hits = 0u;
+    uint32_t decodes = 0u;
+    uint32_t max_op_ms = 0u;
+    library_cover_cache_take_window_metrics(&cache, &ram_hits, &disk_hits, &decodes, &max_op_ms);
+    TEST_ASSERT_EQ_U32(0u, ram_hits);
+    TEST_ASSERT_EQ_U32(1u, disk_hits);
+
+    /* Second lookup hits RAM LRU */
+    TEST_ASSERT_TRUE(library_cover_cache_lookup_or_load_disk(&cache, 0x1111ull) != NULL);
+    library_cover_cache_take_window_metrics(&cache, &ram_hits, &disk_hits, &decodes, &max_op_ms);
+    TEST_ASSERT_EQ_U32(1u, ram_hits);
+    TEST_ASSERT_EQ_U32(0u, disk_hits);
 
     /* Embedded offset decode */
     char embedded_path[300];
@@ -157,9 +167,9 @@ static void test_cover_decode_disk_cache_and_lru(void) {
     TEST_ASSERT_FALSE(library_cover_cache_request(&cache, 0x3333ull, LIBRARY_COVER_SIDECAR,
                                                   bad_path, 0u, 0u));
 
-    /* LRU eviction past 24 slots */
+    /* LRU eviction past 128 slots */
     library_cover_cache_clear(&cache);
-    for (uint64_t idx = 1ull; idx <= 26ull; idx++) {
+    for (uint64_t idx = 1ull; idx <= (uint64_t)LIBRARY_COVER_LRU_SLOTS + 2ull; idx++) {
         char path_i[300];
         snprintf(path_i, sizeof(path_i), "%s/c_%llu.png", root_dir, (unsigned long long)idx);
         FILE *fp = fopen(path_i, "wb");
@@ -171,13 +181,112 @@ static void test_cover_decode_disk_cache_and_lru(void) {
         TEST_ASSERT_TRUE(library_cover_cache_step(&cache, true));
     }
     TEST_ASSERT_TRUE(library_cover_cache_lookup(&cache, 101ull) == NULL);
-    TEST_ASSERT_TRUE(library_cover_cache_lookup(&cache, 126ull) != NULL);
+    TEST_ASSERT_TRUE(library_cover_cache_lookup(&cache, 100ull + LIBRARY_COVER_LRU_SLOTS + 2ull) !=
+                     NULL);
 
     library_cover_cache_destroy(&cache);
+    (void)system(rm_cmd);
+}
+
+static uint64_t fake_precache_clock_ns(void *context) {
+    uint64_t *tick = (uint64_t *)context;
+    *tick += 1000000ull;
+    return *tick;
+}
+
+static void test_boot_cover_precache_warm_and_cold(void) {
+    char root_dir[256];
+    snprintf(root_dir, sizeof(root_dir), "/tmp/dialos_cov_pre_%d", (int)getpid());
+    char rm_cmd[320];
+    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf \"%s\"", root_dir);
+    (void)system(rm_cmd);
+    mkdir(root_dir, 0755);
+
+    char covers_dir[300];
+    snprintf(covers_dir, sizeof(covers_dir), "%s/covers", root_dir);
+    uint8_t png_bytes[256];
+    size_t png_len = build_synthetic_2x2_red_png(png_bytes, sizeof(png_bytes));
+    TEST_ASSERT_TRUE(png_len > 0u);
+
+    char cover_a[300], cover_b[300];
+    snprintf(cover_a, sizeof(cover_a), "%s/a.png", root_dir);
+    snprintf(cover_b, sizeof(cover_b), "%s/b.png", root_dir);
+    FILE *file_a = fopen(cover_a, "wb");
+    FILE *file_b = fopen(cover_b, "wb");
+    TEST_ASSERT_TRUE(file_a != NULL && file_b != NULL);
+    fwrite(png_bytes, 1u, png_len, file_a);
+    fwrite(png_bytes, 1u, png_len, file_b);
+    fclose(file_a);
+    fclose(file_b);
+
+    struct library_catalog catalog;
+    library_catalog_initialize(&catalog);
+    struct library_track_input input_a = {
+        .file_path = "/music/a/1.mp3",
+        .title = "Song A",
+        .album = "Album A",
+        .artist = "Artist A",
+        .cover_source_kind = LIBRARY_COVER_SIDECAR,
+        .cover_path = cover_a,
+    };
+    struct library_track_input input_b = {
+        .file_path = "/music/b/1.mp3",
+        .title = "Song B",
+        .album = "Album B",
+        .artist = "Artist B",
+        .cover_source_kind = LIBRARY_COVER_SIDECAR,
+        .cover_path = cover_b,
+    };
+    struct library_track_input input_c = {
+        .file_path = "/music/c/1.mp3",
+        .title = "Song C",
+        .album = "Album C",
+        .artist = "Artist C",
+        .cover_source_kind = LIBRARY_COVER_NONE,
+    };
+    TEST_ASSERT_TRUE(library_catalog_add_track(&catalog, &input_a));
+    TEST_ASSERT_TRUE(library_catalog_add_track(&catalog, &input_b));
+    TEST_ASSERT_TRUE(library_catalog_add_track(&catalog, &input_c));
+
+    struct library_cover_cache cache;
+    library_cover_cache_initialize(&cache, covers_dir);
+
+    /* Cold precache: 2 albums with covers, 1 heavy decode per step */
+    uint64_t clock_ns = 0ull;
+    library_cover_cache_begin_boot_precache(&cache, &catalog);
+    TEST_ASSERT_TRUE(library_cover_cache_is_boot_precaching(&cache));
+    TEST_ASSERT_EQ_U32(2u, cache.precache_total);
+    TEST_ASSERT_TRUE(library_cover_cache_step_boot_precache(
+        &cache, &catalog, fake_precache_clock_ns, &clock_ns, LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS));
+    TEST_ASSERT_EQ_U32(1u, cache.precache_decoded);
+    TEST_ASSERT_TRUE(library_cover_cache_is_boot_precaching(&cache));
+
+    while (library_cover_cache_is_boot_precaching(&cache)) {
+        (void)library_cover_cache_step_boot_precache(&cache, &catalog, fake_precache_clock_ns,
+                                                   &clock_ns, LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
+    }
+    TEST_ASSERT_EQ_U32(2u, cache.precache_done);
+    TEST_ASSERT_EQ_U32(2u, cache.precache_decoded);
+    TEST_ASSERT_EQ_U32(0u, cache.precache_disk_hits);
+
+    /* Warm precache: skips JPEG/PNG decode, hits disk and preloads RAM */
+    library_cover_cache_clear(&cache);
+    library_cover_cache_begin_boot_precache(&cache, &catalog);
+    while (library_cover_cache_is_boot_precaching(&cache)) {
+        (void)library_cover_cache_step_boot_precache(&cache, &catalog, fake_precache_clock_ns,
+                                                   &clock_ns, LIBRARY_COVER_PRECACHE_STAT_BUDGET_NS);
+    }
+    TEST_ASSERT_EQ_U32(0u, cache.precache_decoded);
+    TEST_ASSERT_EQ_U32(2u, cache.precache_disk_hits);
+    TEST_ASSERT_EQ_U32(2u, cache.precache_ram_preloaded);
+
+    library_cover_cache_destroy(&cache);
+    library_catalog_destroy(&catalog);
     (void)system(rm_cmd);
 }
 
 void run_library_cover_cache_tests(void) {
     printf("Suite: library_cover_cache\n");
     RUN_TEST(test_cover_decode_disk_cache_and_lru);
+    RUN_TEST(test_boot_cover_precache_warm_and_cold);
 }

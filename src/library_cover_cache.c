@@ -68,6 +68,19 @@ void library_cover_cache_clear(struct library_cover_cache *cache) {
     cache->pending_count = 0u;
     cache->failed_count = 0u;
     cache->access_tick = 0ull;
+    cache->precache_active = false;
+    cache->precache_cursor = 0u;
+    cache->precache_total = 0u;
+    cache->precache_done = 0u;
+    cache->precache_decoded = 0u;
+    cache->precache_disk_hits = 0u;
+    cache->precache_ram_preloaded = 0u;
+    cache->precache_failed = 0u;
+    cache->precache_max_decode_ms = 0u;
+    cache->window_ram_hits = 0u;
+    cache->window_disk_hits = 0u;
+    cache->window_decodes = 0u;
+    cache->window_max_op_ms = 0u;
 }
 
 void library_cover_cache_destroy(struct library_cover_cache *cache) {
@@ -124,6 +137,27 @@ static struct library_cover_slot *allocate_lru_slot(struct library_cover_cache *
     return slot;
 }
 
+static bool is_album_pending(const struct library_cover_cache *cache, uint64_t album_id) {
+    for (uint32_t index = 0u; index < cache->pending_count; index++) {
+        if (cache->pending[index].album_id == album_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool has_slot_in_ram(const struct library_cover_cache *cache, uint64_t album_id) {
+    if (cache->slots == NULL || album_id == 0ull) {
+        return false;
+    }
+    for (uint32_t index = 0u; index < LIBRARY_COVER_LRU_SLOTS; index++) {
+        if (cache->slots[index].occupied && cache->slots[index].album_id == album_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const uint16_t *library_cover_cache_lookup(struct library_cover_cache *cache, uint64_t album_id) {
     if (cache == NULL || cache->slots == NULL || album_id == 0ull) {
         return NULL;
@@ -131,6 +165,7 @@ const uint16_t *library_cover_cache_lookup(struct library_cover_cache *cache, ui
     for (uint32_t index = 0u; index < LIBRARY_COVER_LRU_SLOTS; index++) {
         if (cache->slots[index].occupied && cache->slots[index].album_id == album_id) {
             cache->slots[index].last_used_tick = ++cache->access_tick;
+            cache->window_ram_hits++;
             return cache->slots[index].pixels;
         }
     }
@@ -166,9 +201,22 @@ bool library_cover_cache_request(struct library_cover_cache *cache, uint64_t alb
     return true;
 }
 
-static bool try_load_rgb565_from_disk(struct library_cover_cache *cache, uint64_t album_id) {
-    if (cache->covers_directory[0] == '\0') {
+static bool has_rgb565_on_disk(const struct library_cover_cache *cache, uint64_t album_id) {
+    if (cache->covers_directory[0] == '\0' || album_id == 0ull) {
         return false;
+    }
+    char cache_path[384];
+    snprintf(cache_path, sizeof(cache_path), "%s/%016" PRIx64 ".rgb565", cache->covers_directory,
+             album_id);
+    struct stat file_stat;
+    return stat(cache_path, &file_stat) == 0 &&
+           (uint64_t)file_stat.st_size == (uint64_t)LIBRARY_COVER_BYTE_SIZE;
+}
+
+static const uint16_t *try_load_rgb565_from_disk(struct library_cover_cache *cache,
+                                                 uint64_t album_id) {
+    if (cache->covers_directory[0] == '\0') {
+        return NULL;
     }
     char cache_path[384];
     snprintf(cache_path, sizeof(cache_path), "%s/%016" PRIx64 ".rgb565", cache->covers_directory,
@@ -176,24 +224,41 @@ static bool try_load_rgb565_from_disk(struct library_cover_cache *cache, uint64_
     struct stat file_stat;
     if (stat(cache_path, &file_stat) != 0 ||
         (uint64_t)file_stat.st_size != (uint64_t)LIBRARY_COVER_BYTE_SIZE) {
-        return false;
+        return NULL;
     }
     FILE *file = fopen(cache_path, "rb");
     if (file == NULL) {
-        return false;
+        return NULL;
     }
     struct library_cover_slot *slot = allocate_lru_slot(cache, album_id);
     if (slot == NULL) {
         fclose(file);
-        return false;
+        return NULL;
     }
     size_t read_bytes = fread(slot->pixels, 1u, LIBRARY_COVER_BYTE_SIZE, file);
     fclose(file);
     if (read_bytes != LIBRARY_COVER_BYTE_SIZE) {
         slot->occupied = false;
-        return false;
+        return NULL;
     }
-    return true;
+    return slot->pixels;
+}
+
+const uint16_t *library_cover_cache_lookup_or_load_disk(struct library_cover_cache *cache,
+                                                        uint64_t album_id) {
+    const uint16_t *ram_hit = library_cover_cache_lookup(cache, album_id);
+    if (ram_hit != NULL) {
+        return ram_hit;
+    }
+    if (cache == NULL || album_id == 0ull || is_album_marked_failed(cache, album_id) ||
+        is_album_pending(cache, album_id)) {
+        return NULL;
+    }
+    const uint16_t *disk_hit = try_load_rgb565_from_disk(cache, album_id);
+    if (disk_hit != NULL) {
+        cache->window_disk_hits++;
+    }
+    return disk_hit;
 }
 
 static void save_rgb565_to_disk_atomic(const struct library_cover_cache *cache, uint64_t album_id,
@@ -229,18 +294,9 @@ static void save_rgb565_to_disk_atomic(const struct library_cover_cache *cache, 
         }
         written_total += (size_t)chunk;
     }
-    if (ok && fsync(fd) != 0) {
-        ok = false;
-    }
     close(fd);
     if (!ok || rename(temp_path, final_path) != 0) {
         (void)unlink(temp_path);
-        return;
-    }
-    int directory_fd = open(cache->covers_directory, O_RDONLY | O_CLOEXEC);
-    if (directory_fd >= 0) {
-        (void)fsync(directory_fd);
-        close(directory_fd);
     }
 }
 
@@ -255,6 +311,7 @@ static void downsample_rgb888_to_rgb565(const uint8_t *rgb_pixels, uint32_t sour
         if (y_end > source_height) {
             y_end = source_height;
         }
+        uint32_t step_y = (y_end - y_start) > 4u ? ((y_end - y_start) / 4u) : 1u;
         for (uint32_t dest_x = 0u; dest_x < LIBRARY_COVER_SIZE_PX; dest_x++) {
             uint32_t x_start = (dest_x * source_width) / LIBRARY_COVER_SIZE_PX;
             uint32_t x_end = ((dest_x + 1u) * source_width) / LIBRARY_COVER_SIZE_PX;
@@ -264,14 +321,15 @@ static void downsample_rgb888_to_rgb565(const uint8_t *rgb_pixels, uint32_t sour
             if (x_end > source_width) {
                 x_end = source_width;
             }
+            uint32_t step_x = (x_end - x_start) > 4u ? ((x_end - x_start) / 4u) : 1u;
 
             uint32_t sum_red = 0u;
             uint32_t sum_green = 0u;
             uint32_t sum_blue = 0u;
             uint32_t sample_count = 0u;
-            for (uint32_t sample_y = y_start; sample_y < y_end; sample_y++) {
+            for (uint32_t sample_y = y_start; sample_y < y_end; sample_y += step_y) {
                 const uint8_t *row_ptr = rgb_pixels + ((size_t)sample_y * source_width) * 3u;
-                for (uint32_t sample_x = x_start; sample_x < x_end; sample_x++) {
+                for (uint32_t sample_x = x_start; sample_x < x_end; sample_x += step_x) {
                     const uint8_t *pixel = row_ptr + (size_t)sample_x * 3u;
                     sum_red += pixel[0];
                     sum_green += pixel[1];
@@ -373,11 +431,12 @@ bool library_cover_cache_step(struct library_cover_cache *cache, bool allow_heav
     /* Fast path: fulfill any queued disk .rgb565 cache hit first */
     for (uint32_t index = 0u; index < cache->pending_count; index++) {
         uint64_t album_id = cache->pending[index].album_id;
-        if (try_load_rgb565_from_disk(cache, album_id)) {
+        if (try_load_rgb565_from_disk(cache, album_id) != NULL) {
             for (uint32_t shift = index; shift + 1u < cache->pending_count; shift++) {
                 cache->pending[shift] = cache->pending[shift + 1u];
             }
             cache->pending_count--;
+            cache->window_disk_hits++;
             return true;
         }
     }
@@ -392,8 +451,131 @@ bool library_cover_cache_step(struct library_cover_cache *cache, bool allow_heav
     }
     cache->pending_count--;
 
-    if (!decode_request_to_cache(cache, &request)) {
+    if (decode_request_to_cache(cache, &request)) {
+        cache->window_decodes++;
+    } else {
         mark_album_failed(cache, request.album_id);
     }
     return true;
+}
+
+void library_cover_cache_begin_boot_precache(struct library_cover_cache *cache,
+                                             const struct library_catalog *catalog) {
+    if (cache == NULL) {
+        return;
+    }
+    cache->precache_active = false;
+    cache->precache_cursor = 0u;
+    cache->precache_total = 0u;
+    cache->precache_done = 0u;
+    cache->precache_decoded = 0u;
+    cache->precache_disk_hits = 0u;
+    cache->precache_ram_preloaded = 0u;
+    cache->precache_failed = 0u;
+    cache->precache_max_decode_ms = 0u;
+    if (catalog == NULL || catalog->album_count == 0u || cache->covers_directory[0] == '\0') {
+        return;
+    }
+    for (uint32_t index = 0u; index < catalog->album_count; index++) {
+        if (catalog->albums[index].cover_source_kind != LIBRARY_COVER_NONE) {
+            cache->precache_total++;
+        }
+    }
+    cache->precache_active = (cache->precache_total > 0u);
+}
+
+bool library_cover_cache_is_boot_precaching(const struct library_cover_cache *cache) {
+    return cache != NULL && cache->precache_active;
+}
+
+bool library_cover_cache_step_boot_precache(struct library_cover_cache *cache,
+                                            const struct library_catalog *catalog,
+                                            uint64_t (*monotonic_ns)(void *context),
+                                            void *clock_context, uint64_t budget_ns) {
+    if (cache == NULL || !cache->precache_active || catalog == NULL) {
+        return false;
+    }
+    uint64_t start_ns = (monotonic_ns != NULL) ? monotonic_ns(clock_context) : 0ull;
+    bool did_work = false;
+
+    while (cache->precache_cursor < catalog->album_count) {
+        const struct library_album *album = &catalog->albums[cache->precache_cursor];
+        cache->precache_cursor++;
+        if (album->cover_source_kind == LIBRARY_COVER_NONE) {
+            continue;
+        }
+        did_work = true;
+        if (has_rgb565_on_disk(cache, album->album_id)) {
+            cache->precache_disk_hits++;
+            cache->precache_done++;
+            if (cache->precache_ram_preloaded < LIBRARY_COVER_BOOT_RAM_PRELOAD_LIMIT &&
+                !has_slot_in_ram(cache, album->album_id)) {
+                if (try_load_rgb565_from_disk(cache, album->album_id) != NULL) {
+                    cache->precache_ram_preloaded++;
+                }
+            }
+            if (monotonic_ns != NULL && budget_ns > 0ull &&
+                (monotonic_ns(clock_context) - start_ns) >= budget_ns) {
+                break;
+            }
+            continue;
+        }
+
+        struct library_cover_request request;
+        memset(&request, 0, sizeof(request));
+        request.album_id = album->album_id;
+        request.cover_source_kind = album->cover_source_kind;
+        copy_path_bounded(request.source_path, sizeof(request.source_path),
+                          library_catalog_get_string(catalog, album->cover_path_offset));
+        request.data_offset = album->cover_data_offset;
+        request.data_length = album->cover_data_length;
+
+        uint64_t decode_start_ns = (monotonic_ns != NULL) ? monotonic_ns(clock_context) : 0ull;
+        bool decoded_ok = decode_request_to_cache(cache, &request);
+        if (monotonic_ns != NULL) {
+            uint64_t elapsed_ns = monotonic_ns(clock_context) - decode_start_ns;
+            uint32_t elapsed_ms = (uint32_t)(elapsed_ns / 1000000ull);
+            if (elapsed_ms > cache->precache_max_decode_ms) {
+                cache->precache_max_decode_ms = elapsed_ms;
+            }
+        }
+        if (decoded_ok) {
+            cache->precache_decoded++;
+        } else {
+            cache->precache_failed++;
+            mark_album_failed(cache, album->album_id);
+        }
+        cache->precache_done++;
+        /* Yield after 1 heavy JPEG/PNG decode so Boot Act 02 stays animated. */
+        break;
+    }
+
+    if (cache->precache_cursor >= catalog->album_count) {
+        cache->precache_active = false;
+    }
+    return did_work;
+}
+
+void library_cover_cache_take_window_metrics(struct library_cover_cache *cache,
+                                           uint32_t *ram_hits_out, uint32_t *disk_hits_out,
+                                           uint32_t *decodes_out, uint32_t *max_op_ms_out) {
+    if (cache == NULL) {
+        return;
+    }
+    if (ram_hits_out != NULL) {
+        *ram_hits_out = cache->window_ram_hits;
+    }
+    if (disk_hits_out != NULL) {
+        *disk_hits_out = cache->window_disk_hits;
+    }
+    if (decodes_out != NULL) {
+        *decodes_out = cache->window_decodes;
+    }
+    if (max_op_ms_out != NULL) {
+        *max_op_ms_out = cache->window_max_op_ms;
+    }
+    cache->window_ram_hits = 0u;
+    cache->window_disk_hits = 0u;
+    cache->window_decodes = 0u;
+    cache->window_max_op_ms = 0u;
 }
