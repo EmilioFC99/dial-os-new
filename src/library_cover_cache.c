@@ -334,10 +334,11 @@ static void save_rgb565_to_disk_atomic(const struct library_cover_cache *cache, 
 }
 
 static void downsample_rgb888_to_rgb565(const uint8_t *rgb_pixels, uint32_t source_width,
-                                        uint32_t source_height, uint16_t *dest_pixels) {
-    for (uint32_t dest_y = 0u; dest_y < LIBRARY_COVER_SIZE_PX; dest_y++) {
-        uint32_t y_start = (dest_y * source_height) / LIBRARY_COVER_SIZE_PX;
-        uint32_t y_end = ((dest_y + 1u) * source_height) / LIBRARY_COVER_SIZE_PX;
+                                        uint32_t source_height, uint32_t target_size,
+                                        uint16_t *dest_pixels) {
+    for (uint32_t dest_y = 0u; dest_y < target_size; dest_y++) {
+        uint32_t y_start = (dest_y * source_height) / target_size;
+        uint32_t y_end = ((dest_y + 1u) * source_height) / target_size;
         if (y_end <= y_start) {
             y_end = y_start + 1u;
         }
@@ -345,9 +346,9 @@ static void downsample_rgb888_to_rgb565(const uint8_t *rgb_pixels, uint32_t sour
             y_end = source_height;
         }
         uint32_t step_y = (y_end - y_start) > 4u ? ((y_end - y_start) / 4u) : 1u;
-        for (uint32_t dest_x = 0u; dest_x < LIBRARY_COVER_SIZE_PX; dest_x++) {
-            uint32_t x_start = (dest_x * source_width) / LIBRARY_COVER_SIZE_PX;
-            uint32_t x_end = ((dest_x + 1u) * source_width) / LIBRARY_COVER_SIZE_PX;
+        for (uint32_t dest_x = 0u; dest_x < target_size; dest_x++) {
+            uint32_t x_start = (dest_x * source_width) / target_size;
+            uint32_t x_end = ((dest_x + 1u) * source_width) / target_size;
             if (x_end <= x_start) {
                 x_end = x_start + 1u;
             }
@@ -375,7 +376,7 @@ static void downsample_rgb888_to_rgb565(const uint8_t *rgb_pixels, uint32_t sour
             uint32_t blue8 = sum_blue / sample_count;
             uint16_t rgb565 = (uint16_t)(((red8 >> 3u) << 11u) | ((green8 >> 2u) << 5u) |
                                          (blue8 >> 3u));
-            dest_pixels[dest_y * LIBRARY_COVER_SIZE_PX + dest_x] = rgb565;
+            dest_pixels[dest_y * target_size + dest_x] = rgb565;
         }
     }
 }
@@ -386,11 +387,15 @@ static void record_cover_failure(struct library_cover_cache *cache,
     copy_path_bounded(cache->last_fail_path, sizeof(cache->last_fail_path), source_path);
 }
 
-static bool decode_request_to_pixels(const struct library_cover_request *request,
-                                     uint16_t *pixels_out,
-                                     enum library_cover_fail_reason *fail_reason_out) {
+static bool decode_request_to_pixels_sized(const struct library_cover_request *request,
+                                           uint32_t target_size, uint16_t *pixels_out,
+                                           enum library_cover_fail_reason *fail_reason_out) {
+    if (target_size == 0u || pixels_out == NULL) {
+        *fail_reason_out = LIBRARY_COVER_FAIL_DECODE;
+        return false;
+    }
     if (jpeg_fast_thumb_decode_file(request->source_path, request->data_offset,
-                                    request->data_length, pixels_out, LIBRARY_COVER_SIZE_PX)) {
+                                    request->data_length, pixels_out, target_size)) {
         return true;
     }
 
@@ -464,9 +469,34 @@ static bool decode_request_to_pixels(const struct library_cover_request *request
     }
 
     downsample_rgb888_to_rgb565(decoded, (uint32_t)decoded_width, (uint32_t)decoded_height,
-                                pixels_out);
+                                target_size, pixels_out);
     stbi_image_free(decoded);
     return true;
+}
+
+static bool decode_request_to_pixels(const struct library_cover_request *request,
+                                     uint16_t *pixels_out,
+                                     enum library_cover_fail_reason *fail_reason_out) {
+    return decode_request_to_pixels_sized(request, LIBRARY_COVER_SIZE_PX, pixels_out,
+                                          fail_reason_out);
+}
+
+bool library_cover_decode_job_to_rgb565(const struct library_db_cover_job *job,
+                                        uint32_t target_size, uint16_t *pixels_out) {
+    if (job == NULL || pixels_out == NULL || target_size == 0u ||
+        job->cover_source_kind == LIBRARY_COVER_NONE || job->source_path[0] == '\0') {
+        return false;
+    }
+    struct library_cover_request request;
+    memset(&request, 0, sizeof(request));
+    request.album_row_id = job->album_id;
+    request.album_id = job->album_uid;
+    request.cover_source_kind = job->cover_source_kind;
+    copy_path_bounded(request.source_path, sizeof(request.source_path), job->source_path);
+    request.data_offset = job->data_offset;
+    request.data_length = job->data_length;
+    enum library_cover_fail_reason reason = LIBRARY_COVER_FAIL_NONE;
+    return decode_request_to_pixels_sized(&request, target_size, pixels_out, &reason);
 }
 
 static bool decode_request_to_cache(struct library_cover_cache *cache,

@@ -132,5 +132,7 @@ bool library_cover_cache_step_boot_precache_db(struct library_cover_cache *cache
 void library_cover_cache_take_window_metrics(struct library_cover_cache *cache,
                                            uint32_t *ram_hits_out, uint32_t *disk_hits_out,
                                            uint32_t *decodes_out, uint32_t *max_op_ms_out);
+bool library_cover_decode_job_to_rgb565(const struct library_db_cover_job *job,
+                                        uint32_t target_size, uint16_t *pixels_out);
 
 #endif

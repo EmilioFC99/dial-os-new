@@ -14,6 +14,7 @@ int main(void) {
     run_library_cover_cache_tests();
     run_library_controller_tests();
     run_playback_engine_tests();
+    run_now_playing_media_tests();
     run_render_tests();
     run_app_tests();
 
