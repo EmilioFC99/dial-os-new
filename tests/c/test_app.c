@@ -190,6 +190,7 @@ static bool fake_log_append(void *context, const char *text, size_t length, bool
 static void init_fake_platform(struct fake_platform_context *fake,
                                struct platform_operations *operations) {
     memset(fake, 0, sizeof(*fake));
+    memset(operations, 0, sizeof(*operations));
     fake->now_ns = 1000000000ull;
     fake->hardware.battery_valid = true;
     fake->hardware.battery_percent = 85u;
