@@ -93,7 +93,7 @@ static void test_parse_aa22_a607_other_and_invalid(void) {
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a607000C0008", 12u, &message));
     TEST_ASSERT_EQ_I32(IPC_INBOUND_INPUT_MODE_READY, message.kind);
 
-    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a1030010000003E8", 16u, &message));
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a999000C0000", 12u, &message));
     TEST_ASSERT_EQ_I32(IPC_INBOUND_OTHER, message.kind);
 
     /* Truncated / invalid header / declared length mismatch */
@@ -130,6 +130,21 @@ static void test_format_outbound_commands(void) {
     TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_disable_idle_poweroff(tiny_buffer, sizeof(tiny_buffer)));
     TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_set_volume(10u, tiny_buffer, sizeof(tiny_buffer)));
     TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_set_volume(10u, NULL, 16u));
+
+    /* 0201 Play/Pause toggle + 0100 M3U playback launch */
+    written = protocol_format_play_pause_toggle(command_buffer, sizeof(command_buffer));
+    TEST_ASSERT_EQ_U32(12u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0201000C0000", command_buffer);
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_pause_toggle(tiny_buffer, sizeof(tiny_buffer)));
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_pause_toggle(NULL, 16u));
+
+    char m3u_command[128];
+    written = protocol_format_play_m3u("/tmp/dialos_play_1.m3u", m3u_command, sizeof(m3u_command));
+    TEST_ASSERT_EQ_U32(39u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0100002700000004//tmp/dialos_play_1.m3u", m3u_command);
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_m3u(NULL, m3u_command, sizeof(m3u_command)));
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_m3u("", m3u_command, sizeof(m3u_command)));
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_m3u("/tmp/dialos_play_1.m3u", m3u_command, 39u));
 }
 
 static void test_decode_input_events(void) {
@@ -169,6 +184,174 @@ static void test_decode_input_events(void) {
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_NONE, protocol_decode_input_event(NULL));
 }
 
+static void test_parse_playback_volume_and_usb_events(void) {
+    struct inbound_ipc_message message;
+
+    /* Real V2.57 a202 compact 8-byte header with double-escaped song JSON */
+    const char *track_frame =
+        "a2020105{\"song\":\"{\\\"song_name\\\":\\\"Midnight \\\\\\\"City\\\\\\\"\\\","
+        "\\\"song_duration_time\\\":243000,\\\"song_artist_name\\\":\\\"M83\\\"}\","
+        "\"state\":2,\"playerflag\":4}";
+    /* Recompute exact 4-hex length so test fixture is valid */
+    char formatted_track_frame[512];
+    const char *track_json =
+        "{\"song\":\"{\\\"song_name\\\":\\\"Midnight \\\\\\\"City\\\\\\\"\\\","
+        "\\\"song_duration_time\\\":243000,\\\"song_artist_name\\\":\\\"M83\\\"}\","
+        "\"state\":2,\"playerflag\":4}";
+    size_t track_total_length = 8u + strlen(track_json);
+    snprintf(formatted_track_frame, sizeof(formatted_track_frame), "a202%04X%s",
+             (unsigned)track_total_length, track_json);
+    (void)track_frame;
+
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc(formatted_track_frame, track_total_length, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_TRUE(message.playback_status.has_state);
+    TEST_ASSERT_EQ_I32(IPC_PLAYBACK_PLAYING, message.playback_status.state);
+    TEST_ASSERT_TRUE(message.playback_status.has_track_metadata);
+    TEST_ASSERT_EQ_STR("Midnight \"City\"", message.playback_status.track_title);
+    TEST_ASSERT_EQ_U32(243000u, message.playback_status.duration_ms);
+
+    /* Minimal playing and paused state-only a202 frames */
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a2020013{\"state\":0}", 19u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_TRUE(message.playback_status.has_state);
+    TEST_ASSERT_EQ_I32(IPC_PLAYBACK_PLAYING, message.playback_status.state);
+    TEST_ASSERT_FALSE(message.playback_status.has_track_metadata);
+
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a2020013{\"state\":1}", 19u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_EQ_I32(IPC_PLAYBACK_PAUSED, message.playback_status.state);
+
+    /* Oversized title truncation and malformed a202 */
+    char long_title_json[320];
+    char long_title_frame[340];
+    memset(long_title_json, 'A', 160u);
+    long_title_json[160] = '\0';
+    snprintf(long_title_frame, sizeof(long_title_frame),
+             "a202%04X{\"song\":\"{\\\"song_name\\\":\\\"%s\\\",\\\"song_duration_time\\\":1000}\",\"state\":0}",
+             (unsigned)(8u + 58u + 160u), long_title_json);
+    /* Build cleanly with snprintf for exact length */
+    char inner_json[256];
+    snprintf(inner_json, sizeof(inner_json),
+             "{\"song\":\"{\\\"song_name\\\":\\\"%s\\\",\\\"song_duration_time\\\":1000}\",\"state\":0}",
+             long_title_json);
+    size_t inner_len = strlen(inner_json);
+    snprintf(long_title_frame, sizeof(long_title_frame), "a202%04X%s",
+             (unsigned)(8u + inner_len), inner_json);
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc(long_title_frame, 8u + inner_len, &message));
+    TEST_ASSERT_TRUE(message.playback_status.has_track_metadata);
+    TEST_ASSERT_EQ_U32((uint32_t)(TRACK_TITLE_CAPACITY - 1u),
+                       (uint32_t)strlen(message.playback_status.track_title));
+
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a2020010not_json", 16u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_FALSE(message.playback_status.has_state);
+
+    /* Golden V2.57 a202 track frame from M0 trace (line 37) with double-escaped song_file_path */
+    const char *golden_a202 =
+        "a20202A7{\"song\":\"{\\\"id\\\":700000001,\\\"pos_id\\\":1,"
+        "\\\"song_name\\\":\\\"Shakti Sound\\\",\\\"song_duration_time\\\":154000,"
+        "\\\"song_file_path\\\":\\\"\\\\\\/tmp\\\\\\/sdcard\\\\\\/A Hundred Drums\\\\\\/"
+        "A Hundred Drums\\\\\\/01 - Shakti Sound.flac\\\",\\\"song_sample_rate\\\":44100,"
+        "\\\"song_encoding_rate\\\":16,\\\"song_bit_rate\\\":1411,"
+        "\\\"song_artist_name\\\":\\\"A Hundred Drums\\\",\\\"song_album_name\\\":\\\"A Hundred Drums\\\","
+        "\\\"song_style_name\\\":\\\"\\xC3\\x89lectronique, Danc\\\",\\\"song_track\\\":1,"
+        "\\\"song_channel\\\":2,\\\"is_sacd\\\":false,\\\"is_cue\\\":false,"
+        "\\\"is_dsd\\\":false,\\\"is_m3u\\\":true,"
+        "\\\"m3u_file_path\\\":\\\"\\\\\\/\\\\\\/tmp\\\\\\/dialos_play_1.m3u\\\\\\/01 - Shakti Sound.flac\\\"}\","
+        "\"love\":true,\"playerflag\":4,\"state\":2,\"playing_num\":\"1/1\",\"work_mode\":\"LOCAL\"}";
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc(golden_a202, strlen(golden_a202), &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_TRUE(message.playback_status.has_track_metadata);
+    TEST_ASSERT_EQ_STR("Shakti Sound", message.playback_status.track_title);
+    TEST_ASSERT_EQ_U32(154000u, message.playback_status.duration_ms);
+    TEST_ASSERT_TRUE(message.playback_status.has_track_path);
+    TEST_ASSERT_EQ_STR("/tmp/sdcard/A Hundred Drums/A Hundred Drums/01 - Shakti Sound.flac",
+                       message.playback_status.track_path);
+
+    /* a103 elapsed ms (compact 8-byte header + 8 hex digits = 16 bytes) */
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a103001000004A38", 16u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_ELAPSED, message.kind);
+    TEST_ASSERT_EQ_U32(19000u, message.elapsed_ms);
+    TEST_ASSERT_FALSE(protocol_parse_inbound_ipc("a10300100000ZZZZ", 16u, &message));
+
+    /* a102 stop, a714/a715 volume, aa1f USB cable, aa1d/aa1e battery */
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a102000C0000", 12u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STOP, message.kind);
+
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a714000C004A", 12u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_VOLUME_UPDATE, message.kind);
+    TEST_ASSERT_EQ_U32(74u, message.volume_level);
+
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a715000C00FF", 12u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_VOLUME_UPDATE, message.kind);
+    TEST_ASSERT_EQ_U32(VOLUME_HARD_MAX, message.volume_level);
+
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("aa1f000C0001", 12u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_USB_CABLE_EVENT, message.kind);
+    TEST_ASSERT_TRUE(message.usb_connected);
+
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("aa1f000C0000", 12u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_USB_CABLE_EVENT, message.kind);
+    TEST_ASSERT_FALSE(message.usb_connected);
+
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("aa1d000C0005", 12u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_BATTERY_EVENT, message.kind);
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("aa1e000C0001", 12u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_BATTERY_EVENT, message.kind);
+}
+
+static void test_decode_touch_events(void) {
+    struct touch_event_decoder decoder;
+    struct touch_event touch;
+    protocol_touch_decoder_initialize(&decoder);
+
+    struct kernel_input_event events[5] = {
+        {1u, 20000u, INPUT_EVENT_TYPE_ABS, ABS_CODE_MT_TRACKING_ID, 0},
+        {1u, 20000u, INPUT_EVENT_TYPE_ABS, ABS_CODE_MT_POSITION_X, 100},
+        {1u, 20000u, INPUT_EVENT_TYPE_ABS, ABS_CODE_MT_POSITION_Y, 200},
+        {1u, 20000u, INPUT_EVENT_TYPE_KEY, KEYCODE_BTN_TOUCH, 1},
+        {1u, 20000u, INPUT_EVENT_TYPE_SYN, SYN_CODE_REPORT, 0}
+    };
+
+    for (size_t index = 0u; index < 4u; index++) {
+        TEST_ASSERT_EQ_I32(TOUCH_EVENT_NONE,
+                           protocol_touch_decoder_feed(&decoder, &events[index], &touch));
+    }
+    TEST_ASSERT_EQ_I32(TOUCH_EVENT_DOWN,
+                       protocol_touch_decoder_feed(&decoder, &events[4], &touch));
+    TEST_ASSERT_EQ_I32(259, touch.x);
+    TEST_ASSERT_EQ_I32(159, touch.y);
+    TEST_ASSERT_EQ_U64(1020ull, touch.timestamp_ms);
+
+    /* Move updates X while retaining Y */
+    struct kernel_input_event move_x = {1u, 46000u, INPUT_EVENT_TYPE_ABS, ABS_CODE_MT_POSITION_X, 120};
+    struct kernel_input_event syn = {1u, 46000u, INPUT_EVENT_TYPE_SYN, SYN_CODE_REPORT, 0};
+    TEST_ASSERT_EQ_I32(TOUCH_EVENT_NONE, protocol_touch_decoder_feed(&decoder, &move_x, &touch));
+    TEST_ASSERT_EQ_I32(TOUCH_EVENT_MOVE, protocol_touch_decoder_feed(&decoder, &syn, &touch));
+    TEST_ASSERT_EQ_I32(239, touch.x);
+    TEST_ASSERT_EQ_I32(159, touch.y);
+
+    /* Out-of-bounds raw coordinates clamp to [0..359] */
+    struct kernel_input_event clamp_x = {1u, 60000u, INPUT_EVENT_TYPE_ABS, ABS_CODE_MT_POSITION_X, 500};
+    struct kernel_input_event clamp_y = {1u, 60000u, INPUT_EVENT_TYPE_ABS, ABS_CODE_MT_POSITION_Y, -10};
+    protocol_touch_decoder_feed(&decoder, &clamp_x, &touch);
+    protocol_touch_decoder_feed(&decoder, &clamp_y, &touch);
+    TEST_ASSERT_EQ_I32(TOUCH_EVENT_MOVE, protocol_touch_decoder_feed(&decoder, &syn, &touch));
+    TEST_ASSERT_EQ_I32(0, touch.x);
+    TEST_ASSERT_EQ_I32(359, touch.y);
+
+    /* Lift via tracking ID -1 */
+    struct kernel_input_event lift = {1u, 80000u, INPUT_EVENT_TYPE_ABS, ABS_CODE_MT_TRACKING_ID, -1};
+    protocol_touch_decoder_feed(&decoder, &lift, &touch);
+    TEST_ASSERT_EQ_I32(TOUCH_EVENT_UP, protocol_touch_decoder_feed(&decoder, &syn, &touch));
+    TEST_ASSERT_EQ_I32(0, touch.x);
+    TEST_ASSERT_EQ_I32(359, touch.y);
+
+    /* Duplicate SYN_REPORT while idle emits NONE */
+    TEST_ASSERT_EQ_I32(TOUCH_EVENT_NONE, protocol_touch_decoder_feed(&decoder, &syn, &touch));
+}
+
 void run_protocol_tests(void) {
     printf("Suite: protocol\n");
     RUN_TEST(test_parse_golden_aa24_snapshot);
@@ -177,4 +360,6 @@ void run_protocol_tests(void) {
     RUN_TEST(test_parse_aa22_a607_other_and_invalid);
     RUN_TEST(test_format_outbound_commands);
     RUN_TEST(test_decode_input_events);
+    RUN_TEST(test_parse_playback_volume_and_usb_events);
+    RUN_TEST(test_decode_touch_events);
 }

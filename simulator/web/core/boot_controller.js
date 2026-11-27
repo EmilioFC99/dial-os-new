@@ -7,17 +7,19 @@ import { clamp, formatIntegerCount } from "./geometry.js";
 
 export const BOOT_TIMING = Object.freeze({
   WAKE_DURATION_SECONDS: 0.95,
-  BUFFER_MIN_DURATION_SECONDS: 1.95,
+  BUFFER_MIN_DURATION_SECONDS: 6.85,
+  BUFFER_EXIT_DURATION_SECONDS: 0.35,
   SIGNAL_LOCK_DURATION_SECONDS: 1.05,
   HANDOFF_DURATION_SECONDS: 0.55,
-  ENGINE_DELAY_TIMEOUT_SECONDS: 8.0,
-  SWEEP_HOLD_CAP_BEFORE_READY: 0.92,
+  ENGINE_DELAY_TIMEOUT_SECONDS: 12.0,
+  SWEEP_HOLD_CAP_BEFORE_READY: 0.95,
 });
 
-const SWEEP_TRACKS_BAND_START = 0.28;
-const SWEEP_INDEX_BAND_START = 0.62;
+const SWEEP_AUDIO_INIT_BAND_START = 0.20;
+const SWEEP_TRACKS_BAND_START = 0.42;
+const SWEEP_INDEX_BAND_START = 0.68;
 const SWEEP_READY_BAND_START = 0.92;
-const SWEEP_CATCHUP_RATE_PER_SECOND = 1.5;
+const SWEEP_CATCHUP_RATE_PER_SECOND = 0.65;
 
 function createEmptyCounts() {
   return {
@@ -91,7 +93,10 @@ function formatBufferStatusLabel(backendStatus, sweepProgress) {
     if (sweepProgress >= SWEEP_TRACKS_BAND_START) {
       return `SCAN // ${formatIntegerCount(backendStatus.counts.tracks)} TRACKS`;
     }
-    return "INIT // SIMULATOR";
+    if (sweepProgress >= SWEEP_AUDIO_INIT_BAND_START) {
+      return "INIT // AUDIO ENGINE";
+    }
+    return "INIT // SYSTEM";
   }
 
   if (backendStatus.phase === "indexing") {
@@ -108,7 +113,7 @@ function formatBufferStatusLabel(backendStatus, sweepProgress) {
   if (backendStatus.phase === "discovering") {
     return "SCAN // DISCOVERING";
   }
-  return "INIT // SIMULATOR";
+  return "INIT // SYSTEM";
 }
 
 function formatSummaryLine(backendStatus) {
@@ -139,6 +144,7 @@ export function createBootController() {
   let totalElapsedSeconds = 0;
   let phaseElapsedSeconds = 0;
   let bufferElapsedSeconds = 0;
+  let bufferExitElapsedSeconds = 0;
   let stallTimerSeconds = 0;
   let warningElapsedSeconds = 0;
   let sweepProgress = 0;
@@ -197,6 +203,7 @@ export function createBootController() {
       phase = "buffer";
       phaseElapsedSeconds = 0;
       bufferElapsedSeconds = 0;
+      bufferExitElapsedSeconds = 0;
       return Math.max(0, nextWakeElapsed - BOOT_TIMING.WAKE_DURATION_SECONDS);
     }
 
@@ -229,16 +236,20 @@ export function createBootController() {
       bufferElapsedSeconds >= BOOT_TIMING.BUFFER_MIN_DURATION_SECONDS &&
       sweepProgress >= 1
     ) {
-      let bufferOverflow = 0;
+      let exitDelta = remainingDelta;
       if (previousBufferElapsed < BOOT_TIMING.BUFFER_MIN_DURATION_SECONDS) {
-        bufferOverflow = bufferElapsedSeconds - BOOT_TIMING.BUFFER_MIN_DURATION_SECONDS;
-      } else if (previousSweepProgress >= 1) {
-        bufferOverflow = remainingDelta;
+        exitDelta = bufferElapsedSeconds - BOOT_TIMING.BUFFER_MIN_DURATION_SECONDS;
+      } else if (previousSweepProgress < 1) {
+        exitDelta = 0;
       }
-
-      phase = "signal-lock";
-      phaseElapsedSeconds = 0;
-      return clamp(bufferOverflow, 0, remainingDelta);
+      bufferExitElapsedSeconds += clamp(exitDelta, 0, remainingDelta);
+      if (bufferExitElapsedSeconds >= BOOT_TIMING.BUFFER_EXIT_DURATION_SECONDS) {
+        const exitOverflow = bufferExitElapsedSeconds - BOOT_TIMING.BUFFER_EXIT_DURATION_SECONDS;
+        bufferExitElapsedSeconds = BOOT_TIMING.BUFFER_EXIT_DURATION_SECONDS;
+        phase = "signal-lock";
+        phaseElapsedSeconds = 0;
+        return clamp(exitOverflow, 0, remainingDelta);
+      }
     }
 
     return 0;
@@ -394,6 +405,7 @@ export function createBootController() {
    */
   function getRenderSnapshot() {
     let actProgress = 0;
+    let bufferExitProgress = 0;
     let handoffProgress = 0;
     let statusLabel = "MEM // CHECK";
 
@@ -402,16 +414,24 @@ export function createBootController() {
       statusLabel = "MEM // CHECK";
     } else if (phase === "buffer") {
       actProgress = clamp(bufferElapsedSeconds / BOOT_TIMING.BUFFER_MIN_DURATION_SECONDS, 0, 1);
+      bufferExitProgress = clamp(
+        bufferExitElapsedSeconds / BOOT_TIMING.BUFFER_EXIT_DURATION_SECONDS,
+        0,
+        1,
+      );
       statusLabel = formatBufferStatusLabel(backendStatus, sweepProgress);
     } else if (phase === "signal-lock") {
       actProgress = clamp(phaseElapsedSeconds / BOOT_TIMING.SIGNAL_LOCK_DURATION_SECONDS, 0, 1);
+      bufferExitProgress = 1;
       statusLabel = "LOCK // SYSTEM READY";
     } else if (phase === "handoff") {
       actProgress = 1;
+      bufferExitProgress = 1;
       handoffProgress = clamp(phaseElapsedSeconds / BOOT_TIMING.HANDOFF_DURATION_SECONDS, 0, 1);
       statusLabel = "LOCK // SYSTEM READY";
     } else if (phase === "completed") {
       actProgress = 1;
+      bufferExitProgress = 1;
       handoffProgress = 1;
       statusLabel = "LOCK // SYSTEM READY";
     } else if (phase === "warning") {
@@ -424,6 +444,7 @@ export function createBootController() {
     return {
       phase,
       actProgress,
+      bufferExitProgress,
       handoffProgress,
       elapsedSeconds: totalElapsedSeconds,
       warningElapsedSeconds,

@@ -33,20 +33,21 @@ Every phase follows the same five steps before moving to the next:
 ### Phase 1 — Boot Loadscreen & Core Startup *(Done)*
 - First-principles startup sequence, `360x360` `180°` triple-buffered display initialization, animated boot loadscreen, `mq_player` `aa24` readiness handoff, idle `poweroff -f` disable (`0664=0`), physical key handling (sleep/wake, poweroff, volume), watchdog survival, and atomic crash logging.
 
-### Phase 2 — Theme & Themed Boot Screen
+### Phase 2 — Theme & Themed Boot Screen *(Done)*
 - Semantic **Dark Mode** and **Light Mode** design tokens (palette, surfaces, typography scale, spacing, motion curves), typography via rootfs `SourceHanSans-Regular.ttc` (Latin/CJK/Cyrillic), and shared 2D round-screen drawing primitives (anti-aliased arcs, circles, pills, icons, bezel clipping).
 - Upgrade the **Boot Screen** (plus warning, ready, crash, and shutdown states) onto the theme and visual system, hardware-verifying the theme immediately on the real Disc (`V2.57`).
 
-### Phase 3 — Home Menu
+### Phase 3 — Home Menu *(Done)*
 - `cst816t` round-screen touch and rim gesture layer (tuned for `~38–40 Hz` native sample rate, consistent left-edge back swipe).
 - Curved mechanical app launcher (`Now Playing`, `Library`, `Modes`, `Settings`) with circular pebbles, bezel tick marks, detented carousel motion, screen transitions, and themed placeholders for unbuilt destinations.
 
-### Phase 4 — Modes: Storage Mode
+### Phase 4 — Modes: Storage Mode *(Deferred)*
 - `Modes` entry screen from the Home Menu (structured to host future `1.x` modes, starting with Storage Mode).
 - Safe USB Mass Storage Mode (clean SD unmount/remount with zero corruption, live transfer status, and clean physical/touch exit back to Home).
 
-### Phase 5 — Library
-- Browsing and indexing large microSD music collections (`Favorites`, `Playlists`, `Artists`, `Albums` cover carousel, `Genres`, `All songs`, letter seek) with screen-bounded RAM, calm empty states, and launching playback via `mq_player` (`0100` M3U handoff).
+### Phase 5 — Library *(Done)*
+- Embedded SQLite 3 library index (`.dial-os/library.db`, no 16K track cap) with Core 1 `pthread` incremental stat-diff scanner, audio-payload move detection, and single-pass metadata/M3U reconciliation.
+- 60 FPS sliding-window browsing (`96`-row viewport + Core 1 async prefetch) across `Favorites`, `Playlists`, `Artists`, `Albums` cover carousel, `Genres`, `All songs`, and 17-slab Quick-Seek, plus 256-bucket sharded incremental cover cache (`.dial-os/covers/<xx>/<album_uid>.rgb565`) and streaming `0100` M3U playback handoff.
 
 ### Phase 6 — Now Playing
 - Full-bleed spinning album art (seamless expansion from Home/Albums), center spindle progress ring and scrub, reliable playback controls, classic playback modes (linear/sequential, shuffle, repeat all, repeat one), right-edge volume HUD, Quick Actions overlay, Track Details sheet, and synced/unsynced Lyrics.

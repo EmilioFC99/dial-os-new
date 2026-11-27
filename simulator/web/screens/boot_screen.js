@@ -34,8 +34,7 @@ const MATRIX_GRID_SIZE = 5;
 const MATRIX_CELL_SIZE_PX = 18;
 const MATRIX_CELL_GAP_PX = 5;
 const ALPHA_VISIBILITY_THRESHOLD = 0.005;
-const BUFFER_EXIT_START_PROGRESS = 0.92;
-const BUFFER_EXIT_END_PROGRESS = 0.995;
+const BUFFER_EXIT_HOLD_RATIO = 0.43;
 
 const RETRY_HIT_TOP_Y = 248;
 const RETRY_HIT_BOTTOM_Y = 306;
@@ -469,16 +468,14 @@ export function renderActBufferSweep(
   actProgress,
   elapsedSeconds,
   sweepProgress,
+  bufferExitProgress,
   statusLabel,
   palette,
 ) {
   const clampedSweep = clamp(sweepProgress, 0, 1);
   const entryScale = lerp(0.58, 1.0, easeOutExpo(normalizeRange(actProgress, 0.0, 0.14)));
-  /* Gate exit fade behind sweepProgress so slow backend holds stay fully visible past Act 02 min duration. */
-  const exitProgress = Math.min(actProgress, clampedSweep);
-  const exitFade = easeInOutCubic(
-    normalizeRange(exitProgress, BUFFER_EXIT_START_PROGRESS, BUFFER_EXIT_END_PROGRESS),
-  );
+  /* Hold 100% solid briefly before fading out so all 27 sub-cubes and 48 rim segments complete cleanly. */
+  const exitFade = easeInOutCubic(normalizeRange(bufferExitProgress, BUFFER_EXIT_HOLD_RATIO, 1.0));
   const exitAlpha = 1 - exitFade;
   const cubeScale = entryScale * lerp(1.0, 0.86, exitFade);
   const cubeAlpha = easeOutCubic(normalizeRange(actProgress, 0.0, 0.12)) * exitAlpha;
@@ -959,6 +956,7 @@ export function renderBootScreen(drawingContext, bootSnapshot, palette) {
       actProgress,
       elapsedSeconds,
       Number(bootSnapshot.sweepProgress) || 0,
+      clamp(Number(bootSnapshot.bufferExitProgress) || 0, 0, 1),
       bootSnapshot.statusLabel,
       palette,
     );

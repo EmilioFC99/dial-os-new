@@ -7,17 +7,18 @@ import { createRouter } from "../core/router.js";
 const STEP_DELTA_SECONDS = 0.05;
 const FINE_STEP_DELTA_SECONDS = 0.01;
 const NOMINAL_READY_AT_SECONDS = 0.7;
-const NOMINAL_COMPLETE_MIN_SECONDS = 4.45;
-const NOMINAL_COMPLETE_MAX_SECONDS = 4.75;
-const SLOW_HOLD_SECONDS = 3.5;
-const PRE_TIMEOUT_SECONDS = 7.5;
+const NOMINAL_COMPLETE_MIN_SECONDS = 9.65;
+const NOMINAL_COMPLETE_MAX_SECONDS = 9.95;
+const SLOW_HOLD_SECONDS = 8.2;
+const PRE_TIMEOUT_SECONDS = 11.5;
 const POST_TIMEOUT_BUFFER_MARGIN_SECONDS = 1.5;
-const MAX_SIMULATION_STEPS = 400;
+const MAX_SIMULATION_STEPS = 1200;
 const TRANSITION_STEP_SECONDS = 0.1;
 const MAX_TRANSITION_STEPS = 50;
 
-const SWEEP_TRACKS_BAND_START = 0.28;
-const SWEEP_INDEX_BAND_START = 0.62;
+const SWEEP_AUDIO_INIT_BAND_START = 0.20;
+const SWEEP_TRACKS_BAND_START = 0.42;
+const SWEEP_INDEX_BAND_START = 0.68;
 const SWEEP_READY_BAND_START = 0.92;
 
 const SAMPLE_DISCOVERED_FILES = 1461;
@@ -105,11 +106,12 @@ function collapsePhaseTransitions(phaseTrace) {
 describe("BOOT_TIMING", () => {
   test("exports canonical boot act durations and stall thresholds", () => {
     assert.equal(BOOT_TIMING.WAKE_DURATION_SECONDS, 0.95);
-    assert.equal(BOOT_TIMING.BUFFER_MIN_DURATION_SECONDS, 1.95);
+    assert.equal(BOOT_TIMING.BUFFER_MIN_DURATION_SECONDS, 6.85);
+    assert.equal(BOOT_TIMING.BUFFER_EXIT_DURATION_SECONDS, 0.35);
     assert.equal(BOOT_TIMING.SIGNAL_LOCK_DURATION_SECONDS, 1.05);
     assert.equal(BOOT_TIMING.HANDOFF_DURATION_SECONDS, 0.55);
-    assert.equal(BOOT_TIMING.ENGINE_DELAY_TIMEOUT_SECONDS, 8.0);
-    assert.equal(BOOT_TIMING.SWEEP_HOLD_CAP_BEFORE_READY, 0.92);
+    assert.equal(BOOT_TIMING.ENGINE_DELAY_TIMEOUT_SECONDS, 12.0);
+    assert.equal(BOOT_TIMING.SWEEP_HOLD_CAP_BEFORE_READY, 0.95);
   });
 });
 
@@ -130,6 +132,7 @@ describe("createBootController", () => {
     const expectedFields = [
       "phase",
       "actProgress",
+      "bufferExitProgress",
       "handoffProgress",
       "elapsedSeconds",
       "warningElapsedSeconds",
@@ -176,7 +179,7 @@ describe("createBootController", () => {
       MAX_SIMULATION_STEPS,
       (snapshot) => snapshot.phase === "buffer",
     );
-    assert.equal(idleController.getRenderSnapshot().statusLabel, "INIT // SIMULATOR");
+    assert.equal(idleController.getRenderSnapshot().statusLabel, "INIT // SYSTEM");
 
     idleController.ingestBackendStatus({
       phase: "scanning",
@@ -219,6 +222,11 @@ describe("createBootController", () => {
       }
     }
 
+    const audioInitBandSnapshots = bufferSnapshots.filter(
+      (snapshot) =>
+        snapshot.sweepProgress >= SWEEP_AUDIO_INIT_BAND_START &&
+        snapshot.sweepProgress < SWEEP_TRACKS_BAND_START,
+    );
     const tracksBandSnapshots = bufferSnapshots.filter(
       (snapshot) =>
         snapshot.sweepProgress >= SWEEP_TRACKS_BAND_START &&
@@ -233,10 +241,14 @@ describe("createBootController", () => {
       (snapshot) => snapshot.sweepProgress >= SWEEP_READY_BAND_START,
     );
 
-    assert.ok(tracksBandSnapshots.length > 0, "expected buffer samples in tracks band [0.28, 0.62)");
-    assert.ok(indexBandSnapshots.length > 0, "expected buffer samples in index band [0.62, 0.92)");
+    assert.ok(audioInitBandSnapshots.length > 0, "expected buffer samples in audio init band [0.20, 0.42)");
+    assert.ok(tracksBandSnapshots.length > 0, "expected buffer samples in tracks band [0.42, 0.68)");
+    assert.ok(indexBandSnapshots.length > 0, "expected buffer samples in index band [0.68, 0.92)");
     assert.ok(lockBandSnapshots.length > 0, "expected buffer samples in lock band [0.92, 1.0]");
 
+    for (const snapshot of audioInitBandSnapshots) {
+      assert.equal(snapshot.statusLabel, "INIT // AUDIO ENGINE");
+    }
     for (const snapshot of tracksBandSnapshots) {
       assert.equal(snapshot.statusLabel, "SCAN // 1,461 TRACKS");
     }
@@ -311,7 +323,7 @@ describe("createBootController", () => {
     }
   });
 
-  test("progresses strictly wake -> buffer -> signal-lock -> handoff -> completed near 4.50s", () => {
+  test("progresses strictly wake -> buffer -> signal-lock -> handoff -> completed near 9.75s", () => {
     const bootController = createBootController();
     const phaseTrace = [bootController.getRenderSnapshot().phase];
     let previousSweepProgress = bootController.getRenderSnapshot().sweepProgress;
@@ -352,7 +364,7 @@ describe("createBootController", () => {
     assert.equal(bootController.getRenderSnapshot().sweepProgress, 1);
   });
 
-  test("holds in buffer at <= 0.92 when backend stays slow past WAKE + BUFFER_MIN, then completes when ready", () => {
+  test("holds in buffer at <= 0.95 when backend stays slow past WAKE + BUFFER_MIN, then completes when ready", () => {
     const bootController = createBootController();
     const slowStatus = {
       phase: "scanning",
