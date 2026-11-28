@@ -262,8 +262,326 @@ static void test_bezel_volume_swipe_and_audio_started_clock_sync(void) {
     cleanup_ctrl_temp_dir(dir_path);
 }
 
+static void assert_hold_does_not_seek(struct now_playing_controller *controller, int32_t point_x,
+                                      int32_t point_y, uint64_t timestamp_ms) {
+    struct playback_engine_effects effects;
+    bool volume_changed = false;
+    enum now_playing_action_kind action = NP_ACTION_NONE;
+    struct touch_event touch_down = {TOUCH_EVENT_DOWN, point_x, point_y, timestamp_ms};
+    now_playing_controller_handle_touch(controller, &touch_down, &effects, &volume_changed,
+                                        &action);
+    for (int32_t step_index = 0; step_index < 32; step_index++) {
+        now_playing_controller_step(controller, 0.016f, &effects, &volume_changed, &action);
+    }
+    TEST_ASSERT_FALSE(controller->is_seeking);
+    struct touch_event touch_up = {TOUCH_EVENT_UP, point_x, point_y, timestamp_ms + 512ull};
+    now_playing_controller_handle_touch(controller, &touch_up, &effects, &volume_changed, &action);
+}
+
+static void test_polar_touch_zones_disjoint_and_boundaries(void) {
+    char temp_directory[128];
+    make_ctrl_temp_dir(temp_directory, sizeof(temp_directory));
+    struct library_db database;
+    TEST_ASSERT_TRUE(library_db_open(&database, temp_directory));
+
+    int64_t first_track_id = seed_ctrl_track(&database, "/m/1.flac", "Alpha", "Album A", 1u);
+    (void)seed_ctrl_track(&database, "/m/2.flac", "Beta", "Album A", 2u);
+    TEST_ASSERT_TRUE(library_db_recompute_aggregates(&database, NULL, 0u, NULL));
+
+    struct playback_engine engine;
+    playback_engine_initialize(&engine, &database);
+    struct playback_engine_effects effects;
+    struct library_db_collection all_collection = {LIBRARY_DB_COLLECTION_TRACKS_ALL, 0};
+    TEST_ASSERT_TRUE(playback_engine_launch_context(&engine, &all_collection, "All songs",
+                                                  first_track_id, false, false, &effects));
+
+    struct now_playing_controller controller;
+    now_playing_controller_initialize(&controller, &engine, &database, NULL);
+    now_playing_controller_enter(&controller, NP_RETURN_HOME, NP_OPEN_FROM_HOME, true, 0.0f, 60u);
+
+    bool volume_changed = false;
+    enum now_playing_action_kind action = NP_ACTION_NONE;
+
+    /* 1. Nominal: (270, 240) (r=108.2 <= 112) is Seek, not Volume */
+    struct touch_event seek_down = {TOUCH_EVENT_DOWN, 270, 240, 100ull};
+    now_playing_controller_handle_touch(&controller, &seek_down, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_CENTER_TAP_OR_HOLD, (uint32_t)controller.pointer_mode);
+    for (int32_t step_index = 0; step_index < 30; step_index++) {
+        now_playing_controller_step(&controller, 0.016f, &effects, &volume_changed, &action);
+    }
+    TEST_ASSERT_TRUE(controller.is_seeking);
+    struct touch_event seek_up = {TOUCH_EVENT_UP, 270, 240, 600ull};
+    now_playing_controller_handle_touch(&controller, &seek_up, &effects, &volume_changed, &action);
+    TEST_ASSERT_FALSE(controller.is_seeking);
+
+    /* 1. Nominal: (30, 180) is Back, dragging right enters NP_PTR_BACK_SWIPE */
+    struct touch_event back_down = {TOUCH_EVENT_DOWN, 30, 180, 700ull};
+    struct touch_event back_move = {TOUCH_EVENT_MOVE, 60, 180, 720ull};
+    struct touch_event back_up = {TOUCH_EVENT_UP, 35, 180, 740ull};
+    now_playing_controller_handle_touch(&controller, &back_down, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_LEFT_EDGE_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &back_move, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_BACK_SWIPE, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &back_up, &effects, &volume_changed, &action);
+    controller.back_swipe_progress = 0.0f;
+
+    /* 1. Nominal: (320, 180) is Volume */
+    struct touch_event volume_down = {TOUCH_EVENT_DOWN, 320, 180, 800ull};
+    struct touch_event volume_move = {TOUCH_EVENT_MOVE, 315, 140, 830ull};
+    struct touch_event volume_up = {TOUCH_EVENT_UP, 315, 140, 860ull};
+    now_playing_controller_handle_touch(&controller, &volume_down, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_VOLUME_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &volume_move, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_TRUE(volume_changed);
+    TEST_ASSERT_TRUE(controller.volume_hud_active);
+    now_playing_controller_handle_touch(&controller, &volume_up, &effects, &volume_changed,
+                                        &action);
+
+    /* 1. Nominal: (180, 320) is Queue, upward swipe opens queue_sheet_open */
+    struct touch_event queue_down = {TOUCH_EVENT_DOWN, 180, 320, 900ull};
+    struct touch_event queue_move = {TOUCH_EVENT_MOVE, 180, 270, 930ull};
+    struct touch_event queue_up = {TOUCH_EVENT_UP, 180, 270, 960ull};
+    now_playing_controller_handle_touch(&controller, &queue_down, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &queue_move, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &queue_up, &effects, &volume_changed, &action);
+    TEST_ASSERT_TRUE(controller.queue_sheet_open);
+    controller.queue_sheet_open = false;
+    controller.queue_sheet_progress = 0.0f;
+
+    /* 1. Nominal: (180, 30) is reserved Top Menu (does not seek on hold) */
+    struct touch_event menu_down = {TOUCH_EVENT_DOWN, 180, 30, 1000ull};
+    now_playing_controller_handle_touch(&controller, &menu_down, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_TOP_MENU_PENDING, (uint32_t)controller.pointer_mode);
+    struct touch_event menu_up = {TOUCH_EVENT_UP, 180, 30, 1020ull};
+    now_playing_controller_handle_touch(&controller, &menu_up, &effects, &volume_changed, &action);
+    controller.pending_single_tap = false;
+
+    /* 2. Boundary: Axis r=112 vs r=113 */
+    struct touch_event left_inner = {TOUCH_EVENT_DOWN, 68, 180, 1100ull};
+    struct touch_event release_reset = {TOUCH_EVENT_UP, 68, 180, 1110ull};
+    now_playing_controller_handle_touch(&controller, &left_inner, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_CENTER_TAP_OR_HOLD, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event left_outer = {TOUCH_EVENT_DOWN, 67, 180, 1120ull};
+    now_playing_controller_handle_touch(&controller, &left_outer, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_LEFT_EDGE_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event right_inner = {TOUCH_EVENT_DOWN, 292, 180, 1140ull};
+    now_playing_controller_handle_touch(&controller, &right_inner, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_CENTER_TAP_OR_HOLD, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event right_outer = {TOUCH_EVENT_DOWN, 293, 180, 1160ull};
+    now_playing_controller_handle_touch(&controller, &right_outer, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_VOLUME_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event bottom_inner = {TOUCH_EVENT_DOWN, 180, 292, 1180ull};
+    now_playing_controller_handle_touch(&controller, &bottom_inner, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_CENTER_TAP_OR_HOLD, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event bottom_outer_down = {TOUCH_EVENT_DOWN, 180, 293, 1200ull};
+    struct touch_event bottom_outer_move = {TOUCH_EVENT_MOVE, 180, 245, 1220ull};
+    struct touch_event bottom_outer_up = {TOUCH_EVENT_UP, 180, 245, 1240ull};
+    now_playing_controller_handle_touch(&controller, &bottom_outer_down, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_QUEUE_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &bottom_outer_move, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &bottom_outer_up, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_TRUE(controller.queue_sheet_open);
+    controller.queue_sheet_open = false;
+    controller.queue_sheet_progress = 0.0f;
+
+    struct touch_event top_inner = {TOUCH_EVENT_DOWN, 180, 68, 1260ull};
+    now_playing_controller_handle_touch(&controller, &top_inner, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_CENTER_TAP_OR_HOLD, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event top_outer = {TOUCH_EVENT_DOWN, 180, 67, 1280ull};
+    now_playing_controller_handle_touch(&controller, &top_outer, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_TOP_MENU_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    /* 2. Boundary: Diagonal 45-degree seams at r > 112 */
+    struct touch_event seam_bl_left = {TOUCH_EVENT_DOWN, 80, 280, 1300ull};
+    now_playing_controller_handle_touch(&controller, &seam_bl_left, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_LEFT_EDGE_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event seam_bl_queue = {TOUCH_EVENT_DOWN, 81, 280, 1320ull};
+    now_playing_controller_handle_touch(&controller, &seam_bl_queue, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_QUEUE_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event seam_br_vol = {TOUCH_EVENT_DOWN, 280, 280, 1340ull};
+    now_playing_controller_handle_touch(&controller, &seam_br_vol, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_VOLUME_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event seam_br_queue = {TOUCH_EVENT_DOWN, 279, 280, 1360ull};
+    now_playing_controller_handle_touch(&controller, &seam_br_queue, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_QUEUE_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event seam_tl_left = {TOUCH_EVENT_DOWN, 80, 80, 1380ull};
+    now_playing_controller_handle_touch(&controller, &seam_tl_left, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_LEFT_EDGE_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event seam_tl_menu = {TOUCH_EVENT_DOWN, 81, 80, 1400ull};
+    now_playing_controller_handle_touch(&controller, &seam_tl_menu, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_TOP_MENU_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event seam_tr_vol = {TOUCH_EVENT_DOWN, 280, 80, 1420ull};
+    now_playing_controller_handle_touch(&controller, &seam_tr_vol, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_VOLUME_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    struct touch_event seam_tr_menu = {TOUCH_EVENT_DOWN, 279, 80, 1440ull};
+    now_playing_controller_handle_touch(&controller, &seam_tr_menu, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_EQ_U32((uint32_t)NP_PTR_TOP_MENU_PENDING, (uint32_t)controller.pointer_mode);
+    now_playing_controller_handle_touch(&controller, &release_reset, &effects, &volume_changed,
+                                        &action);
+    controller.pending_single_tap = false;
+
+    /* 2. Boundary: Zero overlap between Seek (r<=112) and Queue */
+    struct touch_event inner_swipe_down = {TOUCH_EVENT_DOWN, 180, 260, 1500ull};
+    struct touch_event inner_swipe_move = {TOUCH_EVENT_MOVE, 180, 210, 1530ull};
+    struct touch_event inner_swipe_up = {TOUCH_EVENT_UP, 180, 210, 1560ull};
+    now_playing_controller_handle_touch(&controller, &inner_swipe_down, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &inner_swipe_move, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &inner_swipe_up, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_FALSE(controller.queue_sheet_open);
+
+    /* 3. Fallback / Negative: Holding 0.50s in outer zones never activates Seek */
+    assert_hold_does_not_seek(&controller, 30, 180, 1600ull);
+    controller.pending_single_tap = false;
+    assert_hold_does_not_seek(&controller, 330, 180, 2200ull);
+    controller.pending_single_tap = false;
+    assert_hold_does_not_seek(&controller, 180, 320, 2800ull);
+    controller.pending_single_tap = false;
+    assert_hold_does_not_seek(&controller, 180, 30, 3400ull);
+    controller.pending_single_tap = false;
+
+    /* 3. Fallback: Single tap in Queue (180, 320) and Top Menu (180, 30) opens Quick Actions */
+    struct touch_event queue_tap_down = {TOUCH_EVENT_DOWN, 180, 320, 4000ull};
+    struct touch_event queue_tap_up = {TOUCH_EVENT_UP, 180, 320, 4020ull};
+    now_playing_controller_handle_touch(&controller, &queue_tap_down, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &queue_tap_up, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_TRUE(controller.pending_single_tap);
+    for (int32_t step_index = 0; step_index < 20; step_index++) {
+        now_playing_controller_step(&controller, 0.016f, &effects, &volume_changed, &action);
+    }
+    TEST_ASSERT_TRUE(controller.quick_actions_open);
+
+    /* 3. Fallback: Over Quick Actions, swipe up from r<=112 (180,260)->(180,210) does NOT open Queue */
+    struct touch_event qa_inner_down = {TOUCH_EVENT_DOWN, 180, 260, 4400ull};
+    struct touch_event qa_inner_move = {TOUCH_EVENT_MOVE, 180, 210, 4430ull};
+    struct touch_event qa_inner_up = {TOUCH_EVENT_UP, 180, 210, 4460ull};
+    now_playing_controller_handle_touch(&controller, &qa_inner_down, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &qa_inner_move, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &qa_inner_up, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_FALSE(controller.queue_sheet_open);
+
+    /* Over Quick Actions, swipe up from Queue arc (180,320)->(180,265) opens Queue */
+    struct touch_event qa_queue_down = {TOUCH_EVENT_DOWN, 180, 320, 4500ull};
+    struct touch_event qa_queue_move = {TOUCH_EVENT_MOVE, 180, 265, 4530ull};
+    struct touch_event qa_queue_up = {TOUCH_EVENT_UP, 180, 265, 4560ull};
+    now_playing_controller_handle_touch(&controller, &qa_queue_down, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &qa_queue_move, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &qa_queue_up, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_TRUE(controller.queue_sheet_open);
+    controller.queue_sheet_open = false;
+    controller.quick_actions_open = false;
+
+    /* Single tap in Top Menu (180, 30) opens Quick Actions */
+    struct touch_event menu_tap_down = {TOUCH_EVENT_DOWN, 180, 30, 4700ull};
+    struct touch_event menu_tap_up = {TOUCH_EVENT_UP, 180, 30, 4720ull};
+    now_playing_controller_handle_touch(&controller, &menu_tap_down, &effects, &volume_changed,
+                                        &action);
+    now_playing_controller_handle_touch(&controller, &menu_tap_up, &effects, &volume_changed,
+                                        &action);
+    TEST_ASSERT_TRUE(controller.pending_single_tap);
+    for (int32_t step_index = 0; step_index < 20; step_index++) {
+        now_playing_controller_step(&controller, 0.016f, &effects, &volume_changed, &action);
+    }
+    TEST_ASSERT_TRUE(controller.quick_actions_open);
+
+    library_db_close(&database);
+    cleanup_ctrl_temp_dir(temp_directory);
+}
+
 void run_now_playing_controller_tests(void) {
     printf("Suite: now_playing_controller\n");
     RUN_TEST(test_tap_seek_volume_and_6_level_back_stack);
     RUN_TEST(test_bezel_volume_swipe_and_audio_started_clock_sync);
+    RUN_TEST(test_polar_touch_zones_disjoint_and_boundaries);
 }

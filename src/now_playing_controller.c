@@ -62,6 +62,38 @@ static void clear_outputs(struct playback_engine_effects *effects_out, bool *vol
     }
 }
 
+enum now_playing_touch_zone {
+    NP_ZONE_SEEK = 0,
+    NP_ZONE_BACK = 1,
+    NP_ZONE_VOLUME = 2,
+    NP_ZONE_QUEUE = 3,
+    NP_ZONE_TOP_MENU = 4
+};
+
+static enum now_playing_touch_zone classify_now_playing_touch_zone(int32_t point_x,
+                                                                   int32_t point_y) {
+    int32_t delta_x = point_x - SCREEN_CENTER_X;
+    int32_t delta_y = point_y - SCREEN_CENTER_Y;
+    int64_t distance_squared =
+        (int64_t)delta_x * (int64_t)delta_x + (int64_t)delta_y * (int64_t)delta_y;
+    int64_t inner_radius_squared =
+        (int64_t)NP_SEEK_CENTER_RADIUS_PX * (int64_t)NP_SEEK_CENTER_RADIUS_PX;
+    if (distance_squared <= inner_radius_squared) {
+        return NP_ZONE_SEEK;
+    }
+    int32_t abs_delta_y = delta_y < 0 ? -delta_y : delta_y;
+    if (delta_x <= -abs_delta_y) {
+        return NP_ZONE_BACK;
+    }
+    if (delta_x >= abs_delta_y) {
+        return NP_ZONE_VOLUME;
+    }
+    if (delta_y > 0) {
+        return NP_ZONE_QUEUE;
+    }
+    return NP_ZONE_TOP_MENU;
+}
+
 static void refill_queue_window(struct now_playing_controller *controller, uint32_t center_slot) {
     if (controller->database == NULL || controller->engine == NULL ||
         controller->engine->queue_total == 0u) {
@@ -702,7 +734,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
         controller->pointer_max_drift_px = 0.0f;
 
         if (!has_track) {
-            if ((float)event->x <= LEFT_EDGE_SWIPE_ZONE_PX) {
+            if (classify_now_playing_touch_zone(event->x, event->y) == NP_ZONE_BACK) {
                 controller->pointer_mode = NP_PTR_LEFT_EDGE_PENDING;
             } else if (event->x >= 96 && event->x <= 264 && event->y >= 246 && event->y <= 288) {
                 controller->pointer_mode = NP_PTR_IDLE_CTA;
@@ -720,7 +752,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             return;
         }
         if (controller->details_sheet_open) {
-            if ((float)event->x <= LEFT_EDGE_SWIPE_ZONE_PX) {
+            if (classify_now_playing_touch_zone(event->x, event->y) == NP_ZONE_BACK) {
                 controller->pointer_mode = NP_PTR_LEFT_EDGE_PENDING;
             } else if (event->x >= NP_DETAILS_LYRICS_BADGE_HIT_LEFT &&
                        event->x <= NP_DETAILS_LYRICS_BADGE_HIT_RIGHT &&
@@ -751,25 +783,30 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             return;
         }
 
-        /* Bare vinyl or Lyrics */
-        if ((float)event->x <= LEFT_EDGE_SWIPE_ZONE_PX) {
-            controller->pointer_mode = NP_PTR_LEFT_EDGE_PENDING;
-            return;
+        /* Bare vinyl or Lyrics: strictly disjoint polar ring + center Seek */
+        switch (classify_now_playing_touch_zone(event->x, event->y)) {
+            case NP_ZONE_BACK:
+                controller->pointer_mode = NP_PTR_LEFT_EDGE_PENDING;
+                break;
+            case NP_ZONE_VOLUME:
+                controller->pointer_mode = NP_PTR_VOLUME_PENDING;
+                controller->pointer_last_angle = atan2f((float)(event->y - SCREEN_CENTER_Y),
+                                                        (float)(event->x - SCREEN_CENTER_X));
+                controller->pointer_volume_accum = (float)controller->volume_level;
+                break;
+            case NP_ZONE_QUEUE:
+                controller->pointer_mode = NP_PTR_QUEUE_PENDING;
+                break;
+            case NP_ZONE_TOP_MENU:
+                controller->pointer_mode = NP_PTR_TOP_MENU_PENDING;
+                break;
+            case NP_ZONE_SEEK:
+            default:
+                controller->pointer_mode = NP_PTR_CENTER_TAP_OR_HOLD;
+                controller->seek_hold_seconds = 0.0f;
+                controller->seek_charge_progress = 0.0f;
+                break;
         }
-        float dx = (float)event->x - 180.0f;
-        float dy = (float)event->y - 180.0f;
-        float radius = sqrtf(dx * dx + dy * dy);
-        float angle = atan2f(dy, dx);
-        if (radius >= NP_VOLUME_BEZEL_MIN_RADIUS_PX &&
-            fabsf(angle) <= NP_VOLUME_BEZEL_MAX_ANGLE_RADIANS) {
-            controller->pointer_mode = NP_PTR_VOLUME_PENDING;
-            controller->pointer_last_angle = angle;
-            controller->pointer_volume_accum = (float)controller->volume_level;
-            return;
-        }
-        controller->pointer_mode = NP_PTR_CENTER_TAP_OR_HOLD;
-        controller->seek_hold_seconds = 0.0f;
-        controller->seek_charge_progress = 0.0f;
         return;
     }
 
@@ -820,15 +857,15 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
 
             case NP_PTR_VOLUME_BEZEL: {
                 float angle = atan2f((float)event->y - 180.0f, (float)event->x - 180.0f);
-                float delta_angle = wrap_angle_delta(angle - controller->pointer_last_angle);
+                float angle_delta = wrap_angle_delta(angle - controller->pointer_last_angle);
                 controller->pointer_last_angle = angle;
                 controller->pointer_volume_accum = clamp_f32(
                     controller->pointer_volume_accum -
-                        (delta_angle / NP_VOLUME_BEZEL_FULL_ARC_RADIANS) * (float)VOLUME_HARD_MAX,
+                        (angle_delta / NP_VOLUME_BEZEL_FULL_ARC_RADIANS) * (float)VOLUME_HARD_MAX,
                     0.0f, (float)VOLUME_HARD_MAX);
-                uint8_t next_vol = (uint8_t)lroundf(controller->pointer_volume_accum);
-                if (next_vol != controller->volume_level) {
-                    controller->volume_level = next_vol;
+                uint8_t next_volume = (uint8_t)lroundf(controller->pointer_volume_accum);
+                if (next_volume != controller->volume_level) {
+                    controller->volume_level = next_volume;
                     if (volume_changed_out != NULL) {
                         *volume_changed_out = true;
                     }
@@ -838,8 +875,14 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             }
 
             case NP_PTR_CENTER_TAP_OR_HOLD:
-                if (controller->pointer_start_y >= (int32_t)NP_QUEUE_PULL_START_Y &&
-                    delta_y < -20 && fabsf((float)delta_y) > fabsf((float)delta_x) * 1.3f) {
+                if (abs(delta_x) > 14 &&
+                    fabsf((float)delta_x) > fabsf((float)delta_y) * 1.15f) {
+                    controller->pointer_mode = NP_PTR_SKIP_DRAG;
+                }
+                break;
+
+            case NP_PTR_QUEUE_PENDING:
+                if (delta_y < -20 && fabsf((float)delta_y) > fabsf((float)delta_x) * 1.3f) {
                     controller->pointer_mode = NP_PTR_QUEUE_PULL;
                 } else if (abs(delta_x) > 14 &&
                            fabsf((float)delta_x) > fabsf((float)delta_y) * 1.15f) {
@@ -847,13 +890,22 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
                 }
                 break;
 
+            case NP_PTR_TOP_MENU_PENDING:
+                if (abs(delta_x) > 14 &&
+                    fabsf((float)delta_x) > fabsf((float)delta_y) * 1.15f) {
+                    controller->pointer_mode = NP_PTR_SKIP_DRAG;
+                }
+                break;
+
             case NP_PTR_SKIP_DRAG: {
                 controller->skip_drag_offset_x = clamp_f32((float)delta_x, -180.0f, 180.0f);
-                int32_t dir = delta_x < 0 ? 1 : -1;
-                if (!controller->skip_peek_valid || controller->skip_peek_direction != dir) {
-                    playback_engine_peek_skip(controller->engine, dir, &controller->skip_peek_cache);
+                int32_t skip_direction = delta_x < 0 ? 1 : -1;
+                if (!controller->skip_peek_valid ||
+                    controller->skip_peek_direction != skip_direction) {
+                    playback_engine_peek_skip(controller->engine, skip_direction,
+                                              &controller->skip_peek_cache);
                     controller->skip_peek_valid = true;
-                    controller->skip_peek_direction = dir;
+                    controller->skip_peek_direction = skip_direction;
                     if (controller->media != NULL &&
                         controller->skip_peek_cache.action == PLAYBACK_SKIP_TRACK &&
                         !controller->skip_peek_cache.same_album) {
@@ -866,20 +918,21 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             }
 
             case NP_PTR_SEEK: {
-                float dx = (float)event->x - 180.0f;
-                float dy = (float)event->y - 180.0f;
-                float radius = sqrtf(dx * dx + dy * dy);
+                float offset_x = (float)event->x - 180.0f;
+                float offset_y = (float)event->y - 180.0f;
+                float radius = sqrtf(offset_x * offset_x + offset_y * offset_y);
                 float duration = (float)(controller->engine != NULL ? controller->engine->duration_ms : 0u);
                 float max_ms = duration > (float)NP_SEEK_END_GUARD_MS
                                    ? (duration - (float)NP_SEEK_END_GUARD_MS)
                                    : duration;
                 if (radius >= NP_SEEK_CORE_RADIUS_PX) {
-                    float angle = atan2f(dy, dx);
-                    float d_angle = wrap_angle_delta(angle - controller->pointer_last_angle);
+                    float angle = atan2f(offset_y, offset_x);
+                    float angle_delta = wrap_angle_delta(angle - controller->pointer_last_angle);
                     controller->pointer_last_angle = angle;
-                    float next_ms = (float)controller->seek_preview_ms + (d_angle / NP_TWO_PI) * duration;
+                    float next_ms =
+                        (float)controller->seek_preview_ms + (angle_delta / NP_TWO_PI) * duration;
                     controller->seek_preview_ms = (uint32_t)clamp_f32(next_ms, 0.0f, max_ms);
-                    controller->vinyl_rotation_radians += d_angle * 0.65f;
+                    controller->vinyl_rotation_radians += angle_delta * 0.65f;
                 } else {
                     float next_ms = (float)controller->seek_preview_ms + ((float)step_x / 180.0f) * duration * 0.35f;
                     controller->seek_preview_ms = (uint32_t)clamp_f32(next_ms, 0.0f, max_ms);
@@ -890,11 +943,14 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
 
             case NP_PTR_QUICK_ACTIONS:
                 if (delta_x > 14 && (float)delta_x > fabsf((float)delta_y) * 1.2f &&
-                    (float)controller->pointer_start_x <= LEFT_EDGE_SWIPE_ZONE_PX) {
+                    classify_now_playing_touch_zone(controller->pointer_start_x,
+                                                    controller->pointer_start_y) == NP_ZONE_BACK) {
                     controller->pointer_mode = NP_PTR_BACK_SWIPE;
                     controller->back_swipe_progress =
                         clamp_f32((float)delta_x / BACK_SWIPE_PULL_DISTANCE_PX, 0.0f, 1.0f);
-                } else if (controller->pointer_start_y >= (int32_t)NP_QUEUE_PULL_START_Y &&
+                } else if (classify_now_playing_touch_zone(controller->pointer_start_x,
+                                                           controller->pointer_start_y) ==
+                               NP_ZONE_QUEUE &&
                            delta_y < -36 && fabsf((float)delta_y) > fabsf((float)delta_x) * 1.3f) {
                     controller->quick_actions_open = false;
                     controller->queue_sheet_open = true;
@@ -911,7 +967,8 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
 
             case NP_PTR_PLAYLIST_PICKER:
                 if (delta_x > 14 && (float)delta_x > fabsf((float)delta_y) * 1.2f &&
-                    (float)controller->pointer_start_x <= LEFT_EDGE_SWIPE_ZONE_PX) {
+                    classify_now_playing_touch_zone(controller->pointer_start_x,
+                                                    controller->pointer_start_y) == NP_ZONE_BACK) {
                     controller->pointer_mode = NP_PTR_BACK_SWIPE;
                     controller->back_swipe_progress =
                         clamp_f32((float)delta_x / BACK_SWIPE_PULL_DISTANCE_PX, 0.0f, 1.0f);
@@ -985,7 +1042,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
     }
 
     if (event->kind == TOUCH_EVENT_UP) {
-        enum now_playing_pointer_mode mode = controller->pointer_mode;
+        enum now_playing_pointer_mode pointer_mode = controller->pointer_mode;
         bool was_tap = (controller->pointer_max_drift_px <= HOME_TAP_DRIFT_LIMIT_PX);
         int32_t total_delta_y = event->y - controller->pointer_start_y;
         controller->pointer_active = false;
@@ -993,22 +1050,22 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
         controller->idle_cta_pressed = false;
         controller->details_lyrics_banner_active = false;
 
-        if (mode == NP_PTR_DETAILS_LYRICS_BADGE) {
+        if (pointer_mode == NP_PTR_DETAILS_LYRICS_BADGE) {
             return;
         }
-        if (mode == NP_PTR_IDLE_CTA) {
+        if (pointer_mode == NP_PTR_IDLE_CTA) {
             if (was_tap && action_out != NULL) {
                 *action_out = NP_ACTION_BROWSE_LIBRARY;
             }
             return;
         }
-        if (mode == NP_PTR_BACK_SWIPE) {
+        if (pointer_mode == NP_PTR_BACK_SWIPE) {
             if (controller->back_swipe_progress >= BACK_SWIPE_COMMIT_THRESHOLD) {
                 (void)now_playing_controller_step_back(controller, action_out);
             }
             return;
         }
-        if (mode == NP_PTR_SEEK) {
+        if (pointer_mode == NP_PTR_SEEK) {
             controller->is_seeking = false;
             controller->seek_hold_seconds = 0.0f;
             controller->seek_charge_progress = 0.0f;
@@ -1016,14 +1073,14 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
                                           effects_out);
             return;
         }
-        if (mode == NP_PTR_SKIP_DRAG) {
+        if (pointer_mode == NP_PTR_SKIP_DRAG) {
             if (fabsf(controller->skip_drag_offset_x) >= NP_SKIP_COMMIT_PX) {
-                int32_t dir = controller->skip_drag_offset_x < 0.0f ? 1 : -1;
+                int32_t skip_direction = controller->skip_drag_offset_x < 0.0f ? 1 : -1;
                 if (controller->engine != NULL) {
                     controller->skip_outgoing_album_uid = controller->engine->active_track.album_uid;
                     controller->skip_outgoing_motif_id = controller->engine->active_track.motif_id;
                 }
-                if (playback_engine_skip(controller->engine, dir, effects_out) &&
+                if (playback_engine_skip(controller->engine, skip_direction, effects_out) &&
                     effects_out != NULL) {
                     now_playing_controller_apply_effects(controller, effects_out);
                 }
@@ -1032,7 +1089,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             controller->skip_peek_valid = false;
             return;
         }
-        if (mode == NP_PTR_QUEUE_PULL) {
+        if (pointer_mode == NP_PTR_QUEUE_PULL) {
             if (total_delta_y <= -(int32_t)NP_QUEUE_PULL_COMMIT_PX) {
                 controller->queue_sheet_open = true;
                 if (controller->engine != NULL) {
@@ -1043,7 +1100,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             }
             return;
         }
-        if (mode == NP_PTR_QUICK_ACTIONS) {
+        if (pointer_mode == NP_PTR_QUICK_ACTIONS) {
             int32_t pressed = controller->quick_action_pressed_index;
             controller->quick_action_pressed_index = -1;
             if (was_tap) {
@@ -1091,7 +1148,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             }
             return;
         }
-        if (mode == NP_PTR_PLAYLIST_PICKER) {
+        if (pointer_mode == NP_PTR_PLAYLIST_PICKER) {
             int32_t row = controller->picker_pressed_row;
             controller->picker_pressed_row = -1;
             if (was_tap) {
@@ -1101,16 +1158,16 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
                            controller->database != NULL && controller->engine != NULL &&
                            controller->engine->has_active_track) {
                     bool added = false;
-                    int64_t pl_id = controller->picker_items[row].playlist_id;
+                    int64_t playlist_id = controller->picker_items[row].playlist_id;
                     if (library_db_toggle_track_in_playlist(
-                            controller->database, pl_id, controller->engine->active_track.track_id,
-                            &added)) {
+                            controller->database, playlist_id,
+                            controller->engine->active_track.track_id, &added)) {
                         char toast[64];
                         snprintf(toast, sizeof(toast), "%s %s",
                                  added ? "ADDED TO" : "REMOVED FROM",
                                  controller->picker_items[row].name);
                         now_playing_controller_show_toast(controller, toast);
-                        playback_engine_on_playlist_mutated(controller->engine, pl_id, false,
+                        playback_engine_on_playlist_mutated(controller->engine, playlist_id, false,
                                                             effects_out);
                     }
                     controller->playlist_picker_open = false;
@@ -1118,7 +1175,7 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             }
             return;
         }
-        if (mode == NP_PTR_QUEUE_LIST) {
+        if (pointer_mode == NP_PTR_QUEUE_LIST) {
             int32_t row = controller->queue_pressed_row;
             controller->queue_pressed_row = -1;
             if (was_tap && row >= 0 && controller->engine != NULL &&
@@ -1139,10 +1196,11 @@ void now_playing_controller_handle_touch(struct now_playing_controller *controll
             return;
         }
 
-        /* Tap disambiguation on bare vinyl / lyrics (includes right-bezel tap fall-through!) */
+        /* Tap disambiguation on bare vinyl / lyrics (includes edge-arc tap fall-through) */
         if (was_tap &&
-            (mode == NP_PTR_CENTER_TAP_OR_HOLD || mode == NP_PTR_VOLUME_PENDING ||
-             mode == NP_PTR_LEFT_EDGE_PENDING)) {
+            (pointer_mode == NP_PTR_CENTER_TAP_OR_HOLD || pointer_mode == NP_PTR_VOLUME_PENDING ||
+             pointer_mode == NP_PTR_LEFT_EDGE_PENDING || pointer_mode == NP_PTR_QUEUE_PENDING ||
+             pointer_mode == NP_PTR_TOP_MENU_PENDING)) {
             if (controller->pending_single_tap) {
                 controller->pending_single_tap = false;
                 controller->pending_single_tap_timer = 0.0f;
