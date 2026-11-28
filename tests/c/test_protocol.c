@@ -138,6 +138,30 @@ static void test_format_outbound_commands(void) {
     TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_pause_toggle(tiny_buffer, sizeof(tiny_buffer)));
     TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_play_pause_toggle(NULL, 16u));
 
+    written = protocol_format_stop(command_buffer, sizeof(command_buffer));
+    TEST_ASSERT_EQ_U32(12u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0202000C0000", command_buffer);
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_stop(tiny_buffer, sizeof(tiny_buffer)));
+
+    written = protocol_format_set_play_mode(IPC_PLAY_MODE_SINGLE_LOOP, command_buffer,
+                                            sizeof(command_buffer));
+    TEST_ASSERT_EQ_U32(12u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0654000C0002", command_buffer);
+
+    written = protocol_format_set_max_volume(200u, command_buffer, sizeof(command_buffer));
+    TEST_ASSERT_EQ_U32(12u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0711000C0078", command_buffer);
+
+    written = protocol_format_set_gapless(true, command_buffer, sizeof(command_buffer));
+    TEST_ASSERT_EQ_U32(12u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0647000C0001", command_buffer);
+
+    char seek_buffer[24];
+    written = protocol_format_seek_ms(19000u, seek_buffer, sizeof(seek_buffer));
+    TEST_ASSERT_EQ_U32(16u, (uint32_t)written);
+    TEST_ASSERT_EQ_STR("0103001000004A38", seek_buffer);
+    TEST_ASSERT_EQ_U32(0u, (uint32_t)protocol_format_seek_ms(19000u, seek_buffer, 16u));
+
     char m3u_command[128];
     written = protocol_format_play_m3u("/tmp/dialos_play_1.m3u", m3u_command, sizeof(m3u_command));
     TEST_ASSERT_EQ_U32(39u, (uint32_t)written);
@@ -148,21 +172,29 @@ static void test_format_outbound_commands(void) {
 }
 
 static void test_decode_input_events(void) {
-    struct kernel_input_event event = {0u, 0u, INPUT_EVENT_TYPE_KEY, KEYCODE_VOLUME_UP_PRIMARY, 1};
-    TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
+    struct kernel_input_event event = {0u, 0u, INPUT_EVENT_TYPE_KEY, KEYCODE_PLAY_PAUSE, 1};
+    TEST_ASSERT_EQ_I32(BUTTON_ACTION_PLAY_PAUSE, protocol_decode_input_event(&event));
 
+    event.code = KEYCODE_VOLUME_UP_PRIMARY;
+    TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
     event.code = KEYCODE_VOLUME_UP_ALT_A;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
     event.code = KEYCODE_VOLUME_UP_ALT_B;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
+    event.value = INPUT_EVENT_VALUE_REPEAT;
+    TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_UP, protocol_decode_input_event(&event));
 
+    event.value = INPUT_EVENT_VALUE_PRESS;
     event.code = KEYCODE_VOLUME_DOWN_PRIMARY;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_DOWN, protocol_decode_input_event(&event));
     event.code = KEYCODE_VOLUME_DOWN_ALT_A;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_DOWN, protocol_decode_input_event(&event));
     event.code = KEYCODE_VOLUME_DOWN_ALT_B;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_DOWN, protocol_decode_input_event(&event));
+    event.value = INPUT_EVENT_VALUE_REPEAT;
+    TEST_ASSERT_EQ_I32(BUTTON_ACTION_VOLUME_DOWN, protocol_decode_input_event(&event));
 
+    event.value = INPUT_EVENT_VALUE_PRESS;
     event.code = KEYCODE_POWER_SHORT_PRIMARY;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_POWER_SHORT, protocol_decode_input_event(&event));
     event.code = KEYCODE_POWER_SHORT_ALT;
@@ -170,10 +202,10 @@ static void test_decode_input_events(void) {
     event.code = KEYCODE_POWER_LONG;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_POWER_LONG, protocol_decode_input_event(&event));
 
-    /* Release (0), repeat (2), non-key EV_SYN (0), unknown code, NULL */
+    /* Release (0), repeat (2) on non-volume key, non-key EV_SYN (0), unknown code, NULL */
     event.value = 0;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_NONE, protocol_decode_input_event(&event));
-    event.value = 2;
+    event.value = INPUT_EVENT_VALUE_REPEAT;
     TEST_ASSERT_EQ_I32(BUTTON_ACTION_NONE, protocol_decode_input_event(&event));
     event.value = 1;
     event.type = 0u;
@@ -216,11 +248,17 @@ static void test_parse_playback_volume_and_usb_events(void) {
     TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
     TEST_ASSERT_TRUE(message.playback_status.has_state);
     TEST_ASSERT_EQ_I32(IPC_PLAYBACK_PLAYING, message.playback_status.state);
+    TEST_ASSERT_FALSE(message.playback_status.is_loading_state);
     TEST_ASSERT_FALSE(message.playback_status.has_track_metadata);
 
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a2020013{\"state\":1}", 19u, &message));
     TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
     TEST_ASSERT_EQ_I32(IPC_PLAYBACK_PAUSED, message.playback_status.state);
+
+    /* state=2 without song indicates natural EOF / stopped */
+    TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a2020013{\"state\":2}", 19u, &message));
+    TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_EQ_I32(IPC_PLAYBACK_STOPPED, message.playback_status.state);
 
     /* Oversized title truncation and malformed a202 */
     char long_title_json[320];
@@ -262,12 +300,22 @@ static void test_parse_playback_volume_and_usb_events(void) {
         "\"love\":true,\"playerflag\":4,\"state\":2,\"playing_num\":\"1/1\",\"work_mode\":\"LOCAL\"}";
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc(golden_a202, strlen(golden_a202), &message));
     TEST_ASSERT_EQ_I32(IPC_INBOUND_PLAYBACK_STATUS, message.kind);
+    TEST_ASSERT_TRUE(message.playback_status.is_loading_state);
     TEST_ASSERT_TRUE(message.playback_status.has_track_metadata);
     TEST_ASSERT_EQ_STR("Shakti Sound", message.playback_status.track_title);
     TEST_ASSERT_EQ_U32(154000u, message.playback_status.duration_ms);
     TEST_ASSERT_TRUE(message.playback_status.has_track_path);
     TEST_ASSERT_EQ_STR("/tmp/sdcard/A Hundred Drums/A Hundred Drums/01 - Shakti Sound.flac",
                        message.playback_status.track_path);
+    TEST_ASSERT_EQ_STR("A Hundred Drums", message.playback_status.artist_name);
+    TEST_ASSERT_EQ_STR("A Hundred Drums", message.playback_status.album_name);
+    TEST_ASSERT_TRUE(message.playback_status.has_audio_specs);
+    TEST_ASSERT_EQ_U32(44100u, message.playback_status.sample_rate_hz);
+    TEST_ASSERT_EQ_U32(16u, message.playback_status.bit_depth);
+    TEST_ASSERT_EQ_U32(1411u, message.playback_status.bitrate_kbps);
+    TEST_ASSERT_EQ_U32(1u, message.playback_status.track_number);
+    TEST_ASSERT_EQ_U32(2u, message.playback_status.channels);
+    TEST_ASSERT_FALSE(message.playback_status.is_dsd);
 
     /* a103 elapsed ms (compact 8-byte header + 8 hex digits = 16 bytes) */
     TEST_ASSERT_TRUE(protocol_parse_inbound_ipc("a103001000004A38", 16u, &message));

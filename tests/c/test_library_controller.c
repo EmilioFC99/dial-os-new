@@ -117,10 +117,10 @@ static void test_hub_bloom_scroll_preservation_and_playback(void) {
     TEST_ASSERT_EQ_U32(0u, action.play_start_offset);
     TEST_ASSERT_EQ_STR("/sd/a/1.flac", action.play_first_track_path);
 
-    /* Sync active playback -> tapping same focused sleeve toggles play/pause */
+    /* Sync active playback -> tapping same focused sleeve opens Now Playing */
     library_controller_set_active_playback(&ctrl, "/sd/a/1.flac", true);
     send_tap(&ctrl, 172, 152, 2500ull, &action);
-    TEST_ASSERT_EQ_I32(LIBRARY_ACTION_TOGGLE_PLAY_PAUSE, action.kind);
+    TEST_ASSERT_EQ_I32(LIBRARY_ACTION_OPEN_NOW_PLAYING, action.kind);
 
     /* Open Album Tracklist Crystal Overlay via Note button (208, 325) */
     send_tap(&ctrl, 208, 325, 3000ull, &action);

@@ -309,7 +309,12 @@ static bool create_schema(sqlite3 *handle) {
         "  path TEXT PRIMARY KEY,"
         "  mtime_seconds INTEGER NOT NULL,"
         "  file_size_bytes INTEGER NOT NULL"
-        ");";
+        ");"
+        "CREATE TABLE IF NOT EXISTS playback_queue ("
+        "  slot INTEGER PRIMARY KEY,"
+        "  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_playback_queue_track ON playback_queue(track_id);";
     if (!execute_sql(handle, SCHEMA_SQL)) {
         return false;
     }
@@ -2110,6 +2115,978 @@ bool library_db_apply_sidecar_cover(struct library_db *database, const char *dir
         }
     }
 
+    pthread_mutex_unlock(&database->mutex);
+    return true;
+}
+
+static bool fill_track_details_from_stmt(sqlite3_stmt *statement,
+                                         struct library_db_track_details *details_out) {
+    if (sqlite3_step(statement) != SQLITE_ROW) {
+        return false;
+    }
+    memset(details_out, 0, sizeof(*details_out));
+    details_out->track_id = sqlite3_column_int64(statement, 0);
+    details_out->album_id = sqlite3_column_int64(statement, 1);
+    details_out->album_uid = (uint64_t)sqlite3_column_int64(statement, 2);
+    details_out->format_kind = (uint8_t)sqlite3_column_int(statement, 3);
+    details_out->motif_id = (uint8_t)sqlite3_column_int(statement, 4);
+    details_out->cover_source_kind = (uint8_t)sqlite3_column_int(statement, 5);
+    details_out->cover_cache_status = (uint8_t)sqlite3_column_int(statement, 6);
+    details_out->is_favorite = (sqlite3_column_int(statement, 7) != 0);
+    details_out->year = (uint16_t)sqlite3_column_int(statement, 8);
+    details_out->disc_number = (uint16_t)sqlite3_column_int(statement, 9);
+    details_out->track_number = (uint16_t)sqlite3_column_int(statement, 10);
+    details_out->album_track_count = (uint32_t)sqlite3_column_int(statement, 11);
+    details_out->duration_seconds = (uint32_t)sqlite3_column_int(statement, 12);
+    details_out->file_size_bytes = (uint64_t)sqlite3_column_int64(statement, 13);
+    const char *title = (const char *)sqlite3_column_text(statement, 14);
+    const char *artist = (const char *)sqlite3_column_text(statement, 15);
+    const char *album = (const char *)sqlite3_column_text(statement, 16);
+    const char *genre = (const char *)sqlite3_column_text(statement, 17);
+    const char *path = (const char *)sqlite3_column_text(statement, 18);
+    copy_text_bounded(details_out->title, sizeof(details_out->title), title != NULL ? title : "");
+    copy_text_bounded(details_out->artist, sizeof(details_out->artist),
+                      artist != NULL ? artist : "");
+    copy_text_bounded(details_out->album, sizeof(details_out->album), album != NULL ? album : "");
+    copy_text_bounded(details_out->genre, sizeof(details_out->genre), genre != NULL ? genre : "");
+    copy_text_bounded(details_out->path, sizeof(details_out->path), path != NULL ? path : "");
+    return true;
+}
+
+#define TRACK_DETAILS_SELECT_COLS \
+    "SELECT t.id, t.album_id, a.album_uid, t.format_kind, a.motif_id, " \
+    "a.cover_source_kind, a.cover_cache_status, t.is_favorite, a.year, " \
+    "t.disc_number, t.track_number, a.track_count, t.duration_seconds, " \
+    "t.file_size_bytes, t.title, t.artist_name, a.title, t.genre_raw, t.path " \
+    "FROM tracks t JOIN albums a ON a.id = t.album_id "
+
+bool library_db_get_track_details(struct library_db *database, int64_t track_id,
+                                  struct library_db_track_details *details_out) {
+    if (database == NULL || database->handle == NULL || track_id <= 0 || details_out == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    sqlite3_stmt *statement = NULL;
+    bool found = false;
+    if (sqlite3_prepare_v2(database->handle, TRACK_DETAILS_SELECT_COLS "WHERE t.id = ?1;", -1,
+                           &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(statement, 1, track_id);
+        found = fill_track_details_from_stmt(statement, details_out);
+        sqlite3_finalize(statement);
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return found;
+}
+
+bool library_db_get_track_details_by_path(struct library_db *database, const char *path,
+                                          struct library_db_track_details *details_out) {
+    if (database == NULL || database->handle == NULL || path == NULL || path[0] == '\0' ||
+        details_out == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    sqlite3_stmt *statement = NULL;
+    bool found = false;
+    if (sqlite3_prepare_v2(database->handle, TRACK_DETAILS_SELECT_COLS "WHERE t.path = ?1;", -1,
+                           &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(statement, 1, path, -1, SQLITE_STATIC);
+        found = fill_track_details_from_stmt(statement, details_out);
+        sqlite3_finalize(statement);
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return found;
+}
+
+static const char *collection_ordered_track_ids_sql(const struct library_db_collection *collection,
+                                                    bool *needs_context_id_out) {
+    *needs_context_id_out = false;
+    switch (collection->kind) {
+        case LIBRARY_DB_COLLECTION_TRACKS_ALL:
+            return "SELECT id AS track_id FROM tracks ORDER BY title_sort ASC, id ASC";
+        case LIBRARY_DB_COLLECTION_TRACKS_FAVORITES:
+            return "SELECT id AS track_id FROM tracks WHERE is_favorite = 1 "
+                   "ORDER BY title_sort ASC, id ASC";
+        case LIBRARY_DB_COLLECTION_TRACKS_ALBUM:
+            *needs_context_id_out = true;
+            return "SELECT id AS track_id FROM tracks WHERE album_id = ?1 "
+                   "ORDER BY disc_number ASC, "
+                   "CASE WHEN track_number > 0 THEN track_number ELSE 9999 END ASC, "
+                   "title_sort ASC, id ASC";
+        case LIBRARY_DB_COLLECTION_TRACKS_ARTIST:
+            *needs_context_id_out = true;
+            return "SELECT id AS track_id FROM tracks WHERE artist_id = ?1 "
+                   "ORDER BY title_sort ASC, id ASC";
+        case LIBRARY_DB_COLLECTION_TRACKS_GENRE:
+            *needs_context_id_out = true;
+            return "SELECT t.id AS track_id FROM track_genres tg JOIN tracks t ON t.id = tg.track_id "
+                   "WHERE tg.genre_id = ?1 ORDER BY t.title_sort ASC, t.id ASC";
+        case LIBRARY_DB_COLLECTION_TRACKS_PLAYLIST:
+            *needs_context_id_out = true;
+            return "SELECT t.id AS track_id FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id "
+                   "WHERE pt.playlist_id = ?1 ORDER BY pt.position ASC";
+        default:
+            return NULL;
+    }
+}
+
+static uint32_t query_queue_count_locked(sqlite3 *handle) {
+    sqlite3_stmt *statement = NULL;
+    uint32_t count = 0u;
+    if (sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM playback_queue;", -1, &statement, NULL) ==
+        SQLITE_OK) {
+        if (sqlite3_step(statement) == SQLITE_ROW) {
+            count = (uint32_t)sqlite3_column_int(statement, 0);
+        }
+        sqlite3_finalize(statement);
+    }
+    return count;
+}
+
+static bool find_queue_slot_by_track_id_locked(sqlite3 *handle, int64_t track_id,
+                                               uint32_t *slot_out) {
+    sqlite3_stmt *statement = NULL;
+    bool found = false;
+    if (sqlite3_prepare_v2(handle, "SELECT slot FROM playback_queue WHERE track_id = ?1 LIMIT 1;",
+                           -1, &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(statement, 1, track_id);
+        if (sqlite3_step(statement) == SQLITE_ROW) {
+            *slot_out = (uint32_t)sqlite3_column_int(statement, 0);
+            found = true;
+        }
+        sqlite3_finalize(statement);
+    }
+    return found;
+}
+
+static bool compact_playback_queue_locked(sqlite3 *handle, uint32_t *total_out) {
+    if (!execute_sql(handle, "CREATE TEMP TABLE IF NOT EXISTS _pq_compact (track_id INTEGER NOT NULL);"
+                             "DELETE FROM _pq_compact;"
+                             "INSERT INTO _pq_compact(track_id) "
+                             "SELECT track_id FROM playback_queue ORDER BY slot ASC;"
+                             "DELETE FROM playback_queue;"
+                             "INSERT INTO playback_queue(slot, track_id) "
+                             "SELECT (ROW_NUMBER() OVER () - 1), track_id FROM _pq_compact;"
+                             "DELETE FROM _pq_compact;")) {
+        return false;
+    }
+    if (total_out != NULL) {
+        *total_out = query_queue_count_locked(handle);
+    }
+    return true;
+}
+
+bool library_db_build_playback_queue(struct library_db *database,
+                                     const struct library_db_collection *collection,
+                                     int64_t anchor_track_id, bool shuffle, uint32_t *slot_out,
+                                     uint32_t *total_out) {
+    if (database == NULL || database->handle == NULL || collection == NULL) {
+        return false;
+    }
+    bool needs_context = false;
+    const char *base_sql = collection_ordered_track_ids_sql(collection, &needs_context);
+    if (base_sql == NULL) {
+        return false;
+    }
+
+    pthread_mutex_lock(&database->mutex);
+    if (!execute_sql(database->handle, "BEGIN IMMEDIATE;")) {
+        pthread_mutex_unlock(&database->mutex);
+        return false;
+    }
+
+    bool ok = execute_sql(database->handle, "DELETE FROM playback_queue;");
+    if (ok) {
+        char sql[768];
+        if (shuffle && anchor_track_id > 0) {
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO playback_queue(slot, track_id) "
+                     "SELECT (ROW_NUMBER() OVER () - 1), track_id FROM ("
+                     "  SELECT track_id FROM (%s) "
+                     "  ORDER BY (CASE WHEN track_id = ?2 THEN 0 ELSE 1 END) ASC, RANDOM()"
+                     ");",
+                     base_sql);
+        } else if (shuffle) {
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO playback_queue(slot, track_id) "
+                     "SELECT (ROW_NUMBER() OVER () - 1), track_id FROM ("
+                     "  SELECT track_id FROM (%s) ORDER BY RANDOM()"
+                     ");",
+                     base_sql);
+        } else {
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO playback_queue(slot, track_id) "
+                     "SELECT (ROW_NUMBER() OVER () - 1), track_id FROM (%s);",
+                     base_sql);
+        }
+
+        sqlite3_stmt *statement = NULL;
+        if (sqlite3_prepare_v2(database->handle, sql, -1, &statement, NULL) == SQLITE_OK) {
+            if (needs_context) {
+                sqlite3_bind_int64(statement, 1, collection->context_id);
+            }
+            if (shuffle && anchor_track_id > 0) {
+                sqlite3_bind_int64(statement, 2, anchor_track_id);
+            }
+            ok = (sqlite3_step(statement) == SQLITE_DONE);
+            sqlite3_finalize(statement);
+        } else {
+            ok = false;
+        }
+    }
+
+    uint32_t total = 0u;
+    uint32_t found_slot = 0u;
+    if (ok) {
+        total = query_queue_count_locked(database->handle);
+        if (anchor_track_id > 0) {
+            (void)find_queue_slot_by_track_id_locked(database->handle, anchor_track_id,
+                                                     &found_slot);
+        }
+        ok = execute_sql(database->handle, "COMMIT;");
+    } else {
+        (void)execute_sql(database->handle, "ROLLBACK;");
+    }
+    pthread_mutex_unlock(&database->mutex);
+
+    if (ok) {
+        if (slot_out != NULL) {
+            *slot_out = found_slot;
+        }
+        if (total_out != NULL) {
+            *total_out = total;
+        }
+    }
+    return ok;
+}
+
+bool library_db_reshuffle_playback_queue(struct library_db *database, int64_t anchor_track_id,
+                                         int64_t avoid_first_track_id, uint32_t *total_out) {
+    if (database == NULL || database->handle == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    if (!execute_sql(database->handle, "BEGIN IMMEDIATE;")) {
+        pthread_mutex_unlock(&database->mutex);
+        return false;
+    }
+
+    uint32_t total = query_queue_count_locked(database->handle);
+    bool ok = true;
+    if (total > 1u) {
+        if (!execute_sql(database->handle,
+                         "CREATE TEMP TABLE IF NOT EXISTS _pq_shuf (track_id INTEGER NOT NULL);"
+                         "DELETE FROM _pq_shuf;"
+                         "INSERT INTO _pq_shuf(track_id) SELECT track_id FROM playback_queue;"
+                         "DELETE FROM playback_queue;")) {
+            ok = false;
+        } else {
+            sqlite3_stmt *statement = NULL;
+            const char *sql = NULL;
+            if (anchor_track_id > 0) {
+                sql = "INSERT INTO playback_queue(slot, track_id) "
+                      "SELECT (ROW_NUMBER() OVER () - 1), track_id FROM ("
+                      "  SELECT track_id FROM _pq_shuf "
+                      "  ORDER BY (CASE WHEN track_id = ?1 THEN 0 ELSE 1 END) ASC, RANDOM()"
+                      ");";
+            } else if (avoid_first_track_id > 0) {
+                sql = "INSERT INTO playback_queue(slot, track_id) "
+                      "SELECT (ROW_NUMBER() OVER () - 1), track_id FROM ("
+                      "  SELECT track_id FROM _pq_shuf "
+                      "  ORDER BY (CASE WHEN track_id = ?1 THEN 1 ELSE 0 END) ASC, RANDOM()"
+                      ");";
+            } else {
+                sql = "INSERT INTO playback_queue(slot, track_id) "
+                      "SELECT (ROW_NUMBER() OVER () - 1), track_id FROM ("
+                      "  SELECT track_id FROM _pq_shuf ORDER BY RANDOM()"
+                      ");";
+            }
+            if (sqlite3_prepare_v2(database->handle, sql, -1, &statement, NULL) == SQLITE_OK) {
+                if (anchor_track_id > 0) {
+                    sqlite3_bind_int64(statement, 1, anchor_track_id);
+                } else if (avoid_first_track_id > 0) {
+                    sqlite3_bind_int64(statement, 1, avoid_first_track_id);
+                }
+                ok = (sqlite3_step(statement) == SQLITE_DONE);
+                sqlite3_finalize(statement);
+            } else {
+                ok = false;
+            }
+            (void)execute_sql(database->handle, "DELETE FROM _pq_shuf;");
+        }
+    }
+
+    if (ok) {
+        ok = execute_sql(database->handle, "COMMIT;");
+    } else {
+        (void)execute_sql(database->handle, "ROLLBACK;");
+    }
+    pthread_mutex_unlock(&database->mutex);
+
+    if (ok && total_out != NULL) {
+        *total_out = total;
+    }
+    return ok;
+}
+
+bool library_db_restore_playback_queue_order(struct library_db *database,
+                                             const struct library_db_collection *collection,
+                                             int64_t active_track_id, bool ephemeral_active,
+                                             uint32_t *slot_out, uint32_t *total_out) {
+    uint32_t slot = 0u;
+    uint32_t total = 0u;
+    if (!library_db_build_playback_queue(database, collection, active_track_id, false, &slot,
+                                         &total)) {
+        return false;
+    }
+    if (ephemeral_active && active_track_id > 0) {
+        pthread_mutex_lock(&database->mutex);
+        uint32_t existing_slot = 0u;
+        if (!find_queue_slot_by_track_id_locked(database->handle, active_track_id,
+                                                &existing_slot)) {
+            if (execute_sql(database->handle,
+                            "BEGIN IMMEDIATE;"
+                            "UPDATE playback_queue SET slot = slot + 1;")) {
+                sqlite3_stmt *insert_stmt = NULL;
+                bool ok = (sqlite3_prepare_v2(database->handle,
+                                              "INSERT INTO playback_queue(slot, track_id) "
+                                              "VALUES(0, ?1);",
+                                              -1, &insert_stmt, NULL) == SQLITE_OK);
+                if (ok) {
+                    sqlite3_bind_int64(insert_stmt, 1, active_track_id);
+                    ok = (sqlite3_step(insert_stmt) == SQLITE_DONE);
+                    sqlite3_finalize(insert_stmt);
+                }
+                if (ok) {
+                    (void)execute_sql(database->handle, "COMMIT;");
+                    slot = 0u;
+                    total++;
+                } else {
+                    (void)execute_sql(database->handle, "ROLLBACK;");
+                }
+            }
+        } else {
+            slot = existing_slot;
+        }
+        pthread_mutex_unlock(&database->mutex);
+    }
+    if (slot_out != NULL) {
+        *slot_out = slot;
+    }
+    if (total_out != NULL) {
+        *total_out = total;
+    }
+    return true;
+}
+
+uint32_t library_db_playback_queue_count(struct library_db *database) {
+    if (database == NULL || database->handle == NULL) {
+        return 0u;
+    }
+    pthread_mutex_lock(&database->mutex);
+    uint32_t count = query_queue_count_locked(database->handle);
+    pthread_mutex_unlock(&database->mutex);
+    return count;
+}
+
+bool library_db_get_queue_track(struct library_db *database, uint32_t slot,
+                                struct library_db_track_details *details_out) {
+    if (database == NULL || database->handle == NULL || details_out == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    sqlite3_stmt *statement = NULL;
+    bool found = false;
+    if (sqlite3_prepare_v2(database->handle,
+                           TRACK_DETAILS_SELECT_COLS
+                           "JOIN playback_queue pq ON pq.track_id = t.id WHERE pq.slot = ?1;",
+                           -1, &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(statement, 1, (int)slot);
+        found = fill_track_details_from_stmt(statement, details_out);
+        sqlite3_finalize(statement);
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return found;
+}
+
+bool library_db_find_queue_slot_by_path(struct library_db *database, const char *path,
+                                        uint32_t *slot_out) {
+    if (database == NULL || database->handle == NULL || path == NULL || path[0] == '\0' ||
+        slot_out == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    sqlite3_stmt *statement = NULL;
+    bool found = false;
+    if (sqlite3_prepare_v2(database->handle,
+                           "SELECT pq.slot FROM playback_queue pq "
+                           "JOIN tracks t ON t.id = pq.track_id WHERE t.path = ?1 LIMIT 1;",
+                           -1, &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(statement, 1, path, -1, SQLITE_STATIC);
+        if (sqlite3_step(statement) == SQLITE_ROW) {
+            *slot_out = (uint32_t)sqlite3_column_int(statement, 0);
+            found = true;
+        }
+        sqlite3_finalize(statement);
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return found;
+}
+
+uint32_t library_db_fetch_queue_window(struct library_db *database, uint32_t offset, uint32_t limit,
+                                       struct library_db_row *rows_out) {
+    if (database == NULL || database->handle == NULL || rows_out == NULL || limit == 0u) {
+        return 0u;
+    }
+    if (limit > LIBRARY_DB_MAX_WINDOW_ROWS) {
+        limit = LIBRARY_DB_MAX_WINDOW_ROWS;
+    }
+    pthread_mutex_lock(&database->mutex);
+    sqlite3_stmt *statement = NULL;
+    uint32_t row_count = 0u;
+    if (sqlite3_prepare_v2(
+            database->handle,
+            "SELECT t.id, a.album_uid, t.album_id, t.added_at_seconds, 1, t.duration_seconds, "
+            "a.year, t.track_number, t.disc_number, a.motif_id, a.cover_source_kind, "
+            "a.cover_cache_status, t.is_favorite, t.title, t.artist_name || ' · ' || a.title "
+            "FROM playback_queue pq "
+            "JOIN tracks t ON t.id = pq.track_id "
+            "JOIN albums a ON a.id = t.album_id "
+            "ORDER BY pq.slot ASC LIMIT ?1 OFFSET ?2;",
+            -1, &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(statement, 1, (int)limit);
+        sqlite3_bind_int(statement, 2, (int)offset);
+        while (row_count < limit && sqlite3_step(statement) == SQLITE_ROW) {
+            struct library_db_row *row = &rows_out[row_count];
+            memset(row, 0, sizeof(*row));
+            row->id = sqlite3_column_int64(statement, 0);
+            row->uid = (uint64_t)sqlite3_column_int64(statement, 1);
+            row->album_id = sqlite3_column_int64(statement, 2);
+            row->added_at_seconds = sqlite3_column_int64(statement, 3);
+            row->count = (uint32_t)sqlite3_column_int(statement, 4);
+            row->duration_seconds = (uint32_t)sqlite3_column_int(statement, 5);
+            row->year = (uint16_t)sqlite3_column_int(statement, 6);
+            row->track_number = (uint16_t)sqlite3_column_int(statement, 7);
+            row->disc_number = (uint16_t)sqlite3_column_int(statement, 8);
+            row->motif_id = (uint8_t)sqlite3_column_int(statement, 9);
+            row->cover_source_kind = (uint8_t)sqlite3_column_int(statement, 10);
+            row->cover_cache_status = (uint8_t)sqlite3_column_int(statement, 11);
+            row->is_favorite = (sqlite3_column_int(statement, 12) != 0);
+            const char *title = (const char *)sqlite3_column_text(statement, 13);
+            const char *subtitle = (const char *)sqlite3_column_text(statement, 14);
+            copy_text_bounded(row->title, sizeof(row->title), title != NULL ? title : "");
+            copy_text_bounded(row->subtitle, sizeof(row->subtitle),
+                              subtitle != NULL ? subtitle : "");
+            row_count++;
+        }
+        sqlite3_finalize(statement);
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return row_count;
+}
+
+bool library_db_write_queue_slice_m3u(struct library_db *database, uint32_t start_slot,
+                                      uint32_t max_tracks, FILE *output, uint32_t *written_out) {
+    if (database == NULL || database->handle == NULL || output == NULL || max_tracks == 0u) {
+        return false;
+    }
+    if (written_out != NULL) {
+        *written_out = 0u;
+    }
+    pthread_mutex_lock(&database->mutex);
+    sqlite3_stmt *statement = NULL;
+    bool ok = false;
+    if (sqlite3_prepare_v2(database->handle,
+                           "SELECT t.path FROM playback_queue pq "
+                           "JOIN tracks t ON t.id = pq.track_id "
+                           "WHERE pq.slot >= ?1 ORDER BY pq.slot ASC LIMIT ?2;",
+                           -1, &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(statement, 1, (int)start_slot);
+        sqlite3_bind_int(statement, 2, (int)max_tracks);
+        uint32_t written = 0u;
+        ok = true;
+        while (sqlite3_step(statement) == SQLITE_ROW) {
+            const char *path = (const char *)sqlite3_column_text(statement, 0);
+            if (path != NULL && fprintf(output, "%s\n", path) < 0) {
+                ok = false;
+                break;
+            }
+            written++;
+        }
+        if (written_out != NULL) {
+            *written_out = written;
+        }
+        sqlite3_finalize(statement);
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return ok;
+}
+
+bool library_db_reconcile_playback_queue(struct library_db *database,
+                                         const struct library_db_collection *collection,
+                                         int64_t active_track_id, bool shuffle_enabled,
+                                         uint32_t *slot_out, uint32_t *total_out,
+                                         bool *active_became_ephemeral_out) {
+    if (database == NULL || database->handle == NULL || collection == NULL) {
+        return false;
+    }
+    bool needs_context = false;
+    const char *base_sql = collection_ordered_track_ids_sql(collection, &needs_context);
+    if (base_sql == NULL) {
+        return false;
+    }
+    if (active_became_ephemeral_out != NULL) {
+        *active_became_ephemeral_out = false;
+    }
+
+    pthread_mutex_lock(&database->mutex);
+    if (!execute_sql(database->handle, "BEGIN IMMEDIATE;")) {
+        pthread_mutex_unlock(&database->mutex);
+        return false;
+    }
+
+    bool ok = execute_sql(database->handle,
+                          "CREATE TEMP TABLE IF NOT EXISTS _pq_target (track_id INTEGER PRIMARY KEY);"
+                          "DELETE FROM _pq_target;");
+    if (ok) {
+        char insert_sql[512];
+        snprintf(insert_sql, sizeof(insert_sql),
+                 "INSERT OR IGNORE INTO _pq_target(track_id) SELECT track_id FROM (%s);",
+                 base_sql);
+        sqlite3_stmt *statement = NULL;
+        if (sqlite3_prepare_v2(database->handle, insert_sql, -1, &statement, NULL) == SQLITE_OK) {
+            if (needs_context) {
+                sqlite3_bind_int64(statement, 1, collection->context_id);
+            }
+            ok = (sqlite3_step(statement) == SQLITE_DONE);
+            sqlite3_finalize(statement);
+        } else {
+            ok = false;
+        }
+    }
+
+    bool active_in_target = false;
+    if (ok && active_track_id > 0) {
+        sqlite3_stmt *check_stmt = NULL;
+        if (sqlite3_prepare_v2(database->handle,
+                               "SELECT 1 FROM _pq_target WHERE track_id = ?1 LIMIT 1;", -1,
+                               &check_stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(check_stmt, 1, active_track_id);
+            active_in_target = (sqlite3_step(check_stmt) == SQLITE_ROW);
+            sqlite3_finalize(check_stmt);
+        }
+        if (active_became_ephemeral_out != NULL) {
+            *active_became_ephemeral_out = !active_in_target;
+        }
+    }
+
+    if (ok) {
+        if (shuffle_enabled) {
+            sqlite3_stmt *del_stmt = NULL;
+            if (sqlite3_prepare_v2(database->handle,
+                                   "DELETE FROM playback_queue "
+                                   "WHERE track_id != ?1 "
+                                   "AND track_id NOT IN (SELECT track_id FROM _pq_target);",
+                                   -1, &del_stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(del_stmt, 1, active_track_id);
+                ok = (sqlite3_step(del_stmt) == SQLITE_DONE);
+                sqlite3_finalize(del_stmt);
+            } else {
+                ok = false;
+            }
+            if (ok) {
+                ok = compact_playback_queue_locked(database->handle, NULL);
+            }
+            if (ok) {
+                ok = execute_sql(
+                    database->handle,
+                    "INSERT INTO playback_queue(slot, track_id) "
+                    "SELECT COALESCE((SELECT MAX(slot) + 1 FROM playback_queue), 0) "
+                    "+ (ROW_NUMBER() OVER () - 1), t.track_id "
+                    "FROM _pq_target t "
+                    "WHERE t.track_id NOT IN (SELECT track_id FROM playback_queue);");
+            }
+        } else {
+            ok = execute_sql(database->handle, "DELETE FROM playback_queue;");
+            if (ok) {
+                char rebuild_sql[512];
+                snprintf(rebuild_sql, sizeof(rebuild_sql),
+                         "INSERT INTO playback_queue(slot, track_id) "
+                         "SELECT (ROW_NUMBER() OVER () - 1), track_id FROM (%s);",
+                         base_sql);
+                sqlite3_stmt *statement = NULL;
+                if (sqlite3_prepare_v2(database->handle, rebuild_sql, -1, &statement, NULL) ==
+                    SQLITE_OK) {
+                    if (needs_context) {
+                        sqlite3_bind_int64(statement, 1, collection->context_id);
+                    }
+                    ok = (sqlite3_step(statement) == SQLITE_DONE);
+                    sqlite3_finalize(statement);
+                } else {
+                    ok = false;
+                }
+            }
+            if (ok && active_track_id > 0 && !active_in_target) {
+                ok = execute_sql(database->handle, "UPDATE playback_queue SET slot = slot + 1;");
+                if (ok) {
+                    sqlite3_stmt *ephem_stmt = NULL;
+                    if (sqlite3_prepare_v2(database->handle,
+                                           "INSERT INTO playback_queue(slot, track_id) "
+                                           "VALUES(0, ?1);",
+                                           -1, &ephem_stmt, NULL) == SQLITE_OK) {
+                        sqlite3_bind_int64(ephem_stmt, 1, active_track_id);
+                        ok = (sqlite3_step(ephem_stmt) == SQLITE_DONE);
+                        sqlite3_finalize(ephem_stmt);
+                    } else {
+                        ok = false;
+                    }
+                }
+            }
+        }
+    }
+
+    (void)execute_sql(database->handle, "DELETE FROM _pq_target;");
+    uint32_t total = 0u;
+    uint32_t found_slot = 0u;
+    if (ok) {
+        total = query_queue_count_locked(database->handle);
+        if (active_track_id > 0) {
+            (void)find_queue_slot_by_track_id_locked(database->handle, active_track_id,
+                                                     &found_slot);
+        }
+        ok = execute_sql(database->handle, "COMMIT;");
+    } else {
+        (void)execute_sql(database->handle, "ROLLBACK;");
+    }
+    pthread_mutex_unlock(&database->mutex);
+
+    if (ok) {
+        if (slot_out != NULL) {
+            *slot_out = found_slot;
+        }
+        if (total_out != NULL) {
+            *total_out = total;
+        }
+    }
+    return ok;
+}
+
+bool library_db_drop_queue_slot(struct library_db *database, uint32_t slot, uint32_t *total_out) {
+    if (database == NULL || database->handle == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    if (!execute_sql(database->handle, "BEGIN IMMEDIATE;")) {
+        pthread_mutex_unlock(&database->mutex);
+        return false;
+    }
+    sqlite3_stmt *statement = NULL;
+    bool ok = false;
+    if (sqlite3_prepare_v2(database->handle, "DELETE FROM playback_queue WHERE slot = ?1;", -1,
+                           &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(statement, 1, (int)slot);
+        ok = (sqlite3_step(statement) == SQLITE_DONE);
+        sqlite3_finalize(statement);
+    }
+    if (ok) {
+        ok = compact_playback_queue_locked(database->handle, total_out);
+    }
+    if (ok) {
+        ok = execute_sql(database->handle, "COMMIT;");
+    } else {
+        (void)execute_sql(database->handle, "ROLLBACK;");
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return ok;
+}
+
+bool library_db_ensure_default_playlist(struct library_db *database, int64_t *playlist_id_out) {
+    if (database == NULL || database->handle == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    uint32_t existing = 0u;
+    sqlite3_stmt *count_stmt = NULL;
+    if (sqlite3_prepare_v2(database->handle,
+                           "SELECT COUNT(*) FROM playlists WHERE is_dismissed = 0;", -1,
+                           &count_stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+            existing = (uint32_t)sqlite3_column_int(count_stmt, 0);
+        }
+        sqlite3_finalize(count_stmt);
+    }
+    if (existing > 0u) {
+        if (playlist_id_out != NULL) {
+            sqlite3_stmt *first_stmt = NULL;
+            if (sqlite3_prepare_v2(database->handle,
+                                   "SELECT id FROM playlists WHERE is_dismissed = 0 "
+                                   "ORDER BY name_sort ASC LIMIT 1;",
+                                   -1, &first_stmt, NULL) == SQLITE_OK) {
+                if (sqlite3_step(first_stmt) == SQLITE_ROW) {
+                    *playlist_id_out = sqlite3_column_int64(first_stmt, 0);
+                }
+                sqlite3_finalize(first_stmt);
+            }
+        }
+        pthread_mutex_unlock(&database->mutex);
+        return true;
+    }
+
+    const char *default_name = "DialOS Crate";
+    uint64_t playlist_uid = hash_two_part_uid("playlist", default_name, "user:default");
+    char name_sort[SORT_KEY_BYTES];
+    build_sort_key(default_name, name_sort, sizeof(name_sort));
+    sqlite3_stmt *insert_stmt = NULL;
+    bool ok = false;
+    if (sqlite3_prepare_v2(database->handle,
+                           "INSERT INTO playlists(playlist_uid, name, name_sort, source_m3u, "
+                           "is_dismissed, track_count) VALUES(?1, ?2, ?3, NULL, 0, 0) "
+                           "ON CONFLICT(playlist_uid) DO UPDATE SET is_dismissed = 0;",
+                           -1, &insert_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(insert_stmt, 1, (sqlite3_int64)playlist_uid);
+        sqlite3_bind_text(insert_stmt, 2, default_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(insert_stmt, 3, name_sort, -1, SQLITE_STATIC);
+        ok = (sqlite3_step(insert_stmt) == SQLITE_DONE);
+        sqlite3_finalize(insert_stmt);
+    }
+    if (ok && playlist_id_out != NULL) {
+        sqlite3_stmt *id_stmt = NULL;
+        if (sqlite3_prepare_v2(database->handle,
+                               "SELECT id FROM playlists WHERE playlist_uid = ?1;", -1, &id_stmt,
+                               NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(id_stmt, 1, (sqlite3_int64)playlist_uid);
+            if (sqlite3_step(id_stmt) == SQLITE_ROW) {
+                *playlist_id_out = sqlite3_column_int64(id_stmt, 0);
+            }
+            sqlite3_finalize(id_stmt);
+        }
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return ok;
+}
+
+uint32_t library_db_list_playlists_for_track(struct library_db *database, int64_t track_id,
+                                             uint32_t offset, uint32_t limit,
+                                             struct library_db_playlist_membership *items_out,
+                                             uint32_t *total_out) {
+    if (total_out != NULL) {
+        *total_out = 0u;
+    }
+    if (database == NULL || database->handle == NULL || items_out == NULL || limit == 0u) {
+        return 0u;
+    }
+    pthread_mutex_lock(&database->mutex);
+    if (total_out != NULL) {
+        sqlite3_stmt *count_stmt = NULL;
+        if (sqlite3_prepare_v2(database->handle,
+                               "SELECT COUNT(*) FROM playlists WHERE is_dismissed = 0;", -1,
+                               &count_stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+                *total_out = (uint32_t)sqlite3_column_int(count_stmt, 0);
+            }
+            sqlite3_finalize(count_stmt);
+        }
+    }
+    sqlite3_stmt *statement = NULL;
+    uint32_t count = 0u;
+    if (sqlite3_prepare_v2(
+            database->handle,
+            "SELECT p.id, p.name, p.track_count, "
+            "EXISTS(SELECT 1 FROM playlist_tracks pt "
+            "WHERE pt.playlist_id = p.id AND pt.track_id = ?1) "
+            "FROM playlists p WHERE p.is_dismissed = 0 "
+            "ORDER BY p.name_sort ASC, p.id ASC LIMIT ?2 OFFSET ?3;",
+            -1, &statement, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(statement, 1, track_id);
+        sqlite3_bind_int(statement, 2, (int)limit);
+        sqlite3_bind_int(statement, 3, (int)offset);
+        while (count < limit && sqlite3_step(statement) == SQLITE_ROW) {
+            struct library_db_playlist_membership *item = &items_out[count];
+            memset(item, 0, sizeof(*item));
+            item->playlist_id = sqlite3_column_int64(statement, 0);
+            const char *name = (const char *)sqlite3_column_text(statement, 1);
+            copy_text_bounded(item->name, sizeof(item->name), name != NULL ? name : "");
+            item->track_count = (uint32_t)sqlite3_column_int(statement, 2);
+            item->contains_track = (sqlite3_column_int(statement, 3) != 0);
+            count++;
+        }
+        sqlite3_finalize(statement);
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return count;
+}
+
+bool library_db_toggle_track_in_playlist(struct library_db *database, int64_t playlist_id,
+                                         int64_t track_id, bool *added_out) {
+    if (database == NULL || database->handle == NULL || playlist_id <= 0 || track_id <= 0) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    if (!execute_sql(database->handle, "BEGIN IMMEDIATE;")) {
+        pthread_mutex_unlock(&database->mutex);
+        return false;
+    }
+
+    bool exists = false;
+    sqlite3_stmt *check_stmt = NULL;
+    if (sqlite3_prepare_v2(database->handle,
+                           "SELECT 1 FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2 "
+                           "LIMIT 1;",
+                           -1, &check_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(check_stmt, 1, playlist_id);
+        sqlite3_bind_int64(check_stmt, 2, track_id);
+        exists = (sqlite3_step(check_stmt) == SQLITE_ROW);
+        sqlite3_finalize(check_stmt);
+    }
+
+    bool ok = false;
+    bool added = false;
+    if (exists) {
+        sqlite3_stmt *del_stmt = NULL;
+        if (sqlite3_prepare_v2(database->handle,
+                               "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2;",
+                               -1, &del_stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(del_stmt, 1, playlist_id);
+            sqlite3_bind_int64(del_stmt, 2, track_id);
+            ok = (sqlite3_step(del_stmt) == SQLITE_DONE);
+            sqlite3_finalize(del_stmt);
+        }
+    } else {
+        added = true;
+        sqlite3_stmt *ins_stmt = NULL;
+        if (sqlite3_prepare_v2(
+                database->handle,
+                "INSERT INTO playlist_tracks(playlist_id, position, track_id) "
+                "VALUES(?1, COALESCE((SELECT MAX(position) + 1 FROM playlist_tracks "
+                "WHERE playlist_id = ?1), 0), ?2);",
+                -1, &ins_stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(ins_stmt, 1, playlist_id);
+            sqlite3_bind_int64(ins_stmt, 2, track_id);
+            ok = (sqlite3_step(ins_stmt) == SQLITE_DONE);
+            sqlite3_finalize(ins_stmt);
+        }
+    }
+
+    if (ok) {
+        sqlite3_stmt *upd_stmt = NULL;
+        if (sqlite3_prepare_v2(
+                database->handle,
+                "UPDATE playlists SET track_count = (SELECT COUNT(*) FROM playlist_tracks "
+                "WHERE playlist_id = ?1) WHERE id = ?1;",
+                -1, &upd_stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(upd_stmt, 1, playlist_id);
+            ok = (sqlite3_step(upd_stmt) == SQLITE_DONE);
+            sqlite3_finalize(upd_stmt);
+        } else {
+            ok = false;
+        }
+    }
+
+    if (ok) {
+        ok = execute_sql(database->handle, "COMMIT;");
+    } else {
+        (void)execute_sql(database->handle, "ROLLBACK;");
+    }
+    pthread_mutex_unlock(&database->mutex);
+
+    if (ok && added_out != NULL) {
+        *added_out = added;
+    }
+    return ok;
+}
+
+bool library_db_save_playback_state(struct library_db *database,
+                                    const struct library_db_playback_state *state) {
+    if (database == NULL || database->handle == NULL || state == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&database->mutex);
+    if (!execute_sql(database->handle, "BEGIN IMMEDIATE;")) {
+        pthread_mutex_unlock(&database->mutex);
+        return false;
+    }
+
+    char buffer[32];
+    bool ok = true;
+    if (state->has_volume) {
+        snprintf(buffer, sizeof(buffer), "%u", (unsigned)state->volume_level);
+        ok = ok && set_meta_value(database->handle, "playback_volume", buffer);
+    }
+    ok = ok && set_meta_value(database->handle, "playback_shuffle",
+                              state->shuffle_enabled ? "1" : "0");
+    snprintf(buffer, sizeof(buffer), "%u", (unsigned)state->repeat_mode);
+    ok = ok && set_meta_value(database->handle, "playback_repeat", buffer);
+    ok = ok && set_meta_value(database->handle, "playback_active",
+                              state->has_active_queue ? "1" : "0");
+    snprintf(buffer, sizeof(buffer), "%d", (int)state->context_kind);
+    ok = ok && set_meta_value(database->handle, "playback_ctx_kind", buffer);
+    snprintf(buffer, sizeof(buffer), "%lld", (long long)state->context_id);
+    ok = ok && set_meta_value(database->handle, "playback_ctx_id", buffer);
+    ok = ok && set_meta_value(database->handle, "playback_ctx_title", state->context_title);
+    snprintf(buffer, sizeof(buffer), "%u", (unsigned)state->current_slot);
+    ok = ok && set_meta_value(database->handle, "playback_slot", buffer);
+    snprintf(buffer, sizeof(buffer), "%lld", (long long)state->active_track_id);
+    ok = ok && set_meta_value(database->handle, "playback_track_id", buffer);
+    snprintf(buffer, sizeof(buffer), "%u", (unsigned)state->elapsed_ms);
+    ok = ok && set_meta_value(database->handle, "playback_elapsed_ms", buffer);
+
+    if (ok) {
+        ok = execute_sql(database->handle, "COMMIT;");
+    } else {
+        (void)execute_sql(database->handle, "ROLLBACK;");
+    }
+    pthread_mutex_unlock(&database->mutex);
+    return ok;
+}
+
+bool library_db_load_playback_state(struct library_db *database,
+                                    struct library_db_playback_state *state_out) {
+    if (database == NULL || database->handle == NULL || state_out == NULL) {
+        return false;
+    }
+    memset(state_out, 0, sizeof(*state_out));
+    pthread_mutex_lock(&database->mutex);
+    char value[TRACK_METADATA_TEXT_CAPACITY];
+    if (get_meta_value(database->handle, "playback_volume", value, sizeof(value))) {
+        long parsed = strtol(value, NULL, 10);
+        if (parsed >= 0 && parsed <= (long)VOLUME_HARD_MAX) {
+            state_out->has_volume = true;
+            state_out->volume_level = (uint8_t)parsed;
+        }
+    }
+    if (get_meta_value(database->handle, "playback_shuffle", value, sizeof(value))) {
+        state_out->shuffle_enabled = (strcmp(value, "1") == 0);
+    }
+    if (get_meta_value(database->handle, "playback_repeat", value, sizeof(value))) {
+        long parsed = strtol(value, NULL, 10);
+        if (parsed >= 0 && parsed <= (long)PLAYBACK_REPEAT_ONE) {
+            state_out->repeat_mode = (enum playback_repeat_mode)parsed;
+        }
+    }
+    if (get_meta_value(database->handle, "playback_active", value, sizeof(value))) {
+        state_out->has_active_queue = (strcmp(value, "1") == 0);
+    }
+    if (get_meta_value(database->handle, "playback_ctx_kind", value, sizeof(value))) {
+        state_out->context_kind = (enum library_db_collection_kind)strtol(value, NULL, 10);
+    }
+    if (get_meta_value(database->handle, "playback_ctx_id", value, sizeof(value))) {
+        state_out->context_id = (int64_t)strtoll(value, NULL, 10);
+    }
+    if (get_meta_value(database->handle, "playback_ctx_title", value, sizeof(value))) {
+        copy_text_bounded(state_out->context_title, sizeof(state_out->context_title), value);
+    }
+    if (get_meta_value(database->handle, "playback_slot", value, sizeof(value))) {
+        long parsed = strtol(value, NULL, 10);
+        if (parsed >= 0) {
+            state_out->current_slot = (uint32_t)parsed;
+        }
+    }
+    if (get_meta_value(database->handle, "playback_track_id", value, sizeof(value))) {
+        state_out->active_track_id = (int64_t)strtoll(value, NULL, 10);
+    }
+    if (get_meta_value(database->handle, "playback_elapsed_ms", value, sizeof(value))) {
+        unsigned long parsed = strtoul(value, NULL, 10);
+        state_out->elapsed_ms = (uint32_t)parsed;
+    }
     pthread_mutex_unlock(&database->mutex);
     return true;
 }

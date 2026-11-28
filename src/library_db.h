@@ -1,6 +1,8 @@
 #ifndef DIALOS_LIBRARY_DB_H
 #define DIALOS_LIBRARY_DB_H
 
+#include "constants.h"
+
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -91,6 +93,55 @@ enum library_db_favorite_kind {
 enum library_db_sort_scope {
     LIBRARY_DB_SORT_SCOPE_ALBUMS = 0,
     LIBRARY_DB_SORT_SCOPE_ARTISTS = 1
+};
+
+enum playback_repeat_mode {
+    PLAYBACK_REPEAT_OFF = 0,
+    PLAYBACK_REPEAT_ALL = 1,
+    PLAYBACK_REPEAT_ONE = 2
+};
+
+struct library_db_track_details {
+    int64_t track_id;
+    int64_t album_id;
+    uint64_t album_uid;
+    uint8_t format_kind;
+    uint8_t motif_id;
+    uint8_t cover_source_kind;
+    uint8_t cover_cache_status;
+    bool is_favorite;
+    uint16_t year;
+    uint16_t disc_number;
+    uint16_t track_number;
+    uint32_t album_track_count;
+    uint32_t duration_seconds;
+    uint64_t file_size_bytes;
+    char title[TRACK_TITLE_CAPACITY];
+    char artist[TRACK_METADATA_TEXT_CAPACITY];
+    char album[TRACK_METADATA_TEXT_CAPACITY];
+    char genre[TRACK_METADATA_TEXT_CAPACITY];
+    char path[LIBRARY_DB_PATH_BYTES];
+};
+
+struct library_db_playlist_membership {
+    int64_t playlist_id;
+    char name[LIBRARY_DB_ROW_TEXT_BYTES];
+    uint32_t track_count;
+    bool contains_track;
+};
+
+struct library_db_playback_state {
+    bool has_volume;
+    uint8_t volume_level;
+    bool shuffle_enabled;
+    enum playback_repeat_mode repeat_mode;
+    bool has_active_queue;
+    enum library_db_collection_kind context_kind;
+    int64_t context_id;
+    char context_title[TRACK_METADATA_TEXT_CAPACITY];
+    uint32_t current_slot;
+    int64_t active_track_id;
+    uint32_t elapsed_ms;
 };
 
 struct library_db {
@@ -263,5 +314,50 @@ bool library_db_apply_sidecar_cover(struct library_db *database, const char *dir
 
 /* Opens a read-only stream with O_NOATIME when supported so FAT32 atime never dirties inodes. */
 FILE *library_fopen_readonly_noatime(const char *path);
+
+/* Track details, SQLite-backed playback queue, playlist picker CRUD, and reboot persistence. */
+bool library_db_get_track_details(struct library_db *database, int64_t track_id,
+                                  struct library_db_track_details *details_out);
+bool library_db_get_track_details_by_path(struct library_db *database, const char *path,
+                                          struct library_db_track_details *details_out);
+
+bool library_db_build_playback_queue(struct library_db *database,
+                                     const struct library_db_collection *collection,
+                                     int64_t anchor_track_id, bool shuffle, uint32_t *slot_out,
+                                     uint32_t *total_out);
+bool library_db_reshuffle_playback_queue(struct library_db *database, int64_t anchor_track_id,
+                                         int64_t avoid_first_track_id, uint32_t *total_out);
+bool library_db_restore_playback_queue_order(struct library_db *database,
+                                             const struct library_db_collection *collection,
+                                             int64_t active_track_id, bool ephemeral_active,
+                                             uint32_t *slot_out, uint32_t *total_out);
+uint32_t library_db_playback_queue_count(struct library_db *database);
+bool library_db_get_queue_track(struct library_db *database, uint32_t slot,
+                                struct library_db_track_details *details_out);
+bool library_db_find_queue_slot_by_path(struct library_db *database, const char *path,
+                                        uint32_t *slot_out);
+uint32_t library_db_fetch_queue_window(struct library_db *database, uint32_t offset, uint32_t limit,
+                                       struct library_db_row *rows_out);
+bool library_db_write_queue_slice_m3u(struct library_db *database, uint32_t start_slot,
+                                      uint32_t max_tracks, FILE *output, uint32_t *written_out);
+bool library_db_reconcile_playback_queue(struct library_db *database,
+                                         const struct library_db_collection *collection,
+                                         int64_t active_track_id, bool shuffle_enabled,
+                                         uint32_t *slot_out, uint32_t *total_out,
+                                         bool *active_became_ephemeral_out);
+bool library_db_drop_queue_slot(struct library_db *database, uint32_t slot, uint32_t *total_out);
+
+bool library_db_ensure_default_playlist(struct library_db *database, int64_t *playlist_id_out);
+uint32_t library_db_list_playlists_for_track(struct library_db *database, int64_t track_id,
+                                             uint32_t offset, uint32_t limit,
+                                             struct library_db_playlist_membership *items_out,
+                                             uint32_t *total_out);
+bool library_db_toggle_track_in_playlist(struct library_db *database, int64_t playlist_id,
+                                         int64_t track_id, bool *added_out);
+
+bool library_db_save_playback_state(struct library_db *database,
+                                    const struct library_db_playback_state *state);
+bool library_db_load_playback_state(struct library_db *database,
+                                    struct library_db_playback_state *state_out);
 
 #endif

@@ -835,7 +835,9 @@ static bool step_back_internal(struct library_controller *controller,
 
 static void emit_play_collection(struct library_controller *controller,
                                  struct library_db_collection collection, uint32_t start_offset,
-                                 bool shuffle, struct library_controller_action *action_out) {
+                                 bool has_shuffle_override, bool shuffle,
+                                 const char *context_title, bool from_album_crate,
+                                 struct library_controller_action *action_out) {
     if (controller == NULL || controller->database == NULL || action_out == NULL) {
         return;
     }
@@ -847,7 +849,11 @@ static void emit_play_collection(struct library_controller *controller,
     action_out->kind = LIBRARY_ACTION_PLAY_TRACKS;
     action_out->play_collection = collection;
     action_out->play_start_offset = start_offset;
+    action_out->play_has_shuffle_override = has_shuffle_override;
     action_out->play_shuffle = shuffle;
+    action_out->play_from_album_crate = from_album_crate;
+    snprintf(action_out->play_context_title, sizeof(action_out->play_context_title), "%s",
+             context_title != NULL ? context_title : "");
     action_out->play_first_track_id = first_row.id;
     action_out->play_first_album_id = first_row.album_id;
     action_out->play_first_album_uid = first_row.uid;
@@ -1066,7 +1072,8 @@ static void handle_list_row_tap(struct library_controller *controller,
         if (controller->has_active_track && controller->active_track_id == row.id) {
             action_out->kind = LIBRARY_ACTION_TOGGLE_PLAY_PAUSE;
         } else {
-            emit_play_collection(controller, view->collection, row_index, false, action_out);
+            emit_play_collection(controller, view->collection, row_index, false, false, view->title,
+                                 false, action_out);
         }
         return;
     }
@@ -1291,8 +1298,10 @@ void library_controller_step(struct library_controller *controller, float delta_
             controller->pointer_active = false;
             controller->delete_completed_flash = 1.0f;
             if (controller->database != NULL) {
-                (void)library_db_delete_playlist(controller->database,
-                                                 controller->playlist_sheet_id);
+                if (library_db_delete_playlist(controller->database,
+                                               controller->playlist_sheet_id)) {
+                    controller->pending_deleted_playlist_id = controller->playlist_sheet_id;
+                }
                 sync_cached_db_metadata(controller);
             }
             struct library_view_frame *v =
@@ -1824,8 +1833,8 @@ void library_controller_handle_touch(struct library_controller *controller,
                     controller->playlist_sheet_open = false;
                     struct library_db_collection pl_collection = {
                         LIBRARY_DB_COLLECTION_TRACKS_PLAYLIST, playlist_id};
-                    emit_play_collection(controller, pl_collection, 0u, (pressed_btn == 1),
-                                         action_out);
+                    emit_play_collection(controller, pl_collection, 0u, true, (pressed_btn == 1),
+                                         controller->playlist_sheet_name, false, action_out);
                 }
             }
             return;
@@ -1864,6 +1873,7 @@ void library_controller_handle_touch(struct library_controller *controller,
                 }
                 controller->quick_action_auto_close_timer = LIBRARY_QUICK_ACTION_AUTO_CLOSE_SECONDS;
                 if (action_out != NULL) {
+                    action_out->favorite_mutated = true;
                     action_out->state_dirty = true;
                 }
             } else if (is_tap && !point_in_circle(event->x, event->y, (float)SCREEN_CENTER_X,
@@ -1969,11 +1979,12 @@ void library_controller_handle_touch(struct library_controller *controller,
                                                &album_row)) {
                         if (controller->has_active_track &&
                             controller->active_album_id == album_row.id) {
-                            action_out->kind = LIBRARY_ACTION_TOGGLE_PLAY_PAUSE;
+                            action_out->kind = LIBRARY_ACTION_OPEN_NOW_PLAYING;
                         } else {
                             struct library_db_collection album_tracks = {
                                 LIBRARY_DB_COLLECTION_TRACKS_ALBUM, album_row.id};
-                            emit_play_collection(controller, album_tracks, 0u, false, action_out);
+                            emit_play_collection(controller, album_tracks, 0u, false, false,
+                                                 album_row.title, true, action_out);
                         }
                     }
                 }
@@ -2026,5 +2037,46 @@ void library_controller_handle_touch(struct library_controller *controller,
             controller->tap_flash_intensity = 1.0f;
             handle_list_row_tap(controller, view, (uint32_t)row, action_out);
         }
+    }
+}
+
+int64_t library_controller_take_deleted_playlist_id(struct library_controller *controller) {
+    if (controller == NULL) {
+        return 0;
+    }
+    int64_t deleted_id = controller->pending_deleted_playlist_id;
+    controller->pending_deleted_playlist_id = 0;
+    return deleted_id;
+}
+
+void library_controller_focus_album_if_crate(struct library_controller *controller,
+                                             int64_t album_id) {
+    if (controller == NULL || controller->database == NULL || album_id <= 0 ||
+        controller->stack_depth == 0u) {
+        return;
+    }
+    struct library_view_frame *view = &controller->view_stack[controller->stack_depth - 1u];
+    if (view->kind != LIB_VIEW_ALBUMS || view->item_count == 0u) {
+        return;
+    }
+    enum library_sort_mode sort_mode = library_controller_effective_sort_mode(controller, view);
+    uint32_t offset = 0u;
+    while (offset < view->item_count) {
+        struct library_db_row batch[64];
+        uint32_t fetched = library_db_fetch_window(controller->database, &view->collection,
+                                                   sort_mode, offset, 64u, batch);
+        if (fetched == 0u) {
+            break;
+        }
+        for (uint32_t index = 0u; index < fetched; index++) {
+            if (batch[index].id == album_id) {
+                uint32_t matched_index = offset + index;
+                view->target_index = (int32_t)matched_index;
+                view->scroll_position = (float)matched_index;
+                maybe_schedule_viewport_prefetch(controller, view);
+                return;
+            }
+        }
+        offset += fetched;
     }
 }
